@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="91.311172mm"
+   height="75.082893mm"
+   viewBox="0 0 91.311172 75.082893"
+   version="1.1"
+   id="svg1"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs1">
+    <marker
+       style="overflow:visible"
+       id="Dot"
+       refX="0"
+       refY="0"
+       orient="auto"
+       markerWidth="0.001"
+       markerHeight="0.001"
+       viewBox="0 0 1 1"
+       preserveAspectRatio="xMidYMid">
+      <path
+         transform="scale(0.5)"
+         style="fill:context-stroke;fill-rule:evenodd;stroke:none"
+         d="M 5,0 C 5,2.76 2.76,5 0,5 -2.76,5 -5,2.76 -5,0 c 0,-2.76 2.3,-5 5,-5 2.76,0 5,2.24 5,5 z"
+         id="path17" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="Dot-4"
+       refX="0"
+       refY="0"
+       orient="auto"
+       markerWidth="0.001"
+       markerHeight="0.001"
+       viewBox="0 0 1 1"
+       preserveAspectRatio="xMidYMid">
+      <path
+         transform="scale(0.5)"
+         style="fill:context-stroke;fill-rule:evenodd;stroke:none"
+         d="M 5,0 C 5,2.76 2.76,5 0,5 -2.76,5 -5,2.76 -5,0 c 0,-2.76 2.3,-5 5,-5 2.76,0 5,2.24 5,5 z"
+         id="path17-8" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="Dot-4-1"
+       refX="0"
+       refY="0"
+       orient="auto"
+       markerWidth="0.001"
+       markerHeight="0.001"
+       viewBox="0 0 1 1"
+       preserveAspectRatio="xMidYMid">
+      <path
+         transform="scale(0.5)"
+         style="fill:context-stroke;fill-rule:evenodd;stroke:none"
+         d="M 5,0 C 5,2.76 2.76,5 0,5 -2.76,5 -5,2.76 -5,0 c 0,-2.76 2.3,-5 5,-5 2.76,0 5,2.24 5,5 z"
+         id="path17-8-7" />
+    </marker>
+  </defs>
+  <g
+     id="layer1"
+     transform="translate(-33.286797,-55.000553)">
+    <path
+       style="fill:#ffffff;stroke:#000000;stroke-width:22.4896;stroke-linecap:round;marker-end:url(#Dot)"
+       d="M 44.531597,66.245353 H 113.35316"
+       id="path1" />
+    <path
+       style="fill:#ffffff;stroke:#000000;stroke-width:22.4896;stroke-linecap:round;marker-end:url(#Dot-4)"
+       d="M 44.531597,92.513628 H 113.35316"
+       id="path1-4" />
+    <path
+       style="fill:#ffffff;stroke:#000000;stroke-width:22.4896;stroke-linecap:round;marker-end:url(#Dot-4-1)"
+       d="M 44.531597,118.83865 H 113.35317"
+       id="path1-4-5" />
+  </g>
+</svg>
