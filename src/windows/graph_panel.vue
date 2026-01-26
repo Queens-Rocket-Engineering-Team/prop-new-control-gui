@@ -9,12 +9,12 @@ const selected_options = ref([]);
 import Chart from 'primevue/chart';
 
 const chartData = ref({
-  labels: ['70s', '60s', '50s', '40s', '30s', '20s', '10s'],
+  labels: ["10s", "9s", "8s", "7s", "6s", "5s", "4s", "3s", "2s", "1s"],
   datasets: [
     {
       label: 'Sample Data',
       backgroundColor: '#42A5F5',
-      data: [1, 0, 39, 10, 40, 39, 80, 40]
+      data: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     }
   ]
 });
@@ -24,7 +24,25 @@ const chartOptions = ref({
   maintainAspectRatio: false
 });
 
-onMounted()
+function simulate_data() {
+  // This function simulates data updates for the chart
+  ws.send(JSON.stringify({ data: [...chartData.value.datasets[0].data.slice(1), Math.floor(Math.random() * 1000)] }));
+}
+
+//websocket simulation
+const ws = new WebSocket('wss://echo.websocket.org');
+ws.onopen = () => console.log('Connected');
+ws.onmessage = (event) => update_chart(JSON.parse(event.data));
+ws.onerror = (error) => console.error('WebSocket error:', error);
+ws.onclose = () => console.log('Disconnected');
+
+function update_chart(new_data) {
+  chartData.value.datasets[0].data = new_data.data;
+}
+
+onMounted(() => {
+    setInterval(() => simulate_data(), 1000);
+});
 
 </script>
 
