@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 //import the windows as they are defined in their own vue files
