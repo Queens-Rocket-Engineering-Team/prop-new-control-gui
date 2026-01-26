@@ -1,13 +1,19 @@
 <script setup>
 import MultiSelect from 'primevue/multiselect';
 import { onMounted, ref } from 'vue';
-
-const place_holder = ref(['Option 1', 'Option 2', 'Option 3']);
-const selected_options = ref([]);
-
-//TODO: fix imports later, make em pretty
 import Chart from 'primevue/chart';
 
+const place_holder = ref([]);
+const selected_options = ref([]);
+
+function get_data_streams() {
+    //placeholder function to get available data streams
+    place_holder.value = ['Option 1', 'Option 2', 'Option 3']
+}
+
+
+
+//=============================PLACEHOLDER CHART SETUP=============================//
 const chartData = ref({
   labels: ["10s", "9s", "8s", "7s", "6s", "5s", "4s", "3s", "2s", "1s"],
   datasets: [
@@ -24,23 +30,25 @@ const chartOptions = ref({
   maintainAspectRatio: false
 });
 
-function simulate_data() {
-  // This function simulates data updates for the chart
-  ws.send(JSON.stringify({ data: [...chartData.value.datasets[0].data.slice(1), Math.floor(Math.random() * 1000)] }));
-}
 
-//websocket simulation
+//============================PLACEHOLDER WEBSOCKET SIMULATION============================//
 const ws = new WebSocket('wss://echo.websocket.org');
 ws.onopen = () => console.log('Connected');
 ws.onmessage = (event) => update_chart(JSON.parse(event.data));
 ws.onerror = (error) => console.error('WebSocket error:', error);
 ws.onclose = () => console.log('Disconnected');
 
+function simulate_data() {
+  // This function simulates data updates for the chart
+  ws.send(JSON.stringify({ data: [...chartData.value.datasets[0].data.slice(1), Math.floor(Math.random() * 1000)] }));
+}
+
 function update_chart(new_data) {
   chartData.value.datasets[0].data = new_data.data;
 }
 
 onMounted(() => {
+    fetch_data_streams();
     setInterval(() => simulate_data(), 1000);
 });
 
