@@ -1,5 +1,6 @@
 <script setup>
 import MultiSelect from 'primevue/multiselect';
+import { invoke } from "@tauri-apps/api/core";
 import { onMounted, ref } from 'vue';
 import Chart from 'primevue/chart';
 
@@ -31,13 +32,15 @@ const chartOptions = ref({
   maintainAspectRatio: false,
 });
 
+let server_ip;
+
+
 
 //============================PLACEHOLDER WEBSOCKET SIMULATION============================//
-const ws = new WebSocket('wss://echo.websocket.org');
-ws.onopen = () => console.log('Connected');
-ws.onmessage = (event) => update_chart(JSON.parse(event.data));
-ws.onerror = (error) => console.error('WebSocket error:', error);
-ws.onclose = () => console.log('Disconnected');
+// This should be the correct websocket connection to the data stream server
+
+let ws;
+
 
 function simulate_data() {
   // This function simulates data updates for the chart
@@ -49,14 +52,28 @@ function update_chart(new_data) {
 }
 
 onMounted(() => {
+    invoke("fetch_server_ip").then((ip) => {
+          server_ip = ip;
+            ws = new WebSocket(`ws://${server_ip}:8000/ws/logs`);
+    ws.onopen = () => console.log('Connected');
+    // ws.onmessage = (event) => update_chart(JSON.parse(event.data));
+    ws.onmessage = (event) => {
+        console.log(JSON.parse(event.data).data);
+    };
+    ws.onerror = (error) => console.error('WebSocket error:', error);
+    ws.onclose = () => console.log('Disconnected');
+      });
     fetch_data_streams();
     setInterval(() => simulate_data(), 1000);
+
+
 });
 
 </script>
 
 <template>
     <div id="graph_view">
+        <button @click="fetch_data_streams()">Refresh Data Streams</button>
         <MultiSelect v-model="selected_options" :options="place_holder" placeholder="Select Datastreams to Display" class=""/>
         <br />
         <p>Placeholder for where graphs and datastreams will go</p>
