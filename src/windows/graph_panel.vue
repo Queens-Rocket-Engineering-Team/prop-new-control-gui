@@ -6,9 +6,9 @@ import Chart from 'primevue/chart';
 const place_holder = ref([]);
 const selected_options = ref([]);
 
-function get_data_streams() {
+function fetch_data_streams() {
     //placeholder function to get available data streams
-    place_holder.value = ['Option 1', 'Option 2', 'Option 3']
+    place_holder.value = ['Option 1', 'Option 2', 'Option 3', 4, 5, 6, 7, 8, 9, 10];
 }
 
 
@@ -19,7 +19,8 @@ const chartData = ref({
   datasets: [
     {
       label: 'Sample Data',
-      backgroundColor: '#42A5F5',
+      backgroundColor: '#396cd8',
+      borderColor: '#396cd8',
       data: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     }
   ]
@@ -27,7 +28,7 @@ const chartData = ref({
 
 const chartOptions = ref({
   responsive: true,
-  maintainAspectRatio: false
+  maintainAspectRatio: false,
 });
 
 
@@ -55,7 +56,7 @@ onMounted(() => {
 </script>
 
 <template>
-    <div>
+    <div id="graph_view">
         <MultiSelect v-model="selected_options" :options="place_holder" placeholder="Select Datastreams to Display" class=""/>
         <br />
         <p>Placeholder for where graphs and datastreams will go</p>
@@ -69,3 +70,18 @@ onMounted(() => {
     
     
 </template>
+
+<style scoped>
+  #graph_view {
+        overflow: scroll;
+  }
+
+  :deep(.p-chart) {
+    height: 300px;
+    background-color: #fff;
+    border-top: #2d5868 2px solid;
+    border-left: #2d5868 2px solid;
+    border-bottom: #2d5868 2px solid;
+    border-radius: 10px 10px 10px 10px;
+  }
+</style>
