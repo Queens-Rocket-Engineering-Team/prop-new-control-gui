@@ -25,7 +25,7 @@ onMounted(() => {
       //Currently filtering for only logs
       //TODO send these to some kind of terminal later
       if (parsed.channel == "logs") {
-        update_chart_data(parsed.name, parsed.value);
+        update_chart_data(parsed.data.split(" ")[2]);
       }
     };
     ws.onerror = (error) => console.error('WebSocket error:', error);
@@ -34,7 +34,10 @@ onMounted(() => {
   fetch_data_streams();
 });
 
-function update_chart_data(name, value) {
+function update_chart_data(data_string) {
+  // Example data_string: "PTCombustionChamber:250.5"
+  let [name, value_str] = data_string.split(":");
+  let value = parseFloat(value_str);
   let chart = chart_array.value.find(chart => chart.name === name);
   if (chart) {
     chart.data.datasets[0].data = [...chart.data.datasets[0].data.slice(1), value];
