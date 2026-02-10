@@ -11,7 +11,7 @@ import DebugPanel from "./windows/debug_panel.vue";
 import FlightPanel from "./windows/flight_panel.vue";
 
 //import complex components to clean up code.
-//to note, if componetns are to be used in the <template> below, they must be imported 
+//to note, if components are to be used in the <template> below, they must be imported 
 //in pascal case, and then used in kebab-case.
 import ServerBar from "./components/server_bar.vue";
 
@@ -67,5 +67,3 @@ function get_ip(new_ip) {
       <server-bar @update-ip="get_ip"></server-bar>
   </main>
 </template>
-
-
