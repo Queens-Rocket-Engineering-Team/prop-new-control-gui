@@ -41,7 +41,12 @@ async function submitIP(ip){
 }
 
 onMounted(() => {
-  // Set up periodic health fetching every 1 seconds
+  //fetch the current ip address on load to populate the field and start health checks
+  //TODO: make this a better implementation. Probably shouldnt pass state of this variable with rust. Probably should
+  //use either browser localstorage or Tauri's storage API.
+  invoke("fetch_server_ip").then((ip) => {
+    ip_address.value = ip;
+  });
   setInterval(fetchServerHealth, 1000);
 });
 </script>
