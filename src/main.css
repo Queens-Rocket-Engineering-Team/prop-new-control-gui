@@ -77,6 +77,29 @@ body,
 *::before,
 *::after {
   box-sizing: border-box;
+}
+
+/* Theme transition — only on elements that visibly change during light/dark switch */
+body,
+#navbar,
+#grid-container,
+.swap-container,
+#server-indicator,
+.modal-overlay,
+.modal-container,
+.modal-header,
+.modal-body,
+.modal-footer,
+.modal-close-btn,
+.ip-text-input,
+.setting-group-label,
+.server-ip-text,
+button,
+.p-button,
+.p-toggleswitch,
+.p-radiobutton,
+#menu-button,
+#gear-button {
   transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
@@ -369,17 +392,6 @@ button:active {
   letter-spacing: 0.06em;
 }
 
-.radio-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.radio-row label {
-  color: var(--text-primary);
-  font-size: 0.9rem;
-}
-
 .ip-text-input {
   flex: 1;
   background: var(--input-bg);
@@ -399,14 +411,6 @@ button:active {
 .ip-text-input:disabled {
   opacity: 0.35;
   cursor: not-allowed;
-}
-
-.modal-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 12px 18px;
-  border-top: 1px solid var(--border-color);
 }
 
 .btn-primary {

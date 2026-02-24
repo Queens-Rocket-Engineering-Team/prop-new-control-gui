@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch } from "vue";
+import { ref, watch, nextTick } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
@@ -14,11 +14,13 @@ const emit = defineEmits(["close", "update-ip"]);
 const ipMode = ref("none");
 const customIp = ref("");
 const darkMode = ref(false);  // false = light, true = dark
+const overlayRef = ref(null);
 
 watch(
   () => props.isOpen,
   (open) => {
     if (open) {
+      nextTick(() => overlayRef.value?.focus());
       const ip = props.currentIp || "";
       if (!ip) {
         ipMode.value = "none";
@@ -36,13 +38,18 @@ watch(darkMode, (isDark) => {
   document.documentElement.classList.toggle("dark-mode", isDark);
 });
 
+function isValidIp(ip) {
+  const ipv4Pattern = /^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/;
+  return ipv4Pattern.test(ip);
+}
+
 function applyIp() {
   if (ipMode.value === "none") {
     emit("update-ip", "");
     return;
   }
   const ip = ipMode.value === "localhost" ? "localhost" : customIp.value.trim();
-  if (ipMode.value === "custom" && !ip) return;
+  if (ipMode.value === "custom" && (!ip || !isValidIp(ip))) return;
   invoke("submit_ip", { newIp: ip });
   emit("update-ip", ip);
 }
@@ -59,7 +66,12 @@ watch(customIp, () => {
 </script>
 
 <template>
-  <div v-if="isOpen" class="modal-overlay" @click.self="$emit('close')">
+  <div v-if="isOpen"
+       ref="overlayRef"
+       class="modal-overlay"
+       @click.self="$emit('close')"
+       @keydown.esc="$emit('close')"
+       tabindex="-1">
     <div class="modal-container">
       <div class="modal-header">
         <h3>Settings</h3>
@@ -68,21 +80,21 @@ watch(customIp, () => {
       <div class="modal-body">
         <div class="setting-group">
           <span class="setting-group-label">View</span>
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <i class="pi pi-sun" :style="{color: darkMode ? '#888' : '#f39c12'}"></i>
-            <ToggleSwitch v-model="darkMode" :style="{'--p-toggleswitch-width': '36px', '--p-toggleswitch-height': '20px', '--p-toggleswitch-handle-size': '14px'}" />
-            <i class="pi pi-moon" :style="{color: darkMode ? '#f39c12' : '#888'}"></i>
+          <div class="view-toggle">
+            <i class="pi pi-sun" :style="{color: darkMode ? 'var(--text-secondary)' : '#f39c12'}"></i>
+            <ToggleSwitch v-model="darkMode" class="theme-switch" />
+            <i class="pi pi-moon" :style="{color: darkMode ? '#f39c12' : 'var(--text-secondary)'}"></i>
           </div>
         </div>
         <div class="setting-group">
           <span class="setting-group-label">Server IP Address</span>
-          <div class="localhost-option" style="display: flex; align-items: center;">
-            <RadioButton v-model="ipMode" value="localhost" style="margin-right: 6px;" />
-            <label for="opt-localhost">Localhost (127.0.0.1)</label>
+          <div class="option-row">
+            <RadioButton v-model="ipMode" value="localhost" />
+            <label>Localhost (127.0.0.1)</label>
           </div>
-          <div class="custom-ip-option" style="display: flex; align-items: center;">
-            <RadioButton v-model="ipMode" value="custom" style="margin-right: 6px;" />
-            <label for="opt-custom">Custom: </label>
+          <div class="option-row">
+            <RadioButton v-model="ipMode" value="custom" />
+            <label>Custom: </label>
             <input
               type="text"
               v-model="customIp"
@@ -97,3 +109,26 @@ watch(customIp, () => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.view-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.theme-switch {
+  --p-toggleswitch-width: 36px;
+  --p-toggleswitch-height: 20px;
+  --p-toggleswitch-handle-size: 14px;
+}
+
+.option-row {
+  display: flex;
+  align-items: center;
+}
+
+.option-row :deep(.p-radiobutton) {
+  margin-right: 6px;
+}
+</style>

@@ -23,7 +23,7 @@ async function checkHealth() {
   const host = props.serverIp === "localhost" ? "127.0.0.1" : props.serverIp;
   try {
     const response = await fetch(`http://${host}:8000/health`, {
-      signal: AbortSignal.timeout(4500),
+      signal: AbortSignal.timeout(3000),
     });
     if (response.ok) {
       hasConnected = true;
