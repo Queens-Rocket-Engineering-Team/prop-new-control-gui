@@ -1,6 +1,7 @@
 <script setup>
 import { ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import ToggleSwitch from 'primevue/toggleswitch';
 
 const props = defineProps({
   isOpen: Boolean,
@@ -11,6 +12,7 @@ const emit = defineEmits(["close", "update-ip"]);
 
 const ipMode = ref("localhost");
 const customIp = ref("");
+const darkMode = ref(true);  // false = light, true = dark
 
 watch(
   () => props.isOpen,
@@ -26,6 +28,10 @@ watch(
     }
   }
 );
+
+watch(darkMode, (isDark) => {
+  document.documentElement.classList.toggle("dark-mode", isDark);
+});
 
 function saveSettings() {
   const ip = ipMode.value === "localhost" ? "localhost" : customIp.value.trim();
@@ -44,6 +50,14 @@ function saveSettings() {
         <button class="modal-close-btn" @click="$emit('close')">✕</button>
       </div>
       <div class="modal-body">
+        <div class="setting-group">
+          <span class="setting-group-label">View</span>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <i class="pi pi-sun" :style="{color: darkMode ? '#888' : '#f39c12'}"></i>
+            <ToggleSwitch v-model="darkMode" :style="{'--p-toggleswitch-width': '36px', '--p-toggleswitch-height': '20px', '--p-toggleswitch-handle-size': '14px'}" />
+            <i class="pi pi-moon" :style="{color: darkMode ? '#f39c12' : '#888'}"></i>
+          </div>
+        </div>
         <div class="setting-group">
           <span class="setting-group-label">Server IP Address</span>
           <div class="localhost-option">
