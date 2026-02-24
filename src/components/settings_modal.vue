@@ -111,6 +111,102 @@ watch(customIp, () => {
 </template>
 
 <style scoped>
+/* Top level modal styles */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-container {
+  background: var(--modal-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  min-width: 320px;
+  max-width: 420px;
+  width: 90%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.modal-body {
+  padding: 20px 18px;
+}
+
+/* Close button styles */
+.modal-close-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 2px 6px;
+  line-height: 1;
+  box-shadow: none;
+}
+
+.modal-close-btn:hover {
+  color: var(--text-primary);
+  border-color: transparent;
+  background: none;
+}
+
+/* Setting group styles */
+.setting-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.setting-group-label {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* IP Input styles */
+.ip-text-input {
+  flex: 1;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  padding: 4px 8px;
+  font-size: 0.9rem;
+  font-family: inherit;
+}
+
+.ip-text-input:focus {
+  outline: none;
+  border-color: var(--input-focus-border);
+}
+
+.ip-text-input:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* Dark mode toggle styles */
 .view-toggle {
   display: flex;
   align-items: center;
@@ -123,6 +219,7 @@ watch(customIp, () => {
   --p-toggleswitch-handle-size: 14px;
 }
 
+/* Individual setting row option styles */
 .option-row {
   display: flex;
   align-items: center;
@@ -131,4 +228,18 @@ watch(customIp, () => {
 .option-row :deep(.p-radiobutton) {
   margin-right: 6px;
 }
+
+/* Theme transition for dark/light switch */
+.modal-overlay,
+.modal-container,
+.modal-header,
+.modal-body,
+.modal-footer,
+.modal-close-btn,
+.ip-text-input,
+.setting-group-label,
+.server-ip-text {
+  transition: var(--theme-transition);
+}
+
 </style>

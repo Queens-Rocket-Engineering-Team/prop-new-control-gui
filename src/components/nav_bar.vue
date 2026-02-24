@@ -96,3 +96,89 @@ function toggleCollapse() {
     <div class="nav-resize-handle" @mousedown="onResizeStart"></div>
   </div>
 </template>
+
+<style scoped>
+#navbar {
+  position: relative;
+  background-color: var(--bg-primary);
+  border-top: var(--border-color) 2px solid;
+  border-left: var(--border-color) 2px solid;
+  border-bottom: var(--border-color) 2px solid;
+  border-radius: 10px 0 0 10px;
+  overflow: hidden;
+  padding: 10px;
+  text-align: left;
+}
+
+#navbar :deep(button) {
+  width: 100%;
+  margin-top: 2pt;
+  margin-bottom: 2pt;
+}
+
+/* Hamburger + gear icon row */
+#menu-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+#menu-buttons.collapsed {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+#menu-button {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: var(--text-secondary);
+}
+
+#menu-button:hover {
+  color: var(--text-primary);
+}
+
+#gear-button {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: var(--text-secondary);
+  border-radius: 4px;
+}
+
+#gear-button:hover {
+  color: var(--text-primary);
+}
+
+/* Drag handle on the right edge */
+.nav-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 5px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+}
+
+.nav-resize-handle:hover,
+.nav-resize-handle:active {
+  background: rgba(45, 88, 104, 0.45);
+}
+
+/* Theme transition for dark/light switch */
+#navbar,
+#menu-button,
+#gear-button {
+  transition: var(--theme-transition);
+}
+</style>

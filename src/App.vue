@@ -60,3 +60,28 @@ onMounted(() => {
     ></settings-modal>
   </main>
 </template>
+
+<style scoped>
+.container {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+#grid-container {
+  display: grid;
+  /* grid-template-columns is set dynamically by App.vue via :style */
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+}
+
+.swap-container {
+  background-color: var(--bg-primary);
+  border: var(--border-color) 2px solid;
+  border-radius: 0 10px 10px 0;
+  padding: 10px;
+  text-align: left;
+}
+</style>

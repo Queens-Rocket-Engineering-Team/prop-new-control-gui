@@ -88,3 +88,60 @@ onUnmounted(() => {
     <span class="server-ip-text">{{ serverIp || "No Server" }}</span>
   </div>
 </template>
+
+
+<style scoped>
+/* ── Server status indicator (fixed bottom-left corner) ── */
+#server-indicator {
+  position: fixed;
+  bottom: 10px;
+  left: 10px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background-color: var(--btn-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  z-index: 100;
+  backdrop-filter: blur(4px);
+  user-select: none;
+}
+
+.server-ip-text {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.led-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.led-grey {
+  background-color: #666;
+  box-shadow: 0 0 4px #666;
+}
+
+.led-green {
+  background-color: #2ecc71;
+  box-shadow: 0 0 6px #2ecc71;
+}
+
+.led-yellow {
+  background-color: #f39c12;
+  box-shadow: 0 0 6px #f39c12;
+}
+
+.led-red {
+  background-color: #e74c3c;
+  box-shadow: 0 0 6px #e74c3c;
+}
+
+#server-indicator {
+  transition: var(--theme-transition);
+}
+</style>
