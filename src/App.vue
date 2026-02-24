@@ -21,10 +21,13 @@ function setActive(component) {
 
 function collapseNavbar() {
   const collapseDiv = document.getElementById("collapse");
+  const menuButtons = document.getElementById("menu-buttons");
   if (collapseDiv.style.display === "none" || collapseDiv.style.display === "") {
     collapseDiv.style.display = "block";
+    menuButtons.classList.remove("collapsed");
   } else {
     collapseDiv.style.display = "none";
+    menuButtons.classList.add("collapsed");
   }
 }
 
