@@ -2,6 +2,7 @@
 import { ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import ToggleSwitch from 'primevue/toggleswitch';
+import RadioButton from 'primevue/radiobutton';
 
 const props = defineProps({
   isOpen: Boolean,
@@ -10,16 +11,18 @@ const props = defineProps({
 
 const emit = defineEmits(["close", "update-ip"]);
 
-const ipMode = ref("localhost");
+const ipMode = ref("none");
 const customIp = ref("");
-const darkMode = ref(true);  // false = light, true = dark
+const darkMode = ref(false);  // false = light, true = dark
 
 watch(
   () => props.isOpen,
   (open) => {
     if (open) {
       const ip = props.currentIp || "";
-      if (!ip || ip === "localhost" || ip === "127.0.0.1") {
+      if (!ip) {
+        ipMode.value = "none";
+      } else if (ip === "localhost" || ip === "127.0.0.1") {
         ipMode.value = "localhost";
       } else {
         ipMode.value = "custom";
@@ -34,6 +37,10 @@ watch(darkMode, (isDark) => {
 });
 
 function applyIp() {
+  if (ipMode.value === "none") {
+    emit("update-ip", "");
+    return;
+  }
   const ip = ipMode.value === "localhost" ? "localhost" : customIp.value.trim();
   if (ipMode.value === "custom" && !ip) return;
   invoke("submit_ip", { newIp: ip });
@@ -69,12 +76,12 @@ watch(customIp, () => {
         </div>
         <div class="setting-group">
           <span class="setting-group-label">Server IP Address</span>
-          <div class="localhost-option">
-            <input type="radio" id="opt-localhost" value="localhost" v-model="ipMode" />
+          <div class="localhost-option" style="display: flex; align-items: center;">
+            <RadioButton v-model="ipMode" value="localhost" style="margin-right: 6px;" />
             <label for="opt-localhost">Localhost (127.0.0.1)</label>
           </div>
-          <div class="custom-ip-option">
-            <input type="radio" id="opt-custom" value="custom" v-model="ipMode" />
+          <div class="custom-ip-option" style="display: flex; align-items: center;">
+            <RadioButton v-model="ipMode" value="custom" style="margin-right: 6px;" />
             <label for="opt-custom">Custom: </label>
             <input
               type="text"
