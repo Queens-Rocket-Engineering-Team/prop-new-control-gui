@@ -8,9 +8,10 @@ const props = defineProps({
   },
 });
 
-// 'grey' = no IP set, 'yellow' = waiting / 1 miss, 'green' = healthy, 'red' = 2+ misses
+// 'grey' = no IP set / never connected, 'yellow' = waiting / 1 miss, 'green' = healthy, 'red' = 2+ misses
 const ledColor = ref("grey");
 const missedCount = ref(0);
+let hasConnected = false;
 let intervalId = null;
 
 async function checkHealth() {
@@ -25,6 +26,7 @@ async function checkHealth() {
       signal: AbortSignal.timeout(4500),
     });
     if (response.ok) {
+      hasConnected = true;
       missedCount.value = 0;
       ledColor.value = "green";
     } else {
@@ -36,6 +38,7 @@ async function checkHealth() {
 }
 
 function handleMiss() {
+  if (!hasConnected) return;
   missedCount.value++;
   ledColor.value = missedCount.value === 1 ? "yellow" : "red";
 }
@@ -58,7 +61,8 @@ watch(
   (newIp) => {
     if (newIp) {
       missedCount.value = 0;
-      ledColor.value = "yellow";
+      hasConnected = false;
+      ledColor.value = "grey";
       startChecks();
     } else {
       ledColor.value = "grey";
@@ -69,7 +73,6 @@ watch(
 
 onMounted(() => {
   if (props.serverIp) {
-    ledColor.value = "yellow";
     startChecks();
   }
 });

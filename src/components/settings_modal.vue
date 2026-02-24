@@ -33,13 +33,22 @@ watch(darkMode, (isDark) => {
   document.documentElement.classList.toggle("dark-mode", isDark);
 });
 
-function saveSettings() {
+function applyIp() {
   const ip = ipMode.value === "localhost" ? "localhost" : customIp.value.trim();
   if (ipMode.value === "custom" && !ip) return;
   invoke("submit_ip", { newIp: ip });
   emit("update-ip", ip);
-  emit("close");
 }
+
+watch(ipMode, () => {
+  applyIp();
+});
+
+watch(customIp, () => {
+  if (ipMode.value === "custom") {
+    applyIp();
+  }
+});
 </script>
 
 <template>
@@ -77,10 +86,6 @@ function saveSettings() {
             />
           </div>
         </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn-secondary" @click="$emit('close')">Cancel</button>
-        <button class="btn-primary" @click="saveSettings">Save</button>
       </div>
     </div>
   </div>
