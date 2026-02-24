@@ -19,8 +19,6 @@ import FlightPanel from "./windows/flight_panel.vue";
 import ServerBar from "./components/server_bar.vue";
 import SettingsModal from "./components/settings_modal.vue";
 
-import WelcomePanel from "./windows/welcome_panel.vue";
-
 const window_content = ref(WelcomePanel);
 function setActive(component) {
   window_content.value = component;
