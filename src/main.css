@@ -4,167 +4,117 @@
   line-height: 24px;
   font-weight: 400;
 
-  color: #0f0f0f;
-  background-color: #f6f6f6;
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   -webkit-text-size-adjust: 100%;
+
+  /* Theme transition variables for smooth light/dark mode switching */
+  --transition-time: 0.3s;
+  --theme-transition: color var(--transition-time) ease, background-color var(--transition-time) ease, border-color var(--transition-time) ease, box-shadow var(--transition-time) ease;
+
+  --p-primary-color: #4a4a4a;
+  --p-primary-hover-color: #5a5a5a;
+
+  --bg-primary: #f6f6f6;
+  --bg-secondary: #ffffff;
+  --bg-surface: #e8e8e8;
+  --text-primary: #0f0f0f;
+  --text-secondary: #555;
+  --text-muted: #777;
+  --border-accent: #888;
+  --border-color: #ddd;
+  --btn-bg: #d0d0d0;
+  --btn-text: #0f0f0f;
+  --btn-border-hover: #555;
+  --btn-primary-bg: #5a8a9a;
+  --btn-primary-hover-bg: #6a9aaa;
+  --btn-primary-hover-border: #7aaabc;
+  --btn-secondary-bg: #e0e0e0;
+  --btn-secondary-text: #555;
+  --modal-bg: #ffffff;
+  --input-bg: #f0f0f0;
+  --input-border: #ccc;
+  --input-focus-border: #888;
+  --overlay-bg: rgba(0, 0, 0, 0.35);
+}
+
+/* Dark mode */
+.dark-mode {
+  --bg-primary: #2f2f2f;
+  --bg-secondary: #1c1c1c;
+  --bg-surface: #0f0f0f;
+  --text-primary: #f6f6f6;
+  --text-secondary: #888;
+  --text-muted: #ccc;
+  --border-accent: #2d5868;
+  --border-color: #242424;
+  --btn-bg: #0f0f0f98;
+  --btn-text: #ffffff;
+  --btn-border-hover: #396cd8;
+  --btn-primary-bg: #2d5868;
+  --btn-primary-hover-bg: #366878;
+  --btn-primary-hover-border: #4a8aaa;
+  --btn-secondary-bg: #2e2e2e;
+  --btn-secondary-text: #ccc;
+  --modal-bg: #1c1c1c;
+  --input-bg: #2a2a2a;
+  --input-border: #3a5868;
+  --input-focus-border: #2d6888;
+  --overlay-bg: rgba(0, 0, 0, 0.65);
 }
 
 /* Prevent page-level scrolling and avoid box-sizing overflow */
-html, body, #app {
+html,
+body,
+#app {
   height: 100%;
   margin: 0;
-  overflow: hidden; /* disable scrolling */
+  overflow: hidden;
 }
 
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
-main {
-  /* main covers full viewport height */
-  height: 100vh;
+/* Theme transition — only on elements that visibly change during light/dark switch */
+body,
+#grid-container,
+.swap-container,
+#server-indicator,
+button,
+.p-button,
+.p-button:hover,
+.p-toggleswitch,
+.p-radiobutton {
+  transition: var(--theme-transition) !important;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  button:active {
-    background-color: #0f0f0f69;
-  }
+/* PrimeVue Button Overrides */
+.p-button {
+  background-color: var(--btn-bg) !important;
+  color: var(--btn-text) !important;
+  border: 1px solid transparent !important;
+  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2) !important;
 }
 
-.container {
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
+.p-button:hover {
+  background-color: var(--btn-bg) !important;
+  border-color: var(--btn-border-hover) !important;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
+.p-button.p-button-primary {
+  background-color: var(--btn-primary-bg) !important;
+  color: white !important;
 }
 
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-  color: #ffffff;
-  background-color: #0f0f0f98;
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-#grid-container {
-  display: grid;
-  /* Make the left column auto-sized (nav) and the right column take remaining space */
-  grid-template-columns: auto 1fr;
-  /* remove the gap so the borders can meet flush */
-  gap: 0;
-  height: 100%;
-}
-
-#navbar {
-  /* Make pretty border */
-  /* left-side nav: draw left/ top/ bottom borders and round outer (left) corners */
-  border-top: #2d5868 2px solid;
-  border-left: #2d5868 2px solid;
-  border-bottom: #2d5868 2px solid;
-  border-radius: 10px 0 0 0;
-
-  /* let the grid column determine width instead of forcing 25% */
-  width: auto;
-  padding: 10px;
-  text-align: left;
-}
-
-#navbar button {
-  width: 100%;
-  margin-top: 2pt;
-  margin-bottom: 2pt;
-}
-
-#nav-bottom {
-  position: bottom;
-}
-
-.swap-container {
-  /* Make pretty border */
-  border: #2d5868 2px solid;  
-  /* round only the outer (right) corners so adjacent edges meet flush */
-  border-radius: 0 10px 0 0;
-  padding: 10px;
-  text-align: left;
-}
-
-.camera_control {
-  text-align: center;
-}
-
-#server-bar {
-  background-color: #202020;
-  font-size: 14px;
-  border-bottom: #2d5868 2px solid;
-  border-right: #2d5868 2px solid;
-  border-left: #2d5868 2px solid;
-  border-radius: 0 0 10px 10px;
-  padding-right: 2%;
-  padding-left: 2%;
-  display: grid;
-  grid-template-columns: auto 1fr;
-}
-
-#server-select {
-  text-align: center;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-#server-select form {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-#server-health {
-  text-align: right;
-  float: right;
-}
-
-#menu-button {
-  cursor: pointer;
+.p-button.p-button-primary:hover {
+  background-color: var(--btn-primary-hover-bg) !important;
+  border-color: var(--btn-primary-hover-border) !important;
 }
