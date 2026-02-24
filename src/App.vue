@@ -1,34 +1,23 @@
 <script setup>
 import { onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import "primeicons/primeicons.css";
 
-import WelcomePanel from "./windows/welcome_panel.vue";
-import CameraPanel from "./windows/camera_panel.vue";
-import GraphPanel from "./windows/graph_panel.vue";
-import ControlPanel from "./windows/control_panel.vue";
-import DebugPanel from "./windows/debug_panel.vue";
-import FlightPanel from "./windows/flight_panel.vue";
-
+import NavBar from "./components/nav_bar.vue";
 import ServerBar from "./components/server_bar.vue";
 import SettingsModal from "./components/settings_modal.vue";
 
-import "primeicons/primeicons.css";
+import WelcomePanel from "./windows/welcome_panel.vue";
 
 const window_content = ref(WelcomePanel);
 function setActive(component) {
   window_content.value = component;
 }
 
-function collapseNavbar() {
-  const collapseDiv = document.getElementById("collapse");
-  const menuButtons = document.getElementById("menu-buttons");
-  if (collapseDiv.style.display === "none" || collapseDiv.style.display === "") {
-    collapseDiv.style.display = "block";
-    menuButtons.classList.remove("collapsed");
-  } else {
-    collapseDiv.style.display = "none";
-    menuButtons.classList.add("collapsed");
-  }
+// Synced from NavBar's @resize emit so the grid column tracks the drag
+const navbarWidth = ref(180);
+function onNavResize(w) {
+  navbarWidth.value = w;
 }
 
 const server_ip = ref("");
@@ -48,29 +37,16 @@ onMounted(() => {
 
 <template>
   <main class="container">
-    <div id="grid-container">
-      <div id="navbar">
-        <div id="menu-buttons">
-          <div id="menu-button" @click="collapseNavbar()">
-            <i class="pi pi-bars" style="font-size: 24px"></i>
-          </div>
-          <div id="gear-button" @click="settingsOpen = true" title="Settings">
-            <i class="pi pi-cog" style="font-size: 24px"></i>
-          </div>
-        </div>
-        <div id="collapse">
-          <div id="nav-upper">
-            <button @click="setActive(ControlPanel)">Control</button>
-            <button @click="setActive(GraphPanel)">Data</button>
-            <button @click="setActive(CameraPanel)">Camera View</button>
-            <button @click="setActive(DebugPanel)">Debug</button>
-            <button @click="setActive(FlightPanel)">Flight</button>
-          </div>
-          <div id="nav-lower">
-            <button @click="setActive(WelcomePanel)">Welcome</button>
-          </div>
-        </div>
-      </div>
+    <div
+      id="grid-container"
+      :style="{ gridTemplateColumns: navbarWidth + 'px 1fr' }"
+    >
+      <nav-bar
+        @navigate="setActive"
+        @open-settings="settingsOpen = true"
+        @resize="onNavResize"
+      ></nav-bar>
+
       <component :is="window_content" class="swap-container"></component>
     </div>
 

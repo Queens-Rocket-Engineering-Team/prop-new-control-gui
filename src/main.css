@@ -80,7 +80,28 @@ body,
   transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
+/* PrimeVue Button Overrides */
+.p-button {
+  background-color: var(--btn-bg) !important;
+  color: var(--btn-text) !important;
+  border: 1px solid transparent !important;
+  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2) !important;
+}
 
+.p-button:hover {
+  background-color: var(--btn-bg) !important;
+  border-color: var(--btn-border-hover) !important;
+}
+
+.p-button.p-button-primary {
+  background-color: var(--btn-primary-bg) !important;
+  color: white !important;
+}
+
+.p-button.p-button-primary:hover {
+  background-color: var(--btn-primary-hover-bg) !important;
+  border-color: var(--btn-primary-hover-border) !important;
+}
 
 .container {
   margin: 0;
@@ -127,7 +148,7 @@ button:active {
 
 #grid-container {
   display: grid;
-  grid-template-columns: auto 1fr;
+  /* grid-template-columns is set dynamically by App.vue via :style */
   gap: 0;
   flex: 1;
   min-height: 0;
@@ -140,7 +161,8 @@ button:active {
   border-bottom: var(--border-color) 2px solid;
   border-radius: 10px 0 0 10px;
 
-  width: auto;
+  /* width is driven by nav_bar.vue's :style binding */
+  overflow: hidden;
   padding: 10px;
   text-align: left;
 }
@@ -161,38 +183,58 @@ button:active {
   align-items: center;
   gap: 6px;
   margin-bottom: 4px;
-  margin-left: 30px;
 }
 
 #menu-buttons.collapsed {
   flex-direction: column;
-  align-items: flex-start;
+  align-items: stretch;
   gap: 6px;
-  margin-left: 0;
-  margin-top: 34px;
 }
 
 #menu-button {
   cursor: pointer;
   display: flex;
   align-items: center;
-  position: absolute;
-  top: 10px;
-  left: 10px;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: var(--text-secondary);
+}
+
+#menu-button:hover {
+  color: var(--text-primary);
 }
 
 #gear-button {
   cursor: pointer;
   display: flex;
   align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
   color: var(--text-secondary);
-  padding: 2px;
   border-radius: 4px;
   transition: color 0.15s;
 }
 
 #gear-button:hover {
   color: var(--text-primary);
+}
+
+/* Drag handle on the right edge of the navbar */
+.nav-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 5px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+}
+
+.nav-resize-handle:hover,
+.nav-resize-handle:active {
+  background: rgba(45, 88, 104, 0.45);
 }
 
 .swap-container {
