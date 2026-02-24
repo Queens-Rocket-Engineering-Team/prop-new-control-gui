@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import "primeicons/primeicons.css";
+/*import "primeicons/primeicons.css"; */
 
 import NavBar from "./components/nav_bar.vue";
 
