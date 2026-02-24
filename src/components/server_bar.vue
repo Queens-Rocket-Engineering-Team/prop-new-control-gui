@@ -1,68 +1,147 @@
 <script setup>
-import { ref, onMounted } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { ref, watch, onMounted, onUnmounted } from "vue";
 
-const ip_address = ref("");
-const server_status = ref("");
-const health_check_enabled = ref(false  );
-async function fetchServerHealth() {
-  if (ip_address.value === "") {
-    server_status.value = "Ip Not Set";
+const props = defineProps({
+  serverIp: {
+    type: String,
+    default: "",
+  },
+});
+
+// 'grey' = no IP set / never connected, 'yellow' = waiting / 1 miss, 'green' = healthy, 'red' = 2+ misses
+const ledColor = ref("grey");
+const missedCount = ref(0);
+let hasConnected = false;
+let intervalId = null;
+
+async function checkHealth() {
+  if (!props.serverIp) {
+    ledColor.value = "grey";
     return;
   }
-  else if (!health_check_enabled.value) {
-    server_status.value = "Health Check Disabled";
-    return;
-  }
+
+  const host = props.serverIp === "localhost" ? "127.0.0.1" : props.serverIp;
   try {
-    fetch(`http://${ip_address.value}:8000/health`, { signal: AbortSignal.timeout(1000) })
-    .then((response) => {
-      if (!response.ok) {
-        console.log("Response not ok:", response);
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      return response.text();
-    })
-    .then((data) => {
-      server_status.value = JSON.parse(data).message;
-    })
-    .catch((error) => {
-      server_status.value = "Error fetching - " + error;
-      console.error("Error fetching server health:", error);
+    const response = await fetch(`http://${host}:8000/health`, {
+      signal: AbortSignal.timeout(3000),
     });
-  } catch (error) {
-      server_status.value = "Error fetching - " + error;
-      console.error("Error fetching server health:", error);
+    if (response.ok) {
+      hasConnected = true;
+      missedCount.value = 0;
+      ledColor.value = "green";
+    } else {
+      handleMiss();
+    }
+  } catch {
+    handleMiss();
   }
 }
-//sends the entered ip address to the backend for sharing state with other components
-async function submitIP(ip){
-  invoke("submit_ip", {newIp: ip});
+
+function handleMiss() {
+  if (!hasConnected) return;
+  missedCount.value++;
+  ledColor.value = missedCount.value === 1 ? "yellow" : "red";
 }
+
+function startChecks() {
+  stopChecks();
+  checkHealth();
+  intervalId = setInterval(checkHealth, 5000);
+}
+
+function stopChecks() {
+  if (intervalId !== null) {
+    clearInterval(intervalId);
+    intervalId = null;
+  }
+}
+
+watch(
+  () => props.serverIp,
+  (newIp) => {
+    if (newIp) {
+      missedCount.value = 0;
+      hasConnected = false;
+      ledColor.value = "grey";
+      startChecks();
+    } else {
+      ledColor.value = "grey";
+      stopChecks();
+    }
+  }
+);
 
 onMounted(() => {
-  //fetch the current ip address on load to populate the field and start health checks
-  //TODO: make this a better implementation. Probably shouldnt pass state of this variable with rust. Probably should
-  //use either browser localstorage or Tauri's storage API.
-  invoke("fetch_server_ip").then((ip) => {
-    ip_address.value = ip;
-  });
-  setInterval(fetchServerHealth, 1000);
+  if (props.serverIp) {
+    startChecks();
+  }
+});
+
+onUnmounted(() => {
+  stopChecks();
 });
 </script>
 
 <template>
-  <div id="server-bar">
-      <div id="server-select">
-        <form @submit.prevent="submitIP(ip_address)">
-          Server IP: 
-          <input type="text" v-model="ip_address" @change="submitIP(ip_address)">
-          <label>Enable Health Check:</label>
-          <input type="checkbox" v-model="health_check_enabled">
-        </form>
-      </div>
-      <div id="server-health">
-        <p>Server Health: {{ server_status }}</p>
-      </div>
-    </div>
+  <div id="server-indicator">
+    <div class="led-dot" :class="`led-${ledColor}`"></div>
+    <span class="server-ip-text">{{ serverIp || "No Server" }}</span>
+  </div>
 </template>
+
+
+<style scoped>
+/* ── Server status indicator (fixed bottom-left corner) ── */
+#server-indicator {
+  position: fixed;
+  bottom: 10px;
+  left: 10px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background-color: var(--btn-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  z-index: 100;
+  backdrop-filter: blur(4px);
+  user-select: none;
+}
+
+.server-ip-text {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.led-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.led-grey {
+  background-color: #666;
+  box-shadow: 0 0 4px #666;
+}
+
+.led-green {
+  background-color: #2ecc71;
+  box-shadow: 0 0 6px #2ecc71;
+}
+
+.led-yellow {
+  background-color: #f39c12;
+  box-shadow: 0 0 6px #f39c12;
+}
+
+.led-red {
+  background-color: #e74c3c;
+  box-shadow: 0 0 6px #e74c3c;
+}
+
+#server-indicator {
+  transition: var(--theme-transition);
+}
+</style>
