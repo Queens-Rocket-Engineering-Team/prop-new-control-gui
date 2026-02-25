@@ -16,6 +16,7 @@ const props = defineProps({
 const chartOptions = ref({
   responsive: true,
   maintainAspectRatio: false,
+  animation: false,
 });
 
 </script>
@@ -26,7 +27,7 @@ const chartOptions = ref({
     <br />
     <div v-for="value in selected_options">
       <h3>Sensor: {{ value.name }}</h3>
-      <Chart type="line" :data="value.data" :options="chartOptions" />
+      <Chart type="line" :data="value.data" :options="value.chartOptions" />
       
     </div>
   </div>
