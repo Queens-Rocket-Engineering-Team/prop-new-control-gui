@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from "vue";
+import { onMounted, ref, shallowRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import "primeicons/primeicons.css";
 
@@ -19,7 +19,7 @@ import FlightPanel from "./windows/flight_panel.vue";
 import ServerBar from "./components/server_bar.vue";
 import SettingsModal from "./components/settings_modal.vue";
 
-const window_content = ref(WelcomePanel);
+const window_content = shallowRef(WelcomePanel);
 function setActive(component) {
   window_content.value = component;
 }
@@ -39,9 +39,9 @@ function get_ip(new_ip) {
 const settingsOpen = ref(false);
 
 onMounted(() => {
-  invoke("fetch_server_ip").then((ip) => {
-    if (ip) server_ip.value = ip;
-  });
+  invoke("fetch_server_ip")
+    .then((ip) => { if (ip) server_ip.value = ip })
+    .catch(() => {}); // no-op outside Tauri context
 });
 </script>
 
