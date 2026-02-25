@@ -142,7 +142,7 @@ onUnmounted(() => {
     </div>
 
     <server-bar :server-ip="server_ip"></server-bar>
-    <button @click="updateChartData('hello t PTRun:250.5')">test</button>
+
     <settings-modal
       :is-open="settingsOpen"
       :current-ip="server_ip"
