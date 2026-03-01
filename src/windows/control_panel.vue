@@ -1,11 +1,41 @@
 <script setup>
-import { ref, inject } from 'vue'
+import { ref, inject, computed } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 import PidDiagram from '../components/PidDiagram.vue'
 import { useServerApi } from '../composables/useServerApi.js'
 
 const serverIp = inject('serverIp', ref(''))
+const serverConfig = inject('serverConfig', ref(null))
 const { sendCommand } = useServerApi(serverIp)
+
+// Normalize an ID to alphanumeric lowercase for fuzzy matching.
+// e.g. 'AV-DUMP' → 'avdump', 'AVDump' → 'avdump'
+function normalizeId(id) {
+  return id.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()
+}
+
+// Set of normalized control keys from every connected device.
+const enabledControls = computed(() => {
+  const cfg = serverConfig.value
+  if (!cfg) return new Set()
+  const keys = new Set()
+  for (const device of Object.values(cfg.configs)) {
+    for (const key of Object.keys(device.controls ?? {})) {
+      keys.add(normalizeId(key))
+    }
+  }
+  return keys
+})
+
+// A drawio valve ID is enabled if any server control key's normalized form
+// starts with the normalized drawio ID (handles numbered variants like AVPurge1).
+function isValveEnabled(drawioId) {
+  const norm = normalizeId(drawioId)
+  for (const key of enabledControls.value) {
+    if (key.startsWith(norm)) return true
+  }
+  return false
+}
 
 // Remotely actuated valves — keyed by drawio element ID.
 // defaultState: 'NC' = normally closed, 'NO' = normally open.
@@ -55,12 +85,16 @@ const sensors = ref({
           :style="positionBeside(id, 'right', -40)"
           class="pid-overlay"
         >
-          <div class="valve-card" :class="{ open: valve.state }">
-            <div class="card-id">{{ id }}</div>
+          <div class="valve-card" :class="{ open: valve.state, locked: !isValveEnabled(id) }">
+            <div class="card-id">
+              {{ id }}
+              <span v-if="!isValveEnabled(id)" class="lock-badge">NO CTRL</span>
+            </div>
             <div class="valve-card-body">
               <div class="valve-toggle-col">
                 <ToggleSwitch
                   :modelValue="valve.state"
+                  :disabled="!isValveEnabled(id)"
                   @update:modelValue="onValveToggle(id, $event)"
                 />
               </div>
@@ -218,6 +252,30 @@ const sensors = ref({
 .state-indicator.open .state-led {
   background: #2ecc71;
   box-shadow: 0 0 4px rgba(46, 204, 113, 0.6);
+}
+
+/* ── Locked valve card ── */
+
+.valve-card.locked {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.valve-card.locked .valve-card-body {
+  pointer-events: none;
+}
+
+.lock-badge {
+  float: right;
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 2px;
+  padding: 0px 3px;
+  margin-left: 4px;
 }
 
 /* ── Sensor card ── */

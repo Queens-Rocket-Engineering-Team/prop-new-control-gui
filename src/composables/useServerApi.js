@@ -38,5 +38,19 @@ export function useServerApi(serverIp) {
     return res.json()
   }
 
-  return { sendCommand, baseUrl }
+  /**
+   * GET /config
+   * @returns {Promise<{ count: number, configs: Record<string, object> }>}
+   */
+  async function fetchConfig() {
+    if (!baseUrl.value) throw new Error('No server IP configured')
+    const res = await fetch(`${baseUrl.value}/config`)
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText)
+      throw new Error(`${res.status}: ${text}`)
+    }
+    return res.json()
+  }
+
+  return { sendCommand, fetchConfig, baseUrl }
 }

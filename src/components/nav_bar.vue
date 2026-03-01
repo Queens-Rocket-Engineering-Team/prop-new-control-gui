@@ -8,6 +8,7 @@ import GraphPanel from "../windows/graph_panel.vue";
 import ControlPanel from "../windows/control_panel.vue";
 import DebugPanel from "../windows/debug_panel.vue";
 import FlightPanel from "../windows/flight_panel.vue";
+import DeviceSummaryPanel from "../windows/device_summary.vue";
 
 const emit = defineEmits(["navigate", "open-settings", "resize"]);
 
@@ -87,6 +88,7 @@ function toggleCollapse() {
         <Button @click="emit('navigate', ControlPanel)" label="Control" />
         <Button @click="emit('navigate', GraphPanel)" label="Data" />
         <Button @click="emit('navigate', CameraPanel)" label="Camera View" />
+        <Button @click="emit('navigate', DeviceSummaryPanel)" label="Devices" />
         <Button @click="emit('navigate', DebugPanel)" label="Debug" />
         <Button @click="emit('navigate', FlightPanel)" label="Flight" />
         <Button @click="emit('navigate', WelcomePanel)" label="Welcome" />

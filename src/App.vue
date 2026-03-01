@@ -1,6 +1,7 @@
 <script setup>
-import { onMounted, provide, ref, shallowRef } from "vue";
+import { onMounted, provide, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { useServerApi } from "./composables/useServerApi.js";
 import "primeicons/primeicons.css";
 
 import NavBar from "./components/nav_bar.vue";
@@ -32,6 +33,20 @@ function onNavResize(w) {
 
 const server_ip = ref("");
 provide('serverIp', server_ip);
+
+const serverConfig = ref(null);
+provide('serverConfig', serverConfig);
+
+const { fetchConfig } = useServerApi(server_ip);
+watch(server_ip, async (ip) => {
+  if (!ip) { serverConfig.value = null; return }
+  try {
+    serverConfig.value = await fetchConfig()
+  } catch (err) {
+    console.error('[App] fetchConfig failed:', err)
+    serverConfig.value = null
+  }
+});
 
 function get_ip(new_ip) {
   console.log("Received new IP from settings:", new_ip);
