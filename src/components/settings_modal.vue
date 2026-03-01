@@ -13,12 +13,13 @@ const emit = defineEmits(["close", "update-ip"]);
 
 const ipMode = ref("none");
 const customIp = ref("");
+const cameraRecordingDir = ref("");
 const darkMode = ref(false);  // false = light, true = dark
 const overlayRef = ref(null);
 
 watch(
   () => props.isOpen,
-  (open) => {
+  async (open) => {
     if (open) {
       nextTick(() => overlayRef.value?.focus());
       const ip = props.currentIp || "";
@@ -29,6 +30,13 @@ watch(
       } else {
         ipMode.value = "custom";
         customIp.value = ip;
+      }
+
+      try {
+        const dir = await invoke("fetch_camera_recording_dir");
+        cameraRecordingDir.value = dir || "";
+      } catch (err) {
+        console.error("Failed to fetch camera recording directory:", err);
       }
     }
   }
@@ -63,6 +71,11 @@ watch(customIp, () => {
     applyIp();
   }
 });
+
+function applyCameraRecordingDir() {
+  const dir = cameraRecordingDir.value.trim();
+  invoke("set_camera_recording_dir", { newDir: dir });
+}
 </script>
 
 <template>
@@ -104,6 +117,18 @@ watch(customIp, () => {
               @click="ipMode = 'custom'"
             />
           </div>
+        </div>
+
+        <div class="setting-group">
+          <span class="setting-group-label">Camera Recording Directory</span>
+          <input
+            type="text"
+            v-model="cameraRecordingDir"
+            class="ip-text-input"
+            placeholder="Defaults to your Videos folder"
+            @blur="applyCameraRecordingDir"
+            @keyup.enter="applyCameraRecordingDir"
+          />
         </div>
       </div>
     </div>
