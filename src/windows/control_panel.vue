@@ -1,7 +1,11 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, inject } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 import PidDiagram from '../components/PidDiagram.vue'
+import { useServerApi } from '../composables/useServerApi.js'
+
+const serverIp = inject('serverIp', ref(''))
+const { sendCommand } = useServerApi(serverIp)
 
 // Remotely actuated valves — keyed by drawio element ID.
 // defaultState: 'NC' = normally closed, 'NO' = normally open.
@@ -15,6 +19,21 @@ const valves = ref({
   'AV-VENT':      { label: 'AV Vent',      state: false, defaultState: 'NC' },
 })
 
+async function onValveToggle(id, newState) {
+  console.log("Toggling valve", id, "to", newState)
+  const valve = valves.value[id]
+  if (!valve) return
+
+  valve.state = newState  // optimistic update
+
+  try {
+    await sendCommand('CONTROL', [id, newState ? 'OPEN' : 'CLOSE'])
+  } catch (err) {
+    console.error(`[ControlPanel] CONTROL ${id} failed:`, err)
+    valve.state = !newState  // revert on failure
+  }
+}
+
 // Pressure transducers — keyed by drawio element ID.
 const sensors = ref({
   'PT-N2-SUPPLY':  { label: 'N2 Supply',  value: null, unit: 'psi' },
@@ -26,21 +45,24 @@ const sensors = ref({
 
 <template>
   <div id="control-panel">
-    <PidDiagram svg-url="/Launch-P&ID.svg">
+    <PidDiagram svg-url="/P&IDs/Rocket-P&ID-01-03-2026.svg">
       <template #default="{ positionBeside }">
 
         <!-- Valve popup card: one per actuated valve -->
         <div
           v-for="(valve, id) in valves"
           :key="id"
-          :style="positionBeside(id, 'right')"
+          :style="positionBeside(id, 'right', -40)"
           class="pid-overlay"
         >
           <div class="valve-card" :class="{ open: valve.state }">
             <div class="card-id">{{ id }}</div>
             <div class="valve-card-body">
               <div class="valve-toggle-col">
-                <ToggleSwitch v-model="valve.state" />
+                <ToggleSwitch
+                  :modelValue="valve.state"
+                  @update:modelValue="onValveToggle(id, $event)"
+                />
               </div>
               <div class="valve-info">
                 <div class="card-row">
@@ -63,7 +85,7 @@ const sensors = ref({
         <div
           v-for="(sensor, id) in sensors"
           :key="id"
-          :style="positionBeside(id, 'right')"
+          :style="positionBeside(id, 'left', 60)"
           class="pid-overlay"
         >
           <div class="sensor-card">
@@ -108,9 +130,9 @@ const sensors = ref({
   font-weight: 700;
   letter-spacing: 0.3px;
   color: var(--text-primary);
-  margin-bottom: 3px;
+  margin-bottom: 0px;
   border-bottom: 1px solid var(--border-color);
-  padding-bottom: 2px;
+  padding-bottom: 0px;
 }
 
 /* ── Valve card ── */
@@ -133,8 +155,8 @@ const sensors = ref({
   align-items: center;
   justify-content: center;
   border-right: 1px solid var(--border-color);
-  padding: 0 4px 0 0;
-  --p-toggleswitch-width: 40px;
+  padding: 2px 5px  0;
+  --p-toggleswitch-width: 30px;
   --p-toggleswitch-height: 12px;
   --p-toggleswitch-handle-size: 8px;
 }
@@ -142,10 +164,6 @@ const sensors = ref({
 /* Rotate the toggle switch to be vertical */
 .valve-toggle-col :deep(.p-toggleswitch) {
   transform: rotate(-90deg);
-  /* Collapse the layout box to match the post-rotation visual size:
-     native 40w×12h → visual 12w×40h after -90deg rotation.
-     Horizontal excess: (40-12)/2 = 14px each side → negative margins.
-     Vertical deficit:  same 14px each side → positive margins. */
   margin: 14px -14px;
   padding: 0;
 }
@@ -155,7 +173,7 @@ const sensors = ref({
   justify-content: space-between;
   align-items: center;
   gap: 6px;
-  margin-bottom: 2px;
+  margin-bottom: -2px;
 }
 
 .card-detail {

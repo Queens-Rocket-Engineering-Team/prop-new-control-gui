@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref, shallowRef } from "vue";
+import { onMounted, provide, ref, shallowRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import "primeicons/primeicons.css";
 
@@ -31,6 +31,8 @@ function onNavResize(w) {
 }
 
 const server_ip = ref("");
+provide('serverIp', server_ip);
+
 function get_ip(new_ip) {
   console.log("Received new IP from settings:", new_ip);
   server_ip.value = new_ip;

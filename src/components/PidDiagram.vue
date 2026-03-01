@@ -207,6 +207,34 @@ onMounted(loadSvg)
   display: block;
 }
 
+/* Recolor the draw.io SVG to follow the app's theme variables */
+.svg-layer :deep(svg) {
+  background: transparent !important;
+}
+.svg-layer :deep(svg rect[fill="#ffffff"]),
+.svg-layer :deep(svg rect[fill="rgb(255, 255, 255)"]),
+.svg-layer :deep(svg rect[fill="white"]) {
+  fill: var(--bg-primary) !important;
+}
+.svg-layer :deep(svg text),
+.svg-layer :deep(svg tspan) {
+  fill: var(--text-primary) !important;
+}
+.svg-layer :deep(svg path),
+.svg-layer :deep(svg line),
+.svg-layer :deep(svg polyline),
+.svg-layer :deep(svg polygon),
+.svg-layer :deep(svg circle),
+.svg-layer :deep(svg ellipse) {
+  stroke: var(--text-primary) !important;
+}
+.svg-layer :deep(svg path[fill]:not([fill="none"])),
+.svg-layer :deep(svg polygon[fill]:not([fill="none"])),
+.svg-layer :deep(svg circle[fill]:not([fill="none"])),
+.svg-layer :deep(svg ellipse[fill]:not([fill="none"])) {
+  fill: var(--text-primary) !important;
+}
+
 .overlay-layer {
   position: absolute;
   inset: 0;
