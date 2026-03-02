@@ -176,8 +176,11 @@ watch(serverConfig, (cfg) => {
   if (!cfg) { auxiliaryStates.value = {}; return }
   const s = {}
   for (const device of Object.values(cfg.configs)) {
-    for (const name of Object.keys(device.controls ?? {})) {
-      if (!normalizeId(name).startsWith('av')) s[name] = false
+    for (const [name, ctrl] of Object.entries(device.controls ?? {})) {
+      if (!normalizeId(name).startsWith('av')) {
+        // Relay semantics: CLOSED = energised = true, OPEN = de-energised = false
+        s[name] = (ctrl.defaultState ?? '').toUpperCase() === 'CLOSED'
+      }
     }
   }
   auxiliaryStates.value = s
@@ -186,7 +189,8 @@ watch(serverConfig, (cfg) => {
 async function onAuxToggle(key, newState) {
   auxiliaryStates.value[key] = newState  // optimistic update
   try {
-    await sendCommand('CONTROL', [toControlKey(key), newState ? 'OPEN' : 'CLOSE'])
+    // Relay semantics: true = CLOSED (energised) → send 'CLOSE'
+    await sendCommand('CONTROL', [toControlKey(key), newState ? 'CLOSE' : 'OPEN'])
   } catch (err) {
     console.error(`[ControlPanel] CONTROL ${toControlKey(key)} failed:`, err)
     auxiliaryStates.value[key] = !newState  // revert on failure
@@ -226,9 +230,9 @@ async function onValveToggle(id, newState) {
           >
             <span class="aux-label">{{ ctrl.label }}</span>
             <span class="card-badge">{{ ctrl.defaultState }}</span>
-            <span class="state-indicator" :class="{ open: auxiliaryStates[ctrl.key] }">
+            <span class="state-indicator" :class="auxiliaryStates[ctrl.key] ? 'relay-closed' : 'relay-open'">
               <span class="state-led" />
-              {{ auxiliaryStates[ctrl.key] ? 'OPEN' : 'CLOSED' }}
+              {{ auxiliaryStates[ctrl.key] ? 'CLOSED' : 'OPEN' }}
             </span>
             <ToggleSwitch
               :modelValue="auxiliaryStates[ctrl.key]"
@@ -452,6 +456,7 @@ async function onValveToggle(id, newState) {
   min-width: 40px;
 }
 
+/* Valve state — open = green */
 .state-indicator.open { color: #2ecc71; }
 
 .state-led {
@@ -466,6 +471,19 @@ async function onValveToggle(id, newState) {
 .state-indicator.open .state-led {
   background: #2ecc71;
   box-shadow: 0 0 4px rgba(46, 204, 113, 0.6);
+}
+
+/* Relay state — closed = energised = green, open = de-energised = red */
+.state-indicator.relay-closed { color: #2ecc71; }
+.state-indicator.relay-closed .state-led {
+  background: #2ecc71;
+  box-shadow: 0 0 4px rgba(46, 204, 113, 0.6);
+}
+
+.state-indicator.relay-open { color: #e74c3c; }
+.state-indicator.relay-open .state-led {
+  background: #e74c3c;
+  box-shadow: 0 0 4px rgba(231, 76, 60, 0.5);
 }
 
 /* ── Sensor card ── */
@@ -539,6 +557,11 @@ async function onValveToggle(id, newState) {
   --p-toggleswitch-width: 30px;
   --p-toggleswitch-height: 12px;
   --p-toggleswitch-handle-size: 8px;
+  /* CLOSED (checked/on) = green; OPEN (unchecked/off) = red */
+  --p-toggleswitch-checked-background: #2ecc71;
+  --p-toggleswitch-checked-hover-background: #27ae60;
+  --p-toggleswitch-background: #e74c3c;
+  --p-toggleswitch-hover-background: #c0392b;
   flex-shrink: 0;
 }
 
