@@ -1,10 +1,10 @@
 <script setup>
 import { invoke } from "@tauri-apps/api/core";
-import { ref, nextTick } from "vue";
+import { inject, ref, nextTick } from "vue";
 
 import { Panel } from "primevue";
 
-let server_ip;
+const server_ip = inject("serverIp");
 const cameras = ref();
 
 let arr = [];
@@ -137,7 +137,7 @@ async function startStream(item) {
         }
     });
 
-    const whepUrl = `http://${server_ip}:8889${item.stream_path}/whep`;
+    const whepUrl = `http://${server_ip.value}:8889${item.stream_path}/whep`;
     const res = await fetch(whepUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/sdp' },
@@ -150,10 +150,9 @@ async function startStream(item) {
 
 async function get_list() {
     arr = []; // empty array on call
-    server_ip = await invoke("fetch_server_ip");
     
     text.value = "Fetching Cameras...";
-    const camera_url = `http://${server_ip}:8000/v1/cameras`;
+    const camera_url = `http://${server_ip.value}:8000/v1/cameras`;
     fetch(camera_url, { headers: { "Authorization": `Basic ${btoa("admin:propteambestteam")}`}})    
     .then
     (
@@ -176,7 +175,7 @@ async function get_list() {
 }
 
 function refresh_list() {
-    fetch(`http://${server_ip}:8000/v1/cameras/reconnect`, {
+    fetch(`http://${server_ip.value}:8000/v1/cameras/reconnect`, {
         method: "POST",
         headers: {
             "Authorization": `Basic ${btoa("admin:propteambestteam")}`
@@ -188,7 +187,7 @@ function refresh_list() {
 
 function cam_right(ip) {
     //TODO: update x_movement/y_movement amounts
-    fetch(`http://${server_ip}:8000/v1/camera?ip=${ip}&x_movement=-0.2&y_movement=0`, {
+    fetch(`http://${server_ip.value}:8000/v1/camera?ip=${ip}&x_movement=-0.2&y_movement=0`, {
         method: "POST",
         headers: {
             "Authorization": `Basic ${btoa("admin:propteambestteam")}`
@@ -198,7 +197,7 @@ function cam_right(ip) {
 }
 
 function cam_left(ip) { 
-    fetch(`http://${server_ip}:8000/v1/camera?ip=${ip}&x_movement=0.2&y_movement=0`, {
+    fetch(`http://${server_ip.value}:8000/v1/camera?ip=${ip}&x_movement=0.2&y_movement=0`, {
         method: "POST",
         headers: {
             "Authorization": `Basic ${btoa("admin:propteambestteam")}`
@@ -207,7 +206,7 @@ function cam_left(ip) {
 }
 
 function cam_up(ip) {
-    fetch(`http://${server_ip}:8000/v1/camera?ip=${ip}&x_movement=0&y_movement=0.2`, {
+    fetch(`http://${server_ip.value}:8000/v1/camera?ip=${ip}&x_movement=0&y_movement=0.2`, {
         method: "POST",
         headers: {
             "Authorization": `Basic ${btoa("admin:propteambestteam")}`
@@ -216,7 +215,7 @@ function cam_up(ip) {
 }
 
 function cam_down(ip) {
-    fetch(`http://${server_ip}:8000/v1/camera?ip=${ip}&x_movement=0&y_movement=-0.2`, {
+    fetch(`http://${server_ip.value}:8000/v1/camera?ip=${ip}&x_movement=0&y_movement=-0.2`, {
         method: "POST",
         headers: {
             "Authorization": `Basic ${btoa("admin:propteambestteam")}`
