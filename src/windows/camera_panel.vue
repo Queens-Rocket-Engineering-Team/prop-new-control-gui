@@ -12,7 +12,22 @@ let arr = [];
 const text = ref();
 const videoRefs = {};
 const recorders = {};
-const recordedChunks = {};
+const recordingStates = {};
+
+const DEFAULT_RECORDING_TIMESLICE_MS = 500;
+const MIN_RECORDING_TIMESLICE_MS = 100;
+const MAX_RECORDING_TIMESLICE_MS = 5000;
+
+function getRecordingTimesliceMs() {
+    const raw = localStorage.getItem("cameraRecordingChunkMs");
+    const parsed = Number(raw);
+
+    if (!Number.isFinite(parsed)) {
+        return DEFAULT_RECORDING_TIMESLICE_MS;
+    }
+
+    return Math.max(MIN_RECORDING_TIMESLICE_MS, Math.min(MAX_RECORDING_TIMESLICE_MS, Math.floor(parsed)));
+}
 
 function setVideoRef(el, ip) {
     if (el) {
@@ -20,7 +35,7 @@ function setVideoRef(el, ip) {
     }
 }
 
-function startRecording(item) {
+async function startRecording(item) {
     const ip = item.ip;
     if (recorders[ip]) return;
 
@@ -30,36 +45,61 @@ function startRecording(item) {
         return;
     }
 
-    recordedChunks[ip] = [];
     const recorder = new MediaRecorder(videoEl.srcObject);
     recorders[ip] = recorder;
+    const chunkTimesliceMs = getRecordingTimesliceMs();
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const ext = recorder.mimeType.includes('webm') ? 'webm' : 'mp4';
+    const filename = `${timestamp}-${item.hostname}.${ext}`;
+
+    try {
+        const savedPath = await invoke("init_recording_file", { filename });
+        recordingStates[ip] = {
+            filename,
+            savedPath,
+            bytesWritten: 0,
+            writeQueue: Promise.resolve(),
+        };
+    } catch (e) {
+        delete recorders[ip];
+        text.value = `Failed to start recording for ${item.hostname}: ${e}`;
+        return;
+    }
 
     recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
-            recordedChunks[ip].push(event.data);
-            console.log(`[${ip}] Chunk: ${event.data.size} bytes`);
+            const state = recordingStates[ip];
+            if (!state) return;
+
+            state.writeQueue = state.writeQueue.then(async () => {
+                const buffer = await event.data.arrayBuffer();
+                const bytes = Array.from(new Uint8Array(buffer));
+                await invoke("append_recording_chunk", { filename: state.filename, data: bytes });
+                state.bytesWritten += bytes.length;
+                text.value = `Recording ${item.hostname}: ${state.bytesWritten} bytes written`;
+            }).catch((e) => {
+                text.value = `Chunk write failed for ${item.hostname}: ${e}`;
+            });
         }
     };
 
     recorder.onstop = async () => {
-        const blob = new Blob(recordedChunks[ip], { type: recorder.mimeType });
-        const buffer = await blob.arrayBuffer();
-        const bytes = Array.from(new Uint8Array(buffer));
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const ext = recorder.mimeType.includes('webm') ? 'webm' : 'mp4';
-        const filename = `${timestamp}-${item.hostname}.${ext}`;
-        text.value = `Saving ${bytes.length} bytes for ${item.hostname}...`;
+        const state = recordingStates[ip];
+        if (!state) return;
+
+        text.value = `Finalizing recording for ${item.hostname}...`;
         try {
-            const savedPath = await invoke("save_recording", { data: bytes, filename });
-            text.value = `Saved: ${savedPath}`;
+            await state.writeQueue;
+            text.value = `Saved: ${state.savedPath} (${state.bytesWritten} bytes)`;
         } catch (e) {
             text.value = `Save failed: ${e}`;
         }
-        delete recordedChunks[ip];
+        delete recordingStates[ip];
     };
 
-    recorder.start(1000);
-    text.value = `Recording started for ${item.hostname}`;
+    recorder.start(chunkTimesliceMs);
+    text.value = `Recording started for ${item.hostname} (chunk ${chunkTimesliceMs}ms)`;
 }
 
 function stopRecording(ip) {
