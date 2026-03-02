@@ -2,6 +2,8 @@
 import { ref, watch, onMounted } from 'vue'
 import { usePidOverlay } from '../composables/usePidOverlay.js'
 
+const emit = defineEmits(['cells-parsed'])
+
 const props = defineProps({
   /** Path to SVG served from /public, e.g. '/Launch-P&ID.svg' */
   svgUrl: { type: String, required: true },
@@ -118,6 +120,7 @@ function parsePidCells(svgText) {
 
   console.debug('[PidDiagram] parsed cells:', Object.keys(cells))
   pidCells.value = cells
+  emit('cells-parsed', cells)
 }
 
 // ─── SVG loading ────────────────────────────────────────────────────────────
@@ -162,6 +165,7 @@ function syncColors() {
   }
 }
 
+watch(() => props.svgUrl,         loadSvg)
 watch(() => props.pipeFlowStates, syncFlowStates, { deep: true })
 watch(() => props.elementColors,  syncColors,      { deep: true })
 
@@ -207,31 +211,57 @@ onMounted(loadSvg)
   display: block;
 }
 
-/* Recolor the draw.io SVG to follow the app's theme variables */
+/* ── Recolor the draw.io SVG to follow the app's theme ─────────────────────
+   draw.io exports use three coloring mechanisms we must handle:
+   1. fill/stroke as HTML attributes  (e.g. fill="#000000")
+   2. fill/stroke via inline style using light-dark() CSS fn
+      — these resolve correctly once we set color-scheme on <html>
+        (settings_modal.vue sets document.documentElement.style.colorScheme)
+   3. Text labels via <foreignObject><div> with color: light-dark(...)
+      — overridden below as a belt-and-suspenders fix
+   ─────────────────────────────────────────────────────────────────────── */
+
 .svg-layer :deep(svg) {
   background: transparent !important;
 }
+
+/* White background rects (attribute-based) */
 .svg-layer :deep(svg rect[fill="#ffffff"]),
 .svg-layer :deep(svg rect[fill="rgb(255, 255, 255)"]),
 .svg-layer :deep(svg rect[fill="white"]) {
   fill: var(--bg-primary) !important;
 }
+
+/* Native SVG text elements */
 .svg-layer :deep(svg text),
 .svg-layer :deep(svg tspan) {
   fill: var(--text-primary) !important;
 }
+
+/* Text labels inside foreignObject (draw.io HTML label format) */
+.svg-layer :deep(foreignObject div),
+.svg-layer :deep(foreignObject span),
+.svg-layer :deep(foreignObject p) {
+  color: var(--text-primary) !important;
+}
+
+/* Strokes (attribute-based and inline-style — !important wins over both) */
 .svg-layer :deep(svg path),
 .svg-layer :deep(svg line),
 .svg-layer :deep(svg polyline),
 .svg-layer :deep(svg polygon),
 .svg-layer :deep(svg circle),
-.svg-layer :deep(svg ellipse) {
+.svg-layer :deep(svg ellipse),
+.svg-layer :deep(svg rect) {
   stroke: var(--text-primary) !important;
 }
+
+/* Filled shapes with explicit fill attribute (not "none") */
 .svg-layer :deep(svg path[fill]:not([fill="none"])),
 .svg-layer :deep(svg polygon[fill]:not([fill="none"])),
 .svg-layer :deep(svg circle[fill]:not([fill="none"])),
-.svg-layer :deep(svg ellipse[fill]:not([fill="none"])) {
+.svg-layer :deep(svg ellipse[fill]:not([fill="none"])),
+.svg-layer :deep(svg rect[fill]:not([fill="none"]):not([fill="#ffffff"])) {
   fill: var(--text-primary) !important;
 }
 

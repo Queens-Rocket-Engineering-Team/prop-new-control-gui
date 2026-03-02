@@ -37,6 +37,9 @@ provide('serverIp', server_ip);
 const serverConfig = ref(null);
 provide('serverConfig', serverConfig);
 
+const pidConfig = ref('rocket-launch');
+provide('pidConfig', pidConfig);
+
 const { fetchConfig } = useServerApi(server_ip);
 watch(server_ip, async (ip) => {
   if (!ip) { serverConfig.value = null; return }
@@ -82,8 +85,10 @@ onMounted(() => {
     <settings-modal
       :is-open="settingsOpen"
       :current-ip="server_ip"
+      :pid-config="pidConfig"
       @close="settingsOpen = false"
       @update-ip="get_ip"
+      @update-pid-config="pidConfig = $event"
     ></settings-modal>
   </main>
 </template>

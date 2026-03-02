@@ -1,20 +1,95 @@
 <script setup>
-import { ref, inject, computed } from 'vue'
+import { ref, inject, computed, watch } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 import PidDiagram from '../components/PidDiagram.vue'
 import { useServerApi } from '../composables/useServerApi.js'
 
-const serverIp = inject('serverIp', ref(''))
+const serverIp     = inject('serverIp',     ref(''))
 const serverConfig = inject('serverConfig', ref(null))
+const pidConfig    = inject('pidConfig',    ref('rocket-launch'))
 const { sendCommand } = useServerApi(serverIp)
 
-// Normalize an ID to alphanumeric lowercase for fuzzy matching.
-// e.g. 'AV-DUMP' → 'avdump', 'AVDump' → 'avdump'
+// ── SVG URL mapping (the only static config needed) ─────────────────────────
+
+const SVG_URLS = {
+  'hot-fire':      '/P&IDs/Hot-Fire-P&ID-01-03-2026.svg',
+  'rocket-launch': '/P&IDs/Rocket-P&ID-01-03-2026.svg',
+}
+
+const svgUrl = computed(() => SVG_URLS[pidConfig.value] ?? SVG_URLS['rocket-launch'])
+
+// ── Dynamic element lists (populated from parsed SVG cells) ──────────────────
+// Categorised by ID prefix/pattern:
+//   AV-*         → actuated valve toggle cards
+//   PT-*         → pressure transducer sensor cards  (unit: psi)
+//   TC-*         → thermocouple sensor cards          (unit: °C)
+//   LC-*         → load-cell sensor cards             (unit: kg)
+//   MV-*         → manual valve info cards (below element)
+//   *TANK*       → tank info cards         (centred on element)
+//   REGULATOR-*  → regulator info cards    (right of element)
+
+const valves     = ref([])           // [id, ...]
+const sensors    = ref([])           // [{ id, unit }, ...]
+const mvs        = ref([])           // [id, ...]
+const tanks      = ref([])           // [id, ...]
+const regulators = ref([])           // [id, ...]
+
+function onCellsParsed(cells) {
+  const newValves = [], newSensors = [], newMvs = [], newTanks = [], newRegs = []
+
+  for (const id of Object.keys(cells)) {
+    const up = id.toUpperCase()
+    if      (up.startsWith('AV'))         newValves.push(id)
+    else if (up.startsWith('PT'))         newSensors.push({ id, unit: 'psi' })
+    else if (up.startsWith('TC'))         newSensors.push({ id, unit: '°C'  })
+    else if (up.startsWith('LC'))         newSensors.push({ id, unit: 'kg'  })
+    else if (up.startsWith('MV'))         newMvs.push(id)
+    else if (up.includes('TANK'))         newTanks.push(id)
+    else if (up.startsWith('REGULATOR'))  newRegs.push(id)
+  }
+
+  valves.value     = newValves
+  sensors.value    = newSensors
+  mvs.value        = newMvs
+  tanks.value      = newTanks
+  regulators.value = newRegs
+
+  // Initialise valve states (all closed) for the new set
+  const s = {}
+  for (const id of newValves) s[id] = false
+  valveStates.value = s
+}
+
+// Clear stale overlays immediately when the config switches (before the new
+// SVG loads and fires cells-parsed).
+watch(pidConfig, () => {
+  valves.value     = []
+  sensors.value    = []
+  mvs.value        = []
+  tanks.value      = []
+  regulators.value = []
+  valveStates.value = {}
+})
+
+// ── Valve open/close state ───────────────────────────────────────────────────
+
+const valveStates = ref({})
+
+// ── ID normalization ─────────────────────────────────────────────────────────
+
+// Strip non-alphanumeric, lowercase — for fuzzy matching against server keys.
 function normalizeId(id) {
   return id.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()
 }
 
-// Set of normalized control keys from every connected device.
+// Control key sent to the server: strip non-alphanumeric, UPPERCASE.
+// 'AV-DUMP' → 'AVDUMP', 'AV-N2FILL' → 'AVN2FILL'
+function toControlKey(id) {
+  return id.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()
+}
+
+// ── Server-enabled controls ──────────────────────────────────────────────────
+
 const enabledControls = computed(() => {
   const cfg = serverConfig.value
   if (!cfg) return new Set()
@@ -27,8 +102,8 @@ const enabledControls = computed(() => {
   return keys
 })
 
-// A drawio valve ID is enabled if any server control key's normalized form
-// starts with the normalized drawio ID (handles numbered variants like AVPurge1).
+// A valve is enabled if any server control key starts with its normalised form.
+// (handles numbered variants: AVPurge1 / AVPurge2 both match AV-PURGE)
 function isValveEnabled(drawioId) {
   const norm = normalizeId(drawioId)
   for (const key of enabledControls.value) {
@@ -37,55 +112,71 @@ function isValveEnabled(drawioId) {
   return false
 }
 
-// Remotely actuated valves — keyed by drawio element ID.
-// defaultState: 'NC' = normally closed, 'NO' = normally open.
-const valves = ref({
-  'AV-DUMP':      { label: 'AV Dump',      state: false, defaultState: 'NC' },
-  'AV-FILL-DUMP': { label: 'AV Fill Dump', state: false, defaultState: 'NC' },
-  'AV-N2-FILL':   { label: 'AV N2 Fill',   state: false, defaultState: 'NC' },
-  'AV-N2O-FILL':  { label: 'AV N2O Fill',  state: false, defaultState: 'NC' },
-  'AV-PURGE':     { label: 'AV Purge',     state: false, defaultState: 'NC' },
-  'AV-RUN':       { label: 'AV Run',       state: false, defaultState: 'NC' },
-  'AV-VENT':      { label: 'AV Vent',      state: false, defaultState: 'NC' },
-})
-
-async function onValveToggle(id, newState) {
-  console.log("Toggling valve", id, "to", newState)
-  const valve = valves.value[id]
-  if (!valve) return
-
-  valve.state = newState  // optimistic update
-
-  try {
-    await sendCommand('CONTROL', [id, newState ? 'OPEN' : 'CLOSE'])
-  } catch (err) {
-    console.error(`[ControlPanel] CONTROL ${id} failed:`, err)
-    valve.state = !newState  // revert on failure
+function getValveDefaultState(drawioId) {
+  const norm = normalizeId(drawioId)
+  const cfg = serverConfig.value
+  if (!cfg) return '—'
+  for (const device of Object.values(cfg.configs)) {
+    for (const [key, ctrl] of Object.entries(device.controls ?? {})) {
+      if (normalizeId(key).startsWith(norm)) return ctrl.defaultState ?? '—'
+    }
   }
+  return '—'
 }
 
-// Pressure transducers — keyed by drawio element ID.
-const sensors = ref({
-  'PT-N2-SUPPLY':  { label: 'N2 Supply',  value: null, unit: 'psi' },
-  'PT-N2O-SUPPLY': { label: 'N2O Supply', value: null, unit: 'psi' },
-  'PT-C-CHAMBER':  { label: 'Chamber',    value: null, unit: 'psi' },
-  'PT-RUN':        { label: 'Run Line',   value: null, unit: 'psi' },
+// ── Server-enabled sensors ───────────────────────────────────────────────────
+
+const enabledSensors = computed(() => {
+  const cfg = serverConfig.value
+  if (!cfg) return new Set()
+  const keys = new Set()
+  for (const device of Object.values(cfg.configs)) {
+    for (const category of Object.values(device.sensorInfo ?? {})) {
+      if (typeof category !== 'object' || Array.isArray(category)) continue
+      for (const key of Object.keys(category)) {
+        keys.add(normalizeId(key))
+      }
+    }
+  }
+  return keys
 })
+
+function isSensorEnabled(drawioId) {
+  const norm = normalizeId(drawioId)
+  for (const key of enabledSensors.value) {
+    if (key.startsWith(norm) || norm.startsWith(key)) return true
+  }
+  return false
+}
+
+// ── Valve toggle ─────────────────────────────────────────────────────────────
+
+async function onValveToggle(id, newState) {
+  if (!isValveEnabled(id)) return
+  valveStates.value[id] = newState  // optimistic update
+
+  try {
+    await sendCommand('CONTROL', [toControlKey(id), newState ? 'OPEN' : 'CLOSE'])
+  } catch (err) {
+    console.error(`[ControlPanel] CONTROL ${toControlKey(id)} failed:`, err)
+    valveStates.value[id] = !newState  // revert on failure
+  }
+}
 </script>
 
 <template>
   <div id="control-panel">
-    <PidDiagram svg-url="/P&IDs/Rocket-P&ID-01-03-2026.svg">
-      <template #default="{ positionBeside }">
+    <PidDiagram :svg-url="svgUrl" @cells-parsed="onCellsParsed">
+      <template #default="{ positionOf, positionBeside }">
 
-        <!-- Valve popup card: one per actuated valve -->
+        <!-- ── Actuated valve cards ── -->
         <div
-          v-for="(valve, id) in valves"
+          v-for="id in valves"
           :key="id"
-          :style="positionBeside(id, 'right', -40)"
+          :style="{ ...positionBeside(id, 'bottom', -10), marginLeft: '-50px' }"
           class="pid-overlay"
         >
-          <div class="valve-card" :class="{ open: valve.state, locked: !isValveEnabled(id) }">
+          <div class="valve-card" :class="{ open: valveStates[id], locked: !isValveEnabled(id) }">
             <div class="card-id">
               {{ id }}
               <span v-if="!isValveEnabled(id)" class="lock-badge">NO CTRL</span>
@@ -93,7 +184,7 @@ const sensors = ref({
             <div class="valve-card-body">
               <div class="valve-toggle-col">
                 <ToggleSwitch
-                  :modelValue="valve.state"
+                  :modelValue="valveStates[id]"
                   :disabled="!isValveEnabled(id)"
                   @update:modelValue="onValveToggle(id, $event)"
                 />
@@ -101,13 +192,13 @@ const sensors = ref({
               <div class="valve-info">
                 <div class="card-row">
                   <span class="card-detail">Default</span>
-                  <span class="card-badge">{{ valve.defaultState }}</span>
+                  <span class="card-badge">{{ getValveDefaultState(id) }}</span>
                 </div>
                 <div class="card-row">
                   <span class="card-detail">State</span>
-                  <span class="state-indicator" :class="{ open: valve.state }">
+                  <span class="state-indicator" :class="{ open: valveStates[id] }">
                     <span class="state-led" />
-                    {{ valve.state ? 'OPEN' : 'CLOSED' }}
+                    {{ valveStates[id] ? 'OPEN' : 'CLOSED' }}
                   </span>
                 </div>
               </div>
@@ -115,22 +206,53 @@ const sensors = ref({
           </div>
         </div>
 
-        <!-- Sensor popup card: one per pressure transducer -->
+        <!-- ── Sensor cards (PT / TC / LC) ── -->
         <div
-          v-for="(sensor, id) in sensors"
-          :key="id"
-          :style="positionBeside(id, 'left', 60)"
+          v-for="sensor in sensors"
+          :key="sensor.id"
+          :style="{ ...positionBeside(sensor.id, 'bottom', -15), marginLeft: '-50px' }"
           class="pid-overlay"
         >
-          <div class="sensor-card">
-            <div class="card-id">{{ id }}</div>
+          <div class="sensor-card" :class="{ locked: !isSensorEnabled(sensor.id) }">
+            <div class="card-id">
+              {{ sensor.id }}
+              <span v-if="!isSensorEnabled(sensor.id)" class="lock-badge">NO SENSOR</span>
+            </div>
             <div class="sensor-reading">
-              <span class="reading-value">
-                {{ sensor.value !== null ? sensor.value : '—' }}
-              </span>
+              <span class="reading-value">—</span>
               <span class="reading-unit">{{ sensor.unit }}</span>
             </div>
           </div>
+        </div>
+
+        <!-- ── Manual valve name cards (below) ── -->
+        <div
+          v-for="id in mvs"
+          :key="id"
+          :style="{ ...positionBeside(id, 'bottom', -10), marginLeft: '-60px' }"
+          class="pid-overlay"
+        >
+          <div class="info-card">{{ id }}</div>
+        </div>
+
+        <!-- ── Tank name cards (centred) ── -->
+        <div
+          v-for="id in tanks"
+          :key="id"
+          :style="{ ...positionBeside(id, 'right', -40)}"
+          class="pid-overlay"
+        >
+          <div class="info-card">{{ id }}</div>
+        </div>
+
+        <!-- ── Regulator name cards (right) ── -->
+        <div
+          v-for="id in regulators"
+          :key="id"
+          :style="{ ...positionBeside(id, 'right', -40), marginTop: '-15px' }"
+          class="pid-overlay"
+        >
+          <div class="info-card">{{ id }}</div>
         </div>
 
       </template>
@@ -164,14 +286,40 @@ const sensors = ref({
   font-weight: 700;
   letter-spacing: 0.3px;
   color: var(--text-primary);
-  margin-bottom: 0px;
   border-bottom: 1px solid var(--border-color);
   padding-bottom: 0px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+/* ── Locked state ── */
+
+.valve-card.locked,
+.sensor-card.locked {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.valve-card.locked .valve-card-body,
+.sensor-card.locked .sensor-reading {
+  pointer-events: none;
+}
+
+.lock-badge {
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 2px;
+  padding: 0px 3px;
+  white-space: nowrap;
 }
 
 /* ── Valve card ── */
-
-/* ── Valve card body: info left, toggle right ── */
 
 .valve-card-body {
   display: flex;
@@ -189,13 +337,12 @@ const sensors = ref({
   align-items: center;
   justify-content: center;
   border-right: 1px solid var(--border-color);
-  padding: 2px 5px  0;
+  padding: 2px 5px 0;
   --p-toggleswitch-width: 30px;
   --p-toggleswitch-height: 12px;
   --p-toggleswitch-handle-size: 8px;
 }
 
-/* Rotate the toggle switch to be vertical */
 .valve-toggle-col :deep(.p-toggleswitch) {
   transform: rotate(-90deg);
   margin: 14px -14px;
@@ -236,9 +383,7 @@ const sensors = ref({
   min-width: 40px;
 }
 
-.state-indicator.open {
-  color: #2ecc71;
-}
+.state-indicator.open { color: #2ecc71; }
 
 .state-led {
   width: 5px;
@@ -252,30 +397,6 @@ const sensors = ref({
 .state-indicator.open .state-led {
   background: #2ecc71;
   box-shadow: 0 0 4px rgba(46, 204, 113, 0.6);
-}
-
-/* ── Locked valve card ── */
-
-.valve-card.locked {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.valve-card.locked .valve-card-body {
-  pointer-events: none;
-}
-
-.lock-badge {
-  float: right;
-  font-size: 7px;
-  font-weight: 700;
-  letter-spacing: 0.3px;
-  color: var(--text-muted);
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-radius: 2px;
-  padding: 0px 3px;
-  margin-left: 4px;
 }
 
 /* ── Sensor card ── */
@@ -298,5 +419,23 @@ const sensors = ref({
 .reading-unit {
   font-size: 9px;
   color: var(--text-muted);
+}
+
+/* ── Info cards (MV, Tank, Regulator) ── */
+
+.info-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  padding: 2px 5px;
+  font-size: 8px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: default;
+  user-select: none;
+  opacity: 0.85;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+
 }
 </style>
