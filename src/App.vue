@@ -7,7 +7,6 @@ import "primeicons/primeicons.css";
 
 import NavBar from "./components/nav_bar.vue";
 
-import WelcomePanel from "./windows/welcome_panel.vue";
 import CameraPanel from "./windows/camera_panel.vue";
 import GraphPanel from "./windows/graph_panel.vue";
 import ControlPanel from "./windows/control_panel.vue";
@@ -16,7 +15,7 @@ import FlightPanel from "./windows/flight_panel.vue";
 
 import SettingsModal from "./components/settings_modal.vue";
 
-const window_content = shallowRef(WelcomePanel);
+const window_content = shallowRef(ControlPanel);
 function setActive(component) {
   window_content.value = component;
 }

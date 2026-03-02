@@ -3,7 +3,6 @@ import { ref, watch, inject, onMounted, onUnmounted } from "vue";
 import Button from "primevue/button";
 import ServerBar from "./server_bar.vue";
 
-import WelcomePanel from "../windows/welcome_panel.vue";
 import CameraPanel from "../windows/camera_panel.vue";
 import GraphPanel from "../windows/graph_panel.vue";
 import ControlPanel from "../windows/control_panel.vue";
@@ -123,7 +122,6 @@ function formatElapsed(ms) {
         <Button @click="emit('navigate', DeviceSummaryPanel)" label="Devices" />
         <Button @click="emit('navigate', DebugPanel)"   label="Debug" />
         <Button @click="emit('navigate', FlightPanel)"  label="Flight" />
-        <Button @click="emit('navigate', WelcomePanel)" label="Welcome" />
       </div>
 
       <div id="nav-lower">
