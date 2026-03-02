@@ -41,7 +41,7 @@ provide('serverConfig', serverConfig);
 const pidConfig = ref('rocket-launch');
 provide('pidConfig', pidConfig);
 
-const { fetchConfig } = useServerApi(server_ip);
+const { fetchConfig, sendCommand } = useServerApi(server_ip);
 const { logLines, wsStatus, clearLogs } = useLogStream(server_ip);
 provide('logLines', logLines);
 provide('wsStatus', wsStatus);
@@ -50,8 +50,9 @@ watch(server_ip, async (ip) => {
   if (!ip) { serverConfig.value = null; return }
   try {
     serverConfig.value = await fetchConfig()
+    await sendCommand('STREAM', ['100'])
   } catch (err) {
-    console.error('[App] fetchConfig failed:', err)
+    console.error('[App] server setup failed:', err)
     serverConfig.value = null
   }
 });
