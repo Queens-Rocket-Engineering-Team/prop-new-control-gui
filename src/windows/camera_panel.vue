@@ -54,7 +54,7 @@ async function startRecording(item) {
     const filename = `${timestamp}-${item.hostname}.${ext}`;
 
     try {
-        const savedPath = await invoke("init_recording_file", { filename });
+        const savedPath = await invoke("init_camera_recording_file", { filename });
         recordingStates[ip] = {
             filename,
             savedPath,
@@ -75,7 +75,7 @@ async function startRecording(item) {
             state.writeQueue = state.writeQueue.then(async () => {
                 const buffer = await event.data.arrayBuffer();
                 const bytes = Array.from(new Uint8Array(buffer));
-                await invoke("append_recording_chunk", { filename: state.filename, data: bytes });
+                await invoke("append_camera_recording_chunk", { filename: state.filename, data: bytes });
                 state.bytesWritten += bytes.length;
                 text.value = `Recording ${item.hostname}: ${state.bytesWritten} bytes written`;
             }).catch((e) => {

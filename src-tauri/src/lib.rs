@@ -1,14 +1,9 @@
 use std::collections::{BTreeSet, HashMap};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::string::String;
 use std::sync::{LazyLock, Mutex};
-use std::fs;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::PathBuf;
 
 static IP_ADDRESS: Mutex<String> = Mutex::new(String::new());
 
@@ -184,8 +179,6 @@ fn stop_recording() -> Result<(), String> {
     Ok(())
 }
 
-// ── Tauri entry point ────────────────────────────────────────────────────────
-
 #[tauri::command]
 // returns the current camera recording directory
 async fn fetch_camera_recording_dir() -> String {
@@ -201,15 +194,15 @@ async fn set_camera_recording_dir(new_dir: String) {
     *gaurded_dir = String::from(new_dir);
 }
 
-fn recording_path(filename: &str) -> Result<PathBuf, String> {
+fn camera_recording_path(filename: &str) -> Result<PathBuf, String> {
     let videos_dir = PathBuf::from(CAMERA_RECORDING_DIR.lock().unwrap().to_string());
     fs::create_dir_all(&videos_dir).map_err(|e| e.to_string())?;
     Ok(videos_dir.join(filename))
 }
 
 #[tauri::command]
-async fn init_recording_file(filename: String) -> Result<String, String> {
-    let path = recording_path(&filename)?;
+async fn init_camera_recording_file(filename: String) -> Result<String, String> {
+    let path = camera_recording_path(&filename)?;
     OpenOptions::new()
         .create(true)
         .write(true)
@@ -221,8 +214,8 @@ async fn init_recording_file(filename: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn append_recording_chunk(filename: String, data: Vec<u8>) -> Result<(), String> {
-    let path = recording_path(&filename)?;
+async fn append_camera_recording_chunk(filename: String, data: Vec<u8>) -> Result<(), String> {
+    let path = camera_recording_path(&filename)?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -233,15 +226,6 @@ async fn append_recording_chunk(filename: String, data: Vec<u8>) -> Result<(), S
     Ok(())
 }
 
-#[tauri::command]
-// Saves the camera recording data to a file in the specified camera recording directory
-async fn save_recording(data: Vec<u8>, filename: String) -> Result<String, String> {
-    let path = recording_path(&filename)?;
-    fs::write(&path, &data).map_err(|e| e.to_string())?;
-    let saved_path = path.to_string_lossy().to_string();
-    println!("Recording saved: {} ({} bytes)", saved_path, data.len());
-    Ok(saved_path)
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -253,6 +237,10 @@ pub fn run() {
             start_recording,
             write_sensor_batch,
             stop_recording,
+            fetch_camera_recording_dir,
+            set_camera_recording_dir,
+            init_camera_recording_file,
+            append_camera_recording_chunk,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
