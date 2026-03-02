@@ -149,6 +149,50 @@ function isSensorEnabled(drawioId) {
   return false
 }
 
+// ── Auxiliary controls (non-AV controls from server config) ─────────────────
+// Any control whose normalised name does NOT start with 'av' is shown here.
+
+const auxiliaryControls = computed(() => {
+  const cfg = serverConfig.value
+  if (!cfg) return []
+  const result = []
+  for (const device of Object.values(cfg.configs)) {
+    for (const [name, ctrl] of Object.entries(device.controls ?? {})) {
+      if (!normalizeId(name).startsWith('av')) {
+        result.push({
+          key:          name,
+          label:        toControlKey(name),   // e.g. "IgnPrime" → "IGNPRIME"
+          defaultState: ctrl.defaultState ?? '—',
+        })
+      }
+    }
+  }
+  return result
+})
+
+const auxiliaryStates = ref({})
+
+watch(serverConfig, (cfg) => {
+  if (!cfg) { auxiliaryStates.value = {}; return }
+  const s = {}
+  for (const device of Object.values(cfg.configs)) {
+    for (const name of Object.keys(device.controls ?? {})) {
+      if (!normalizeId(name).startsWith('av')) s[name] = false
+    }
+  }
+  auxiliaryStates.value = s
+}, { immediate: true })
+
+async function onAuxToggle(key, newState) {
+  auxiliaryStates.value[key] = newState  // optimistic update
+  try {
+    await sendCommand('CONTROL', [toControlKey(key), newState ? 'OPEN' : 'CLOSE'])
+  } catch (err) {
+    console.error(`[ControlPanel] CONTROL ${toControlKey(key)} failed:`, err)
+    auxiliaryStates.value[key] = !newState  // revert on failure
+  }
+}
+
 // ── Valve toggle ─────────────────────────────────────────────────────────────
 
 async function onValveToggle(id, newState) {
@@ -168,6 +212,31 @@ async function onValveToggle(id, newState) {
   <div id="control-panel">
     <PidDiagram :svg-url="svgUrl" @cells-parsed="onCellsParsed">
       <template #default="{ positionOf, positionBeside }">
+
+        <!-- ── Auxiliary controls panel (fixed top-left) ── -->
+        <div
+          v-if="auxiliaryControls.length > 0"
+          class="pid-overlay aux-panel"
+        >
+          <div class="aux-header">Aux Controls</div>
+          <div
+            v-for="ctrl in auxiliaryControls"
+            :key="ctrl.key"
+            class="aux-row"
+          >
+            <span class="aux-label">{{ ctrl.label }}</span>
+            <span class="card-badge">{{ ctrl.defaultState }}</span>
+            <span class="state-indicator" :class="{ open: auxiliaryStates[ctrl.key] }">
+              <span class="state-led" />
+              {{ auxiliaryStates[ctrl.key] ? 'OPEN' : 'CLOSED' }}
+            </span>
+            <ToggleSwitch
+              :modelValue="auxiliaryStates[ctrl.key]"
+              @update:modelValue="onAuxToggle(ctrl.key, $event)"
+              class="aux-toggle"
+            />
+          </div>
+        </div>
 
         <!-- ── Actuated valve cards ── -->
         <div
@@ -239,7 +308,7 @@ async function onValveToggle(id, newState) {
         <div
           v-for="id in tanks"
           :key="id"
-          :style="{ ...positionBeside(id, 'right', -40)}"
+          :style="{ ...positionBeside(id, 'right', -55)}"
           class="pid-overlay"
         >
           <div class="info-card">{{ id }}</div>
@@ -419,6 +488,58 @@ async function onValveToggle(id, newState) {
 .reading-unit {
   font-size: 9px;
   color: var(--text-muted);
+}
+
+/* ── Auxiliary controls panel ── */
+
+.aux-panel {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  min-width: 200px;
+  cursor: default;
+  user-select: none;
+}
+
+.aux-header {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 4px 8px 3px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.aux-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.aux-row:last-child {
+  border-bottom: none;
+}
+
+.aux-label {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.2px;
+  flex: 1;
+}
+
+.aux-toggle {
+  --p-toggleswitch-width: 30px;
+  --p-toggleswitch-height: 12px;
+  --p-toggleswitch-handle-size: 8px;
+  flex-shrink: 0;
 }
 
 /* ── Info cards (MV, Tank, Regulator) ── */
