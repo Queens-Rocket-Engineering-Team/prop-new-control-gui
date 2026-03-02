@@ -52,5 +52,50 @@ export function useServerApi(serverIp) {
     return res.json()
   }
 
-  return { sendCommand, fetchConfig, baseUrl }
+  /**
+   * GET /v1/kasa
+   * @returns {Promise<KasaDeviceInfo[]>}
+   */
+  async function fetchKasaDevices() {
+    if (!baseUrl.value) throw new Error('No server IP configured')
+    const res = await fetch(`${baseUrl.value}/v1/kasa`)
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText)
+      throw new Error(`${res.status}: ${text}`)
+    }
+    return res.json()
+  }
+
+  /**
+   * GET /v1/kasa/discover
+   * @returns {Promise<KasaDeviceInfo[]>}
+   */
+  async function discoverKasaDevices() {
+    if (!baseUrl.value) throw new Error('No server IP configured')
+    const res = await fetch(`${baseUrl.value}/v1/kasa/discover`)
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText)
+      throw new Error(`${res.status}: ${text}`)
+    }
+    return res.json()
+  }
+
+  /**
+   * POST /v1/kasa?host=<host>&active=<bool>
+   * @param {string} host
+   * @param {boolean} active
+   * @returns {Promise<KasaDeviceInfo>}
+   */
+  async function controlKasaDevice(host, active) {
+    if (!baseUrl.value) throw new Error('No server IP configured')
+    const params = new URLSearchParams({ host, active: String(active) })
+    const res = await fetch(`${baseUrl.value}/v1/kasa?${params}`, { method: 'POST' })
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText)
+      throw new Error(`${res.status}: ${text}`)
+    }
+    return res.json()
+  }
+
+  return { sendCommand, fetchConfig, fetchKasaDevices, discoverKasaDevices, controlKasaDevice, baseUrl }
 }

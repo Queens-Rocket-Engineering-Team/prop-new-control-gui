@@ -37,7 +37,46 @@ provide('serverConfig', serverConfig);
 const pidConfig = ref('rocket-launch');
 provide('pidConfig', pidConfig);
 
-const { fetchConfig, sendCommand } = useServerApi(server_ip);
+// ── Persistent control panel state ───────────────────────────────────────────
+// Lifted here so state survives navigation away from the control panel.
+
+const valveStates     = ref({});
+const auxiliaryStates = ref({});
+provide('valveStates',     valveStates);
+provide('auxiliaryStates', auxiliaryStates);
+
+// Clear valve states whenever the P&ID diagram is switched (keys become stale).
+watch(pidConfig, () => { valveStates.value = {}; });
+
+const { fetchConfig, sendCommand, fetchKasaDevices, discoverKasaDevices, controlKasaDevice } = useServerApi(server_ip);
+
+// ── Kasa smart plugs ──────────────────────────────────────────────────────────
+
+const kasaDevices = ref([]);
+provide('kasaDevices', kasaDevices);
+
+async function discoverKasa() {
+  try {
+    kasaDevices.value = await discoverKasaDevices();
+  } catch (err) {
+    console.error('[App] discoverKasa failed:', err);
+  }
+}
+provide('discoverKasa', discoverKasa);
+
+async function setKasaState(host, active) {
+  const idx = kasaDevices.value.findIndex(d => d.host === host);
+  if (idx !== -1) kasaDevices.value[idx] = { ...kasaDevices.value[idx], active };
+  try {
+    const updated = await controlKasaDevice(host, active);
+    const i = kasaDevices.value.findIndex(d => d.host === host);
+    if (i !== -1) kasaDevices.value[i] = updated;
+  } catch (err) {
+    console.error(`[App] setKasaState ${host} failed:`, err);
+    if (idx !== -1) kasaDevices.value[idx] = { ...kasaDevices.value[idx], active: !active };
+  }
+}
+provide('setKasaState', setKasaState);
 
 // ── Test state ───────────────────────────────────────────────────────────────
 
@@ -45,6 +84,34 @@ const testActive    = ref(false);
 const testStartTime = ref(null);
 provide('testActive',    testActive);
 provide('testStartTime', testStartTime);
+
+// ── Tare offsets ─────────────────────────────────────────────────────────────
+// { [sensorName]: rawOffset } — subtracted from displayed values and CSV writes.
+
+const tares = ref({});
+provide('tares', tares);
+
+function setTare(name, rawValue) {
+  tares.value[name] = rawValue;
+}
+provide('setTare', setTare);
+
+// ── Log stream + sensor data ─────────────────────────────────────────────────
+
+const { logLines, wsStatus, sensorData, clearLogs, clearSensorData } =
+  useLogStream(server_ip, {
+    onBatch(timestamp, readings) {
+      if (!testActive.value) return;
+      // Apply tare offsets before writing to CSV
+      const taredReadings = {};
+      for (const [name, val] of Object.entries(readings)) {
+        taredReadings[name] = val - (tares.value[name] ?? 0);
+      }
+      invoke('write_sensor_batch', { timestamp, readings: taredReadings }).catch((err) =>
+        console.error('[App] CSV write failed:', err)
+      );
+    },
+  });
 
 function formatDatetime() {
   const d   = new Date();
@@ -58,6 +125,7 @@ async function startTest() {
   if (testActive.value) return;
   clearSensorData();
   try {
+    await sendCommand('STOP', []);
     await sendCommand('STREAM', ['100']);
     await invoke('start_recording', {
       mode:     pidConfig.value,
@@ -80,22 +148,14 @@ async function stopTest() {
   } catch (err) {
     console.error('[App] stopTest failed:', err);
   }
+  // Restart preview stream after test ends
+  if (server_ip.value) {
+    try { await sendCommand('STREAM', ['10']); } catch { /* ignore */ }
+  }
 }
 
 provide('startTest', startTest);
 provide('stopTest',  stopTest);
-
-// ── Log stream + sensor data ─────────────────────────────────────────────────
-
-const { logLines, wsStatus, sensorData, clearLogs, clearSensorData } =
-  useLogStream(server_ip, {
-    onBatch(timestamp, readings) {
-      if (!testActive.value) return;
-      invoke('write_sensor_batch', { timestamp, readings }).catch((err) =>
-        console.error('[App] CSV write failed:', err)
-      );
-    },
-  });
 
 provide('logLines',   logLines);
 provide('wsStatus',   wsStatus);
@@ -106,14 +166,32 @@ provide('sensorData', sensorData);
 
 watch(server_ip, async (ip) => {
   // Stop any active test when IP changes
-  if (testActive.value) await stopTest();
+  if (testActive.value) {
+    await stopTest();
+  } else {
+    // Stop any preview stream running on the old IP
+    try { await sendCommand('STOP', []); } catch { /* ignore */ }
+  }
 
-  if (!ip) { serverConfig.value = null; return; }
+  tares.value         = {};
+  auxiliaryStates.value = {};
+
+  if (!ip) { serverConfig.value = null; kasaDevices.value = []; return; }
   try {
     serverConfig.value = await fetchConfig();
   } catch (err) {
     console.error('[App] fetchConfig failed:', err);
     serverConfig.value = null;
+  }
+  try {
+    kasaDevices.value = await fetchKasaDevices();
+  } catch (err) {
+    console.error('[App] fetchKasaDevices failed:', err);
+    kasaDevices.value = [];
+  }
+  // Start 10 Hz preview stream so data is visible before a test begins
+  try { await sendCommand('STREAM', ['10']); } catch (err) {
+    console.error('[App] preview STREAM failed:', err);
   }
 });
 

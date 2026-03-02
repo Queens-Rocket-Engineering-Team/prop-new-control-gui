@@ -1,7 +1,22 @@
 <script setup>
 import { ref, inject } from 'vue'
+import ToggleSwitch from 'primevue/toggleswitch'
 
 const serverConfig = inject('serverConfig', ref(null))
+const kasaDevices  = inject('kasaDevices',  ref([]))
+const discoverKasa = inject('discoverKasa',  () => {})
+const setKasaState = inject('setKasaState',  () => {})
+
+const discovering = ref(false)
+
+async function onDiscover() {
+  discovering.value = true
+  try {
+    await discoverKasa()
+  } finally {
+    discovering.value = false
+  }
+}
 
 const CATEGORY_LABELS = {
   thermocouples:       'Thermocouple',
@@ -66,7 +81,8 @@ function getSensors(deviceConfig) {
       <p class="hint">Configure a server IP in settings to see device information.</p>
     </div>
 
-    <div v-else class="device-list">
+    <div v-else>
+    <div class="device-list">
       <div
         v-for="(config, deviceKey) in serverConfig.configs"
         :key="deviceKey"
@@ -138,6 +154,54 @@ function getSensors(deviceConfig) {
 
         </div>
       </div>
+    </div>
+
+    <!-- ── Kasa Smart Plugs ── -->
+    <div class="kasa-section">
+      <div class="kasa-header">
+        <span class="summary-title">Smart Plugs</span>
+        <span class="device-count-badge">{{ kasaDevices.length }}</span>
+        <button class="discover-btn" :disabled="discovering" @click="onDiscover">
+          <i class="pi" :class="discovering ? 'pi-spin pi-spinner' : 'pi-refresh'" />
+          {{ discovering ? 'Scanning…' : 'Discover' }}
+        </button>
+      </div>
+      <p v-if="kasaDevices.length === 0" class="empty-msg kasa-empty">
+        No smart plugs found. Click Discover to scan the network.
+      </p>
+      <table v-else class="data-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Model</th>
+            <th>Host</th>
+            <th>State</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="dev in kasaDevices" :key="dev.host">
+            <td class="name-cell">{{ dev.alias || dev.host }}</td>
+            <td class="mono">{{ dev.model }}</td>
+            <td class="mono">{{ dev.host }}</td>
+            <td>
+              <span class="power-indicator" :class="dev.active ? 'power-on' : 'power-off'">
+                <span class="power-led" />
+                {{ dev.active ? 'ON' : 'OFF' }}
+              </span>
+            </td>
+            <td>
+              <ToggleSwitch
+                :modelValue="dev.active"
+                @update:modelValue="setKasaState(dev.host, $event)"
+                class="kasa-toggle"
+              />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
     </div>
   </div>
 </template>
@@ -349,5 +413,89 @@ function getSensors(deviceConfig) {
 .state-open {
   background: rgba(46, 204, 113, 0.15);
   color: #2ecc71;
+}
+
+/* ── Kasa Smart Plugs section ── */
+
+.kasa-section {
+  margin-top: 20px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.kasa-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.discover-btn {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.discover-btn:hover:not(:disabled) {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.discover-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.kasa-section .data-table {
+  width: calc(100% - 28px);
+  margin: 10px 14px 12px;
+}
+
+.kasa-empty {
+  padding: 10px 14px;
+}
+
+.power-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.power-led {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.power-on  { color: #2ecc71; }
+.power-on  .power-led { background: #2ecc71; box-shadow: 0 0 4px rgba(46, 204, 113, 0.6); }
+.power-off { color: #e74c3c; }
+.power-off .power-led { background: #e74c3c; box-shadow: 0 0 4px rgba(231, 76, 60, 0.5); }
+
+.kasa-toggle {
+  --p-toggleswitch-width: 30px;
+  --p-toggleswitch-height: 14px;
+  --p-toggleswitch-handle-size: 10px;
+  --p-toggleswitch-checked-background: #2ecc71;
+  --p-toggleswitch-checked-hover-background: #27ae60;
+  --p-toggleswitch-background: #e74c3c;
+  --p-toggleswitch-hover-background: #c0392b;
 }
 </style>

@@ -3,6 +3,8 @@ import { ref, inject, computed } from 'vue'
 import Chart from 'primevue/chart'
 
 const sensorData = inject('sensorData', ref({}))
+const tares      = inject('tares',      ref({}))
+const setTare    = inject('setTare',    () => {})
 
 const WINDOW_SEC = 30  // rolling window displayed on every chart
 
@@ -86,16 +88,18 @@ const slots = computed(() => {
     const maxT = h.length > 0 ? h[h.length - 1].t : 0
     const windowed = h.filter((p) => p.t >= maxT - WINDOW_SEC)
 
-    const color = TYPE_MAP[typeKey].color
+    const color  = TYPE_MAP[typeKey].color
+    const offset = tares.value[name] ?? 0
     groups[typeKey].push({
       name,
       typeKey,
-      unit:  info.unit,
-      value: info.value,
+      unit:     info.unit,
+      rawValue: info.value,
+      value:    info.value - offset,
       data: {
         labels: windowed.map((p) => p.t.toFixed(1)),
         datasets: [{
-          data:            windowed.map((p) => p.v),
+          data:            windowed.map((p) => p.v - offset),
           borderColor:     color,
           backgroundColor: color + '18',
           fill:            true,
@@ -173,6 +177,12 @@ function fmt(v) {
             <span class="chart-value">
               {{ fmt(s.value) }}<span class="chart-unit"> {{ s.unit }}</span>
             </span>
+            <button
+              class="tare-btn"
+              :class="{ 'tare-active': (tares[s.name] ?? 0) !== 0 }"
+              @click="setTare(s.name, s.rawValue)"
+              title="Tare (zero at current value)"
+            >T</button>
           </div>
           <div class="chart-body">
             <Chart type="line" :data="s.data" :options="chartOptions" />
@@ -319,6 +329,34 @@ function fmt(v) {
   font-size: 0.6rem;
   font-weight: 400;
   color: var(--text-muted);
+}
+
+/* ── Tare button ── */
+
+.tare-btn {
+  padding: 0 4px;
+  height: 14px;
+  border-radius: 2px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  font-size: 8px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.tare-btn:hover {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.tare-btn.tare-active {
+  border-color: #e67e22;
+  color: #e67e22;
 }
 
 /* ── Chart canvas ── */

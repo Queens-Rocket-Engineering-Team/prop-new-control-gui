@@ -4,10 +4,15 @@ import ToggleSwitch from 'primevue/toggleswitch'
 import PidDiagram from '../components/PidDiagram.vue'
 import { useServerApi } from '../composables/useServerApi.js'
 
-const serverIp     = inject('serverIp',     ref(''))
-const serverConfig = inject('serverConfig', ref(null))
-const pidConfig    = inject('pidConfig',    ref('rocket-launch'))
-const sensorData   = inject('sensorData',   ref({}))
+const serverIp        = inject('serverIp',        ref(''))
+const serverConfig    = inject('serverConfig',    ref(null))
+const pidConfig       = inject('pidConfig',       ref('rocket-launch'))
+const sensorData      = inject('sensorData',      ref({}))
+const tares           = inject('tares',           ref({}))
+const kasaDevices     = inject('kasaDevices',     ref([]))
+const setKasaState    = inject('setKasaState',    () => {})
+const valveStates     = inject('valveStates',     ref({}))
+const auxiliaryStates = inject('auxiliaryStates', ref({}))
 const { sendCommand } = useServerApi(serverIp)
 
 // ── SVG URL mapping (the only static config needed) ─────────────────────────
@@ -55,9 +60,11 @@ function onCellsParsed(cells) {
   tanks.value      = newTanks
   regulators.value = newRegs
 
-  // Initialise valve states (all closed) for the new set
+  // Preserve any user-toggled states; only default-initialise new valve IDs.
   const s = {}
-  for (const id of newValves) s[id] = false
+  for (const id of newValves) {
+    s[id] = id in valveStates.value ? valveStates.value[id] : false
+  }
   valveStates.value = s
 }
 
@@ -71,10 +78,6 @@ watch(pidConfig, () => {
   regulators.value = []
   valveStates.value = {}
 })
-
-// ── Valve open/close state ───────────────────────────────────────────────────
-
-const valveStates = ref({})
 
 // ── ID normalization ─────────────────────────────────────────────────────────
 
@@ -162,11 +165,22 @@ const normalizedSensorMap = computed(() => {
   return map
 })
 
+// Maps normalizeId(sensorName) → tare offset, for O(1) lookup in getLiveValue.
+const normalizedTaresMap = computed(() => {
+  const map = {}
+  for (const [name, offset] of Object.entries(tares.value)) {
+    map[normalizeId(name)] = offset
+  }
+  return map
+})
+
 function getLiveValue(drawioId) {
-  const info = normalizedSensorMap.value[normalizeId(drawioId)]
+  const norm   = normalizeId(drawioId)
+  const info   = normalizedSensorMap.value[norm]
   if (!info) return '—'
-  const v = info.value
-  const abs = Math.abs(v)
+  const offset = normalizedTaresMap.value[norm] ?? 0
+  const v      = info.value - offset
+  const abs    = Math.abs(v)
   if (abs >= 1000) return v.toFixed(0)
   if (abs >= 10)   return v.toFixed(1)
   return v.toFixed(2)
@@ -193,16 +207,17 @@ const auxiliaryControls = computed(() => {
   return result
 })
 
-const auxiliaryStates = ref({})
-
 watch(serverConfig, (cfg) => {
   if (!cfg) { auxiliaryStates.value = {}; return }
+  // Preserve any user-toggled states; only default-initialise new keys.
   const s = {}
   for (const device of Object.values(cfg.configs)) {
     for (const [name, ctrl] of Object.entries(device.controls ?? {})) {
       if (!normalizeId(name).startsWith('av')) {
         // Relay semantics: CLOSED = energised = true, OPEN = de-energised = false
-        s[name] = (ctrl.defaultState ?? '').toUpperCase() === 'CLOSED'
+        s[name] = name in auxiliaryStates.value
+          ? auxiliaryStates.value[name]
+          : (ctrl.defaultState ?? '').toUpperCase() === 'CLOSED'
       }
     }
   }
@@ -242,7 +257,7 @@ async function onValveToggle(id, newState) {
 
         <!-- ── Auxiliary controls panel (fixed top-left) ── -->
         <div
-          v-if="auxiliaryControls.length > 0"
+          v-if="auxiliaryControls.length > 0 || kasaDevices.length > 0"
           class="pid-overlay aux-panel"
         >
           <div class="aux-header">Aux Controls</div>
@@ -263,6 +278,28 @@ async function onValveToggle(id, newState) {
               class="aux-toggle"
             />
           </div>
+
+          <!-- Kasa Smart Plugs -->
+          <template v-if="kasaDevices.length > 0">
+            <div class="aux-section-sep" v-if="auxiliaryControls.length > 0" />
+            <div class="aux-section-label">Smart Plugs</div>
+            <div
+              v-for="dev in kasaDevices"
+              :key="dev.host"
+              class="aux-row"
+            >
+              <span class="aux-label">{{ dev.alias || dev.host }}</span>
+              <span class="state-indicator" :class="dev.active ? 'relay-closed' : 'relay-open'">
+                <span class="state-led" />
+                {{ dev.active ? 'ON' : 'OFF' }}
+              </span>
+              <ToggleSwitch
+                :modelValue="dev.active"
+                @update:modelValue="setKasaState(dev.host, $event)"
+                class="aux-toggle"
+              />
+            </div>
+          </template>
         </div>
 
         <!-- ── Actuated valve cards ── -->
@@ -580,12 +617,27 @@ async function onValveToggle(id, newState) {
   --p-toggleswitch-width: 30px;
   --p-toggleswitch-height: 12px;
   --p-toggleswitch-handle-size: 8px;
-  /* CLOSED (checked/on) = green; OPEN (unchecked/off) = red */
+  /* CLOSED/ON (checked) = green; OPEN/OFF (unchecked) = red */
   --p-toggleswitch-checked-background: #2ecc71;
   --p-toggleswitch-checked-hover-background: #27ae60;
   --p-toggleswitch-background: #e74c3c;
   --p-toggleswitch-hover-background: #c0392b;
   flex-shrink: 0;
+}
+
+.aux-section-sep {
+  height: 1px;
+  background: var(--border-color);
+  margin: 2px 0;
+}
+
+.aux-section-label {
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 3px 8px 1px;
 }
 
 /* ── Info cards (MV, Tank, Regulator) ── */
