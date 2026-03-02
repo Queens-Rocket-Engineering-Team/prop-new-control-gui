@@ -1,11 +1,46 @@
 <script setup>
-import { ref, inject } from 'vue'
+import { ref, inject, computed } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 
 const serverConfig = inject('serverConfig', ref(null))
+const sensorData   = inject('sensorData',   ref({}))
+const tares        = inject('tares',        ref({}))
 const kasaDevices  = inject('kasaDevices',  ref([]))
 const discoverKasa = inject('discoverKasa',  () => {})
 const setKasaState = inject('setKasaState',  () => {})
+
+// ── Live sensor lookup ────────────────────────────────────────────────────────
+
+function normalizeId(id) {
+  return id.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()
+}
+
+const normalizedSensorMap = computed(() => {
+  const map = {}
+  for (const [name, info] of Object.entries(sensorData.value)) {
+    map[normalizeId(name)] = { ...info, rawName: name }
+  }
+  return map
+})
+
+const normalizedTaresMap = computed(() => {
+  const map = {}
+  for (const [name, offset] of Object.entries(tares.value)) {
+    map[normalizeId(name)] = offset
+  }
+  return map
+})
+
+function getLiveReading(sensorName) {
+  const norm   = normalizeId(sensorName)
+  const info   = normalizedSensorMap.value[norm]
+  if (!info) return { value: '—', unit: '' }
+  const offset = normalizedTaresMap.value[norm] ?? 0
+  const v      = info.value - offset
+  const abs    = Math.abs(v)
+  const str    = abs >= 1000 ? v.toFixed(0) : abs >= 10 ? v.toFixed(1) : v.toFixed(2)
+  return { value: str, unit: info.unit }
+}
 
 const discovering = ref(false)
 
@@ -141,12 +176,18 @@ function getSensors(deviceConfig) {
                 <tr>
                   <th>Name</th>
                   <th>Type</th>
+                  <th class="reading-col">Reading</th>
+                  <th class="unit-col">Unit</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="sensor in getSensors(config)" :key="sensor.name">
                   <td class="name-cell">{{ sensor.name }}</td>
                   <td>{{ sensor.type }}</td>
+                  <td class="reading-val" :class="{ 'reading-live': getLiveReading(sensor.name).value !== '—' }">
+                    {{ getLiveReading(sensor.name).value }}
+                  </td>
+                  <td class="unit-val">{{ getLiveReading(sensor.name).unit }}</td>
                 </tr>
               </tbody>
             </table>
@@ -392,6 +433,35 @@ function getSensors(deviceConfig) {
 .mono {
   font-family: monospace;
   color: var(--text-secondary);
+}
+
+/* ── Sensor reading columns ── */
+
+.reading-col,
+.unit-col {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.reading-val {
+  text-align: left;
+  font-family: monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.reading-val.reading-live {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.unit-val {
+  text-align: left;
+  font-size: 10px;
+  color: var(--text-muted);
+  padding-right: 4px;
+  white-space: nowrap;
 }
 
 /* ── Default state badges ── */

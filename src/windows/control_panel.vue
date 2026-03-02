@@ -441,15 +441,16 @@ async function onValveToggle(id, newState) {
 }
 
 .lock-badge {
-  font-size: 7px;
-  font-weight: 700;
-  letter-spacing: 0.3px;
+  font-size: 6px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
   color: var(--text-muted);
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: 2px;
-  padding: 0px 3px;
+  padding: 0px 2px;
   white-space: nowrap;
+  line-height: 1.1;
 }
 
 /* ── Valve card ── */
