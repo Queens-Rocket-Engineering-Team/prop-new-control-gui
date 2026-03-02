@@ -245,23 +245,26 @@ onMounted(loadSvg)
   color: var(--text-primary) !important;
 }
 
-/* Strokes (attribute-based and inline-style — !important wins over both) */
-.svg-layer :deep(svg path),
-.svg-layer :deep(svg line),
-.svg-layer :deep(svg polyline),
-.svg-layer :deep(svg polygon),
-.svg-layer :deep(svg circle),
-.svg-layer :deep(svg ellipse),
-.svg-layer :deep(svg rect) {
+/* Strokes — only recolor shapes that have an explicit non-none stroke.
+   Shapes with stroke="none" (invisible outlines, text-box containers, etc.)
+   are excluded so they stay invisible. */
+.svg-layer :deep(svg path:not([stroke="none"])),
+.svg-layer :deep(svg line:not([stroke="none"])),
+.svg-layer :deep(svg polyline:not([stroke="none"])),
+.svg-layer :deep(svg polygon:not([stroke="none"])),
+.svg-layer :deep(svg circle:not([stroke="none"])),
+.svg-layer :deep(svg ellipse:not([stroke="none"])),
+.svg-layer :deep(svg rect:not([stroke="none"])) {
   stroke: var(--text-primary) !important;
 }
 
-/* Filled shapes with explicit fill attribute (not "none") */
-.svg-layer :deep(svg path[fill]:not([fill="none"])),
-.svg-layer :deep(svg polygon[fill]:not([fill="none"])),
-.svg-layer :deep(svg circle[fill]:not([fill="none"])),
-.svg-layer :deep(svg ellipse[fill]:not([fill="none"])),
-.svg-layer :deep(svg rect[fill]:not([fill="none"]):not([fill="#ffffff"])) {
+/* Filled shapes with explicit fill attribute (not "none").
+   Also skip elements whose inline style sets fill to none/transparent. */
+.svg-layer :deep(svg path[fill]:not([fill="none"]):not([style*="fill: none"]):not([style*="fill:none"])),
+.svg-layer :deep(svg polygon[fill]:not([fill="none"]):not([style*="fill: none"]):not([style*="fill:none"])),
+.svg-layer :deep(svg circle[fill]:not([fill="none"]):not([style*="fill: none"]):not([style*="fill:none"])),
+.svg-layer :deep(svg ellipse[fill]:not([fill="none"]):not([style*="fill: none"]):not([style*="fill:none"])),
+.svg-layer :deep(svg rect[fill]:not([fill="none"]):not([fill="#ffffff"]):not([style*="fill: none"]):not([style*="fill:none"])) {
   fill: var(--text-primary) !important;
 }
 
