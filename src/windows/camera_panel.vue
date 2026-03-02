@@ -150,9 +150,8 @@ async function startStream(item) {
 
 async function get_list() {
     arr = []; // empty array on call
-    invoke("fetch_server_ip").then((ip) => {
-        server_ip = ip;
-    });
+    server_ip = await invoke("fetch_server_ip");
+    
     text.value = "Fetching Cameras...";
     const camera_url = `http://${server_ip}:8000/v1/cameras`;
     fetch(camera_url, { headers: { "Authorization": `Basic ${btoa("admin:propteambestteam")}`}})    
