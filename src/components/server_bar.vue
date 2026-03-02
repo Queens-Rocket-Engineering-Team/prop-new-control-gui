@@ -91,22 +91,19 @@ onUnmounted(() => {
 
 
 <style scoped>
-/* ── Server status indicator (fixed bottom-left corner) ── */
+/* ── Server status indicator — inline element (embedded in nav bar) ── */
 #server-indicator {
-  position: fixed;
-  bottom: 10px;
-  left: 10px;
   display: flex;
   align-items: center;
   gap: 7px;
-  background-color: var(--btn-bg);
+  background-color: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 5px 12px;
-  font-size: 12px;
-  z-index: 100;
-  backdrop-filter: blur(4px);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 11px;
   user-select: none;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .server-ip-text {

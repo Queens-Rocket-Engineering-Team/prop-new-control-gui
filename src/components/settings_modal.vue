@@ -7,14 +7,16 @@ import RadioButton from 'primevue/radiobutton';
 const props = defineProps({
   isOpen: Boolean,
   currentIp: String,
+  pidConfig: { type: String, default: 'rocket-launch' },
 });
 
-const emit = defineEmits(["close", "update-ip"]);
+const emit = defineEmits(["close", "update-ip", "update-pid-config"]);
 
 const ipMode = ref("none");
 const customIp = ref("");
 const cameraRecordingDir = ref("");
 const darkMode = ref(false);  // false = light, true = dark
+const localPidConfig = ref("rocket-launch");
 const overlayRef = ref(null);
 
 watch(
@@ -31,6 +33,7 @@ watch(
         ipMode.value = "custom";
         customIp.value = ip;
       }
+      localPidConfig.value = props.pidConfig || "rocket-launch";
 
       try {
         const dir = await invoke("fetch_camera_recording_dir");
@@ -42,8 +45,14 @@ watch(
   }
 );
 
+watch(localPidConfig, (cfg) => {
+  emit("update-pid-config", cfg);
+});
+
 watch(darkMode, (isDark) => {
   document.documentElement.classList.toggle("dark-mode", isDark);
+  // Set color-scheme so the SVG's light-dark() CSS function resolves correctly
+  document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
 });
 
 function isValidIp(ip) {
@@ -97,6 +106,17 @@ function applyCameraRecordingDir() {
             <i class="pi pi-sun" :style="{color: darkMode ? 'var(--text-secondary)' : '#f39c12'}"></i>
             <ToggleSwitch v-model="darkMode" class="theme-switch" />
             <i class="pi pi-moon" :style="{color: darkMode ? '#f39c12' : 'var(--text-secondary)'}"></i>
+          </div>
+        </div>
+        <div class="setting-group">
+          <span class="setting-group-label">Test Configuration</span>
+          <div class="option-row">
+            <RadioButton v-model="localPidConfig" value="hot-fire" inputId="cfg-hot-fire" />
+            <label for="cfg-hot-fire">Hot Fire</label>
+          </div>
+          <div class="option-row">
+            <RadioButton v-model="localPidConfig" value="rocket-launch" inputId="cfg-rocket-launch" />
+            <label for="cfg-rocket-launch">Rocket Launch</label>
           </div>
         </div>
         <div class="setting-group">

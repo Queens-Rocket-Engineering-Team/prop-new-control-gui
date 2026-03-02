@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc:*)",
+      "Bash(ls:*)",
+      "Bash(echo === First 30 lines ===:*)",
+      "Bash(python3:*)",
+      "Bash(head:*)",
+      "Bash(cd:*)",
+      "Bash(python:*)",
+      "Bash(strings:*)",
+      "Bash(node:*)"
+    ]
+  }
+}
