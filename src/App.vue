@@ -7,7 +7,6 @@ import "primeicons/primeicons.css";
 
 import NavBar from "./components/nav_bar.vue";
 
-//import the windows as they are defined in their own vue files
 import WelcomePanel from "./windows/welcome_panel.vue";
 import CameraPanel from "./windows/camera_panel.vue";
 import GraphPanel from "./windows/graph_panel.vue";
@@ -15,10 +14,6 @@ import ControlPanel from "./windows/control_panel.vue";
 import DebugPanel from "./windows/debug_panel.vue";
 import FlightPanel from "./windows/flight_panel.vue";
 
-//import complex components to clean up code.
-//to note, if componetns are to be used in the <template> below, they must be imported
-//in pascal case, and then used in kebab-case.
-import ServerBar from "./components/server_bar.vue";
 import SettingsModal from "./components/settings_modal.vue";
 
 const window_content = shallowRef(WelcomePanel);
@@ -26,11 +21,12 @@ function setActive(component) {
   window_content.value = component;
 }
 
-// Synced from NavBar's @resize emit so the grid column tracks the drag
 const navbarWidth = ref(180);
 function onNavResize(w) {
   navbarWidth.value = w;
 }
+
+// ── Server connection ────────────────────────────────────────────────────────
 
 const server_ip = ref("");
 provide('serverIp', server_ip);
@@ -42,23 +38,88 @@ const pidConfig = ref('rocket-launch');
 provide('pidConfig', pidConfig);
 
 const { fetchConfig, sendCommand } = useServerApi(server_ip);
-const { logLines, wsStatus, clearLogs } = useLogStream(server_ip);
-provide('logLines', logLines);
-provide('wsStatus', wsStatus);
-provide('clearLogs', clearLogs);
-watch(server_ip, async (ip) => {
-  if (!ip) { serverConfig.value = null; return }
+
+// ── Test state ───────────────────────────────────────────────────────────────
+
+const testActive    = ref(false);
+const testStartTime = ref(null);
+provide('testActive',    testActive);
+provide('testStartTime', testStartTime);
+
+function formatDatetime() {
+  const d   = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const time = `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  return `${date}-${time}`;
+}
+
+async function startTest() {
+  if (testActive.value) return;
+  clearSensorData();
   try {
-    serverConfig.value = await fetchConfig()
-    await sendCommand('STREAM', ['100'])
+    await sendCommand('STREAM', ['100']);
+    await invoke('start_recording', {
+      mode:     pidConfig.value,
+      datetime: formatDatetime(),
+    });
+    testActive.value    = true;
+    testStartTime.value = Date.now();
   } catch (err) {
-    console.error('[App] server setup failed:', err)
-    serverConfig.value = null
+    console.error('[App] startTest failed:', err);
+  }
+}
+
+async function stopTest() {
+  if (!testActive.value) return;
+  testActive.value    = false;
+  testStartTime.value = null;
+  try {
+    await sendCommand('STOP', []);
+    await invoke('stop_recording');
+  } catch (err) {
+    console.error('[App] stopTest failed:', err);
+  }
+}
+
+provide('startTest', startTest);
+provide('stopTest',  stopTest);
+
+// ── Log stream + sensor data ─────────────────────────────────────────────────
+
+const { logLines, wsStatus, sensorData, clearLogs, clearSensorData } =
+  useLogStream(server_ip, {
+    onBatch(timestamp, readings) {
+      if (!testActive.value) return;
+      invoke('write_sensor_batch', { timestamp, readings }).catch((err) =>
+        console.error('[App] CSV write failed:', err)
+      );
+    },
+  });
+
+provide('logLines',   logLines);
+provide('wsStatus',   wsStatus);
+provide('clearLogs',  clearLogs);
+provide('sensorData', sensorData);
+
+// ── Config fetch on connect ──────────────────────────────────────────────────
+
+watch(server_ip, async (ip) => {
+  // Stop any active test when IP changes
+  if (testActive.value) await stopTest();
+
+  if (!ip) { serverConfig.value = null; return; }
+  try {
+    serverConfig.value = await fetchConfig();
+  } catch (err) {
+    console.error('[App] fetchConfig failed:', err);
+    serverConfig.value = null;
   }
 });
 
+// ── Settings ─────────────────────────────────────────────────────────────────
+
 function get_ip(new_ip) {
-  console.log("Received new IP from settings:", new_ip);
   server_ip.value = new_ip;
 }
 
@@ -66,8 +127,8 @@ const settingsOpen = ref(false);
 
 onMounted(() => {
   invoke("fetch_server_ip")
-    .then((ip) => { if (ip) server_ip.value = ip })
-    .catch(() => {}); // no-op outside Tauri context
+    .then((ip) => { if (ip) server_ip.value = ip; })
+    .catch(() => {});
 });
 </script>
 
@@ -85,8 +146,6 @@ onMounted(() => {
 
       <component :is="window_content" class="swap-container"></component>
     </div>
-
-    <server-bar :server-ip="server_ip"></server-bar>
 
     <settings-modal
       :is-open="settingsOpen"
@@ -109,7 +168,6 @@ onMounted(() => {
 
 #grid-container {
   display: grid;
-  /* grid-template-columns is set dynamically by App.vue via :style */
   gap: 0;
   flex: 1;
   min-height: 0;

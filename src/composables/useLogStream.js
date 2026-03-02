@@ -1,36 +1,106 @@
 import { ref, watch, onUnmounted } from 'vue'
 
-const MAX_LINES = 1000
+const MAX_LINES    = 1000   // debug log buffer
+const SNAP_INTERVAL = 100  // ms — how often sensorData ref is updated (10 Hz)
+const CHART_POINTS  = 3500 // max history points exposed to charts (~35 s @ 100 Hz)
+
+// Regex: "[21:02:21] PANDA-V3 36.799 SensorName:-152.70"
+const LOG_RE = /\[[\d:]+\] \S+ ([\d.]+) ([A-Za-z]\w+):([-\d.]+)/
+
+function getUnit(name) {
+  const u = name.toUpperCase()
+  if (u.startsWith('PT'))              return 'psi'
+  if (u.startsWith('TC'))              return '°C'
+  if (u.startsWith('LC'))              return 'kg'
+  if (u.includes('CURRENT'))           return 'A'
+  if (u.includes('RESISTANCE'))        return 'Ω'
+  return ''
+}
 
 /**
- * Manages a persistent WebSocket connection to the server's /ws/logs endpoint.
- * Reconnects automatically when serverIp changes. Clears the log buffer on
- * each reconnect so stale output from a previous session is not shown.
- *
- * Intended to be called once at the App level and shared via provide/inject.
+ * Manages a persistent WebSocket connection to /ws/logs.
  *
  * @param {import('vue').Ref<string>} serverIp
- * @returns {{ logLines: Ref<string[]>, wsStatus: Ref<string>, clearLogs: () => void }}
+ * @param {{ onBatch?: (timestamp: number, readings: Record<string,number>) => void }} [opts]
+ * @returns {{ logLines, wsStatus, sensorData, clearLogs, clearSensorData }}
  */
-export function useLogStream(serverIp) {
-  /** Accumulated log lines. Capped at MAX_LINES to avoid unbounded growth. */
-  const logLines = ref([])
+export function useLogStream(serverIp, { onBatch } = {}) {
+  const logLines  = ref([])
+  const wsStatus  = ref('disconnected')
 
   /**
-   * WebSocket lifecycle state.
-   * 'disconnected' | 'connecting' | 'connected' | 'error'
+   * Throttled sensor snapshot — updated every SNAP_INTERVAL ms.
+   * Shape: { [sensorName]: { value: number, unit: string, history: {t,v}[] } }
    */
-  const wsStatus = ref('disconnected')
+  const sensorData = ref({})
 
-  let ws = null
+  // Internal store — unbounded history, not reactive (avoids 100 Hz reactivity)
+  const _store = {}  // { [name]: { value, unit, history: {t,v}[] } }
+
+  // Batch accumulator for onBatch callback
+  let _pendingTs       = null
+  let _pendingReadings = {}
+
+  let ws        = null
+  let snapTimer = null
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  function flushBatch() {
+    if (_pendingTs !== null && onBatch && Object.keys(_pendingReadings).length > 0) {
+      onBatch(_pendingTs, { ..._pendingReadings })
+    }
+    _pendingTs       = null
+    _pendingReadings = {}
+  }
+
+  function parseSensorLine(dataStr) {
+    const m = LOG_RE.exec(dataStr)
+    if (!m) return null
+    return { t: parseFloat(m[1]), name: m[2], value: parseFloat(m[3]) }
+  }
+
+  function pushLogLine(text) {
+    logLines.value.push(text)
+    if (logLines.value.length > MAX_LINES) {
+      logLines.value.splice(0, logLines.value.length - MAX_LINES)
+    }
+  }
+
+  // ── Snapshot timer (10 Hz) ─────────────────────────────────────────────────
+
+  function startSnap() {
+    if (snapTimer) return
+    snapTimer = setInterval(() => {
+      const snap = {}
+      for (const [name, info] of Object.entries(_store)) {
+        const h   = info.history
+        const len = h.length
+        snap[name] = {
+          value:   info.value,
+          unit:    info.unit,
+          history: len > CHART_POINTS ? h.slice(len - CHART_POINTS) : h.slice(),
+        }
+      }
+      sensorData.value = snap
+    }, SNAP_INTERVAL)
+  }
+
+  function stopSnap() {
+    clearInterval(snapTimer)
+    snapTimer = null
+  }
+
+  // ── WebSocket ──────────────────────────────────────────────────────────────
 
   function disconnect() {
     if (ws) {
-      // Remove handlers before closing to suppress the onclose reaction
       ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null
       ws.close()
       ws = null
     }
+    flushBatch()
+    stopSnap()
     wsStatus.value = 'disconnected'
   }
 
@@ -50,12 +120,42 @@ export function useLogStream(serverIp) {
 
     ws.onopen = () => {
       wsStatus.value = 'connected'
+      startSnap()
     }
 
     ws.onmessage = (event) => {
-      logLines.value.push(String(event.data))
-      if (logLines.value.length > MAX_LINES) {
-        logLines.value.splice(0, logLines.value.length - MAX_LINES)
+      let parsed = null
+      try { parsed = JSON.parse(event.data) } catch { /* not JSON */ }
+
+      if (parsed?.channel && parsed?.data) {
+        const prefix = parsed.channel === 'syslog' ? '[sys]' : '[log]'
+        pushLogLine(`${prefix} ${parsed.data}`)
+
+        if (parsed.channel === 'log') {
+          const reading = parseSensorLine(parsed.data)
+          if (reading) {
+            // Accumulate for onBatch callback
+            if (reading.t !== _pendingTs) {
+              flushBatch()
+              _pendingTs = reading.t
+            }
+            _pendingReadings[reading.name] = reading.value
+
+            // Update internal store
+            if (_store[reading.name]) {
+              _store[reading.name].value = reading.value
+              _store[reading.name].history.push({ t: reading.t, v: reading.value })
+            } else {
+              _store[reading.name] = {
+                value:   reading.value,
+                unit:    getUnit(reading.name),
+                history: [{ t: reading.t, v: reading.value }],
+              }
+            }
+          }
+        }
+      } else {
+        pushLogLine(String(event.data))
       }
     }
 
@@ -64,25 +164,30 @@ export function useLogStream(serverIp) {
     }
 
     ws.onclose = () => {
-      // Only update status if we weren't the ones who called disconnect()
-      if (wsStatus.value !== 'disconnected') {
-        wsStatus.value = 'disconnected'
-      }
+      flushBatch()
+      stopSnap()
+      if (wsStatus.value !== 'disconnected') wsStatus.value = 'disconnected'
     }
   }
 
-  // Reconnect (and clear old logs) whenever the server IP changes
+  // Reconnect whenever server IP changes; clear log + sensor display
   watch(serverIp, (ip) => {
-    logLines.value = []
+    logLines.value  = []
+    sensorData.value = {}
+    for (const k of Object.keys(_store)) delete _store[k]
     connect(ip)
   }, { immediate: true })
 
-  // Clean up when the owning component (App) is torn down
   onUnmounted(disconnect)
 
   function clearLogs() {
     logLines.value = []
   }
 
-  return { logLines, wsStatus, clearLogs }
+  function clearSensorData() {
+    for (const info of Object.values(_store)) info.history = []
+    sensorData.value = {}
+  }
+
+  return { logLines, wsStatus, sensorData, clearLogs, clearSensorData }
 }

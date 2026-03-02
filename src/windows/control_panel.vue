@@ -7,6 +7,7 @@ import { useServerApi } from '../composables/useServerApi.js'
 const serverIp     = inject('serverIp',     ref(''))
 const serverConfig = inject('serverConfig', ref(null))
 const pidConfig    = inject('pidConfig',    ref('rocket-launch'))
+const sensorData   = inject('sensorData',   ref({}))
 const { sendCommand } = useServerApi(serverIp)
 
 // ── SVG URL mapping (the only static config needed) ─────────────────────────
@@ -147,6 +148,28 @@ function isSensorEnabled(drawioId) {
     if (key.startsWith(norm) || norm.startsWith(key)) return true
   }
   return false
+}
+
+// ── Live sensor value lookup ─────────────────────────────────────────────────
+// sensorData keys are camelCase (e.g. "PTN2Supply"); drawio IDs use hyphens
+// (e.g. "PT-N2-SUPPLY"). normalizeId strips all punctuation + lowercases both.
+
+const normalizedSensorMap = computed(() => {
+  const map = {}
+  for (const [name, info] of Object.entries(sensorData.value)) {
+    map[normalizeId(name)] = info
+  }
+  return map
+})
+
+function getLiveValue(drawioId) {
+  const info = normalizedSensorMap.value[normalizeId(drawioId)]
+  if (!info) return '—'
+  const v = info.value
+  const abs = Math.abs(v)
+  if (abs >= 1000) return v.toFixed(0)
+  if (abs >= 10)   return v.toFixed(1)
+  return v.toFixed(2)
 }
 
 // ── Auxiliary controls (non-AV controls from server config) ─────────────────
@@ -292,7 +315,7 @@ async function onValveToggle(id, newState) {
               <span v-if="!isSensorEnabled(sensor.id)" class="lock-badge">NO SENSOR</span>
             </div>
             <div class="sensor-reading">
-              <span class="reading-value">—</span>
+              <span class="reading-value">{{ getLiveValue(sensor.id) }}</span>
               <span class="reading-unit">{{ sensor.unit }}</span>
             </div>
           </div>

@@ -4,30 +4,49 @@ import { ref, inject } from 'vue'
 const serverConfig = inject('serverConfig', ref(null))
 
 const CATEGORY_LABELS = {
-  thermocouples: 'Thermocouple',
+  thermocouples:       'Thermocouple',
   pressureTransducers: 'Pressure Transducer',
-  loadCells: 'Load Cell',
-  current: 'Current Sensor',
-  resistance: 'Resistance Sensor',
+  loadCells:           'Load Cell',
+  current:             'Current Sensor',
+  resistance:          'Resistance Sensor',
+}
+
+// Defines display order for sensor categories
+const CATEGORY_ORDER = {
+  pressureTransducers: 0,
+  thermocouples:       1,
+  loadCells:           2,
+  current:             3,
+  resistance:          4,
 }
 
 function getControls(deviceConfig) {
-  return Object.entries(deviceConfig.controls ?? {}).map(([name, cfg]) => ({
-    name,
-    type: cfg.type ?? '—',
-    defaultState: cfg.defaultState ?? '—',
-    pin: cfg.pin ?? '—',
-  }))
+  return Object.entries(deviceConfig.controls ?? {})
+    .map(([name, cfg]) => ({
+      name,
+      type:         cfg.type ?? '—',
+      defaultState: cfg.defaultState ?? '—',
+      pin:          cfg.pin ?? '—',
+    }))
+    .sort((a, b) => {
+      const byType = (a.type ?? '').localeCompare(b.type ?? '')
+      return byType !== 0 ? byType : a.name.localeCompare(b.name)
+    })
 }
 
 function getSensors(deviceConfig) {
   const result = []
   for (const [category, items] of Object.entries(deviceConfig.sensorInfo ?? {})) {
     if (typeof items !== 'object' || Array.isArray(items)) continue
+    const order = CATEGORY_ORDER[category] ?? 99
     for (const name of Object.keys(items)) {
-      result.push({ name, type: CATEGORY_LABELS[category] ?? category })
+      result.push({ name, type: CATEGORY_LABELS[category] ?? category, order })
     }
   }
+  result.sort((a, b) => {
+    const byCategory = a.order - b.order
+    return byCategory !== 0 ? byCategory : a.name.localeCompare(b.name)
+  })
   return result
 }
 </script>
