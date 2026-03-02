@@ -1,140 +1,134 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
-import { invoke } from '@tauri-apps/api/core';
+import { inject, ref, watch, nextTick } from 'vue'
 
+const logLines  = inject('logLines',  ref([]))
+const wsStatus  = inject('wsStatus',  ref('disconnected'))
+const clearLogs = inject('clearLogs', () => {})
 
-import { nextTick } from 'vue';
-const logs = ref([]);
-const websocket_status = ref('Disconnected');
-let ws;
-let server_ip = '';
+const logEl = ref(null)
 
-const availableChannels = ["log", "errlog", "debuglog", "syslog"];
-const selectedChannels = ref([...availableChannels]);
-
-const logContainerRef = ref(null);
-function addLog(channel, msg) {
-    logs.value.push({ channel, msg });
-    // Keep only the last 200 logs
-    if (logs.value.length > 200) logs.value.shift();
-    nextTick(() => {
-        if (logContainerRef.value) {
-            logContainerRef.value.scrollTop = logContainerRef.value.scrollHeight;
-        }
-    });
-}
-
-onMounted(() => {
-    invoke('fetch_server_ip').then((ip) => {
-        server_ip = ip;
-        ws = new WebSocket(`ws://${server_ip}:8000/ws/logs`);
-        ws.onopen = () => websocket_status.value = 'Connected';
-        ws.onmessage = (event) => {
-            let parsed;
-            try {
-                parsed = JSON.parse(event.data);
-            } catch (e) {
-                addLog('Malformed message: ' + event.data);
-                return;
-            }
-            if (availableChannels.includes(parsed.channel)) {
-                addLog(parsed.channel, parsed.data);
-            }
-        };
-        ws.onerror = (error) => addLog('WebSocket error: ' + error);
-        ws.onclose = () => websocket_status.value = 'Disconnected';
-    });
-});
-
-onUnmounted(() => {
-    if (ws) {
-        ws.close();
-        ws = null;
-    }
-});
-
+// Auto-scroll to bottom whenever new lines arrive
+watch(logLines, async () => {
+  await nextTick()
+  if (logEl.value) {
+    logEl.value.scrollTop = logEl.value.scrollHeight
+  }
+}, { deep: true })
 </script>
 
 <template>
-    <div id="debug-panel">
-        <div style="margin-bottom: 8px;">
-            <b>WebSocket status:</b> {{ websocket_status }}
-        </div>
-        <div style="margin-bottom: 8px;">
-            <b>Show channels:</b>
-            <div id="channel-checkbox-group">
-                <label v-for="ch in availableChannels" :key="ch" class="channel-checkbox">
-                    <input type="checkbox" :value="ch" v-model="selectedChannels" />
-                    <span class="channel-label">{{ ch }}</span>
-            
-                </label>
-            </div>
-        </div>
-        
-        <div id="log-container" ref="logContainerRef">
-            <div v-for="(log, idx) in logs.filter(l => selectedChannels.includes(l.channel))" :key="idx" class="log-line">
-                [{{ log.channel }}] {{ log.msg }}
-            </div>
-        </div>
+  <div class="debug-panel">
+    <div class="debug-toolbar">
+      <span class="debug-title">Server Logs</span>
+      <span class="ws-status" :class="wsStatus">
+        <span class="ws-led" />
+        {{ wsStatus }}
+      </span>
+      <button class="clear-btn" @click="clearLogs()">Clear</button>
     </div>
+
+    <div class="log-output" ref="logEl">
+      <div v-if="logLines.length === 0" class="log-empty">
+        No log output yet…
+      </div>
+      <div
+        v-for="(line, i) in logLines"
+        :key="i"
+        class="log-line"
+      >{{ line }}</div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
-#debug-panel {
-    height: 100%;
-    display: flex;
-    flex-direction: column;
+.debug-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-primary);
+  font-family: 'Consolas', 'Menlo', 'Monaco', monospace;
 }
-/* Channel selector styling */
-#channel-checkbox-group {
-    display: flex;
-    gap: 12px;
-    margin-top: 4px;
-    margin-bottom: 2px;
+
+.debug-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
 }
-.channel-checkbox {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 15px;
-    background: #23272f;
-    border-radius: 8px;
-    padding: 4px 14px;
-    border: 1px solid #444;
-    cursor: pointer;
-    user-select: none;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-    transition: background 0.2s, box-shadow 0.2s;
+
+.debug-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-right: auto;
 }
-.channel-checkbox:hover {
-    background: #2c313a;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+
+.ws-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
 }
-.channel-checkbox input[type="checkbox"] {
-    accent-color: #396cd8;
-    margin-right: 2px;
-    width: 16px;
-    height: 16px;
+
+.ws-led {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #555;
 }
-.channel-label {
-    color: #e0e0e0;
-    font-weight: 500;
-    letter-spacing: 0.5px;
+
+.ws-status.connected   { color: #2ecc71; }
+.ws-status.connected .ws-led   { background: #2ecc71; box-shadow: 0 0 4px #2ecc71; }
+.ws-status.connecting  { color: #f39c12; }
+.ws-status.connecting .ws-led  { background: #f39c12; }
+.ws-status.error       { color: #e74c3c; }
+.ws-status.error .ws-led       { background: #e74c3c; }
+.ws-status.disconnected .ws-led { background: #555; }
+
+.clear-btn {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  background: var(--btn-bg);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
 }
-#log-container {
-    flex: 1;
-    overflow-y: auto;
-    background: #181818;
-    color: #e0e0e0;
-    font-family: monospace;
-    font-size: 14px;
-    border-radius: 8px;
-    padding: 12px;
-    border: 1px solid #333;
-    min-height: 200px;
+
+.clear-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-accent);
 }
+
+.log-output {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 10px;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.log-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 .log-line {
-    white-space: pre-wrap;
-    margin-bottom: 2px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-primary);
+}
+
+.log-line:hover {
+  background: var(--bg-secondary);
 }
 </style>

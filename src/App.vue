@@ -2,6 +2,7 @@
 import { onMounted, provide, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useServerApi } from "./composables/useServerApi.js";
+import { useLogStream } from "./composables/useLogStream.js";
 import "primeicons/primeicons.css";
 
 import NavBar from "./components/nav_bar.vue";
@@ -41,6 +42,10 @@ const pidConfig = ref('rocket-launch');
 provide('pidConfig', pidConfig);
 
 const { fetchConfig } = useServerApi(server_ip);
+const { logLines, wsStatus, clearLogs } = useLogStream(server_ip);
+provide('logLines', logLines);
+provide('wsStatus', wsStatus);
+provide('clearLogs', clearLogs);
 watch(server_ip, async (ip) => {
   if (!ip) { serverConfig.value = null; return }
   try {
