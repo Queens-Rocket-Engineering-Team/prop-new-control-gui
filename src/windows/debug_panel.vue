@@ -7,13 +7,6 @@ const clearLogs = inject('clearLogs', () => {})
 
 const logEl = ref(null)
 
-// Auto-scroll to bottom whenever new lines arrive
-watch(logLines, async () => {
-  await nextTick()
-  if (logEl.value) {
-    logEl.value.scrollTop = logEl.value.scrollHeight
-  }
-}, { deep: true })
 import { computed } from 'vue'
 
 // Channel filter state
@@ -22,6 +15,7 @@ const availableChannels = [
   { key: 'syslog', label: 'Syslog' },
   { key: 'errlog', label: 'Errlog' },
   { key: 'debuglog', label: 'Debuglog' },
+  { key: 'packetlog', label: 'Packetlog' },
 ]
 const selectedChannels = ref(availableChannels.map(c => c.key))
 
@@ -34,6 +28,7 @@ const filteredLogLines = computed(() => {
     if (selectedChannels.value.includes('syslog') && line.startsWith('[sys]')) return true
     if (selectedChannels.value.includes('errlog') && line.startsWith('[err]')) return true
     if (selectedChannels.value.includes('debuglog') && line.startsWith('[debug]')) return true
+    if (selectedChannels.value.includes('packetlog') && line.startsWith('[packet]')) return true
     return false
   })
 })
@@ -85,7 +80,7 @@ watch(filteredLogLines, async () => {
 .debug-panel {
   display: flex;
   flex-direction: column;
-  height: 90%;
+  max-height: 90%;
   background: var(--bg-primary);
   font-family: 'Consolas', 'Menlo', 'Monaco', monospace;
 }
