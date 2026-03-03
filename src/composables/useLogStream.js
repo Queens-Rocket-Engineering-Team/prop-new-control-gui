@@ -131,7 +131,12 @@ export function useLogStream(serverIp, { onBatch, onLog } = {}) {
       try { parsed = JSON.parse(event.data) } catch { /* not JSON */ }
 
       if (parsed?.channel && parsed?.data) {
-        const prefix = parsed.channel === 'syslog' ? '[sys]' : '[log]'
+        const prefix = (parsed?.channel === 'syslog') ? '[sys]' : 
+          (parsed?.channel === 'debuglog') ? '[dbg]' :
+          (parsed?.channel === 'errlog') ? '[err]' : 
+          (parsed?.channel === 'packetlog') ? '[pkt]' : '[log]'
+
+        
         pushLogLine(`${prefix} ${parsed.data}`)
         onLog?.(parsed.channel, String(parsed.data))
 
