@@ -14,6 +14,37 @@ watch(logLines, async () => {
     logEl.value.scrollTop = logEl.value.scrollHeight
   }
 }, { deep: true })
+import { computed } from 'vue'
+
+// Channel filter state
+const availableChannels = [
+  { key: 'log', label: 'Log' },
+  { key: 'syslog', label: 'Syslog' },
+  { key: 'errlog', label: 'Errlog' },
+  { key: 'debuglog', label: 'Debuglog' },
+]
+const selectedChannels = ref(availableChannels.map(c => c.key))
+
+// Filter log lines by selected channels
+const filteredLogLines = computed(() => {
+  if (selectedChannels.value.length === availableChannels.length) return logLines.value
+  return logLines.value.filter(line => {
+    // Match prefix: [sys], [log], [err], [debug]
+    if (selectedChannels.value.includes('log') && line.startsWith('[log]')) return true
+    if (selectedChannels.value.includes('syslog') && line.startsWith('[sys]')) return true
+    if (selectedChannels.value.includes('errlog') && line.startsWith('[err]')) return true
+    if (selectedChannels.value.includes('debuglog') && line.startsWith('[debug]')) return true
+    return false
+  })
+})
+
+// Auto-scroll to bottom whenever new lines arrive
+watch(filteredLogLines, async () => {
+  await nextTick()
+  if (logEl.value) {
+    logEl.value.scrollTop = logEl.value.scrollHeight
+  }
+}, { deep: true })
 </script>
 
 <template>
@@ -26,13 +57,23 @@ watch(logLines, async () => {
       </span>
       <button class="clear-btn" @click="clearLogs()">Clear</button>
     </div>
+        <div class="channel-filter">
+          <label v-for="ch in availableChannels" :key="ch.key" class="channel-checkbox">
+            <input
+              type="checkbox"
+              :value="ch.key"
+              v-model="selectedChannels"
+            />
+            {{ ch.label }}
+          </label>
+        </div>
 
     <div class="log-output" ref="logEl">
-      <div v-if="logLines.length === 0" class="log-empty">
+      <div v-if="filteredLogLines.length === 0" class="log-empty">
         No log output yet…
       </div>
       <div
-        v-for="(line, i) in logLines"
+        v-for="(line, i) in filteredLogLines"
         :key="i"
         class="log-line"
       >{{ line }}</div>
@@ -130,5 +171,16 @@ watch(logLines, async () => {
 
 .log-line:hover {
   background: var(--bg-secondary);
+}
+.channel-filter {
+  display: flex;
+  gap: 0.5em;
+  margin-left: 1em;
+}
+.channel-checkbox {
+  font-size: 0.95em;
+  display: flex;
+  align-items: center;
+  gap: 0.2em;
 }
 </style>
