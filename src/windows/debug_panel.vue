@@ -85,7 +85,7 @@ watch(filteredLogLines, async () => {
 .debug-panel {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  height: 90%;
   background: var(--bg-primary);
   font-family: 'Consolas', 'Menlo', 'Monaco', monospace;
 }
