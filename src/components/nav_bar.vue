@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, inject, onMounted, onUnmounted } from "vue";
+import { ref, watch, inject, onMounted, onUnmounted, nextTick } from "vue";
 import Button from "primevue/button";
 import ServerBar from "./server_bar.vue";
 import { availableMonitors, getCurrentWindow } from "@tauri-apps/api/window";
@@ -23,7 +23,15 @@ const navbarWidth  = ref(DEFAULT_WIDTH);
 const isCollapsed  = ref(false);
 
 watch(navbarWidth, (w) => emit("resize", w));
-onMounted(() => emit("resize", navbarWidth.value));
+onMounted(() => {
+  emit("resize", navbarWidth.value);
+  // Auto-spawn windows on all monitors at startup.
+  // Guard: only the main window should do this — screen-* windows also mount
+  // NavBar and must not trigger another round of spawning.
+  if (getCurrentWindow().label === 'main') {
+    nextTick(() => openOnAllScreens());
+  }
+});
 
 // ── Resize drag ─────────────────────────────────────────────────────────────
 
@@ -69,20 +77,18 @@ onUnmounted(() => {
 async function openOnAllScreens() {
   const monitors   = await availableMonitors();
   const currentWin = getCurrentWindow();
-  const currentMon = await currentWin.currentMonitor();
 
-  // Maximise this window on whatever screen it's already on
+  // Maximise the main window on whatever screen it started on
   await currentWin.maximize();
 
   if (monitors.length <= 1) return;
 
-  // Spawn one window per additional monitor, positioned so the OS knows which
-  // screen to maximise it on. Creating the window first then moving+maximising
-  // is more reliable than setting x/y in the constructor.
-  const otherMonitors = monitors.filter(m => m.name !== currentMon?.name);
-
-  for (const [i, monitor] of otherMonitors.entries()) {
-    const label    = `screen-${i + 1}`;
+  // Spawn one window on each monitor beyond the first (index 0).
+  // Using index-based selection avoids relying on currentMonitor() which can
+  // return null before the window is fully positioned (e.g. at startup).
+  for (let i = 1; i < monitors.length; i++) {
+    const monitor  = monitors[i];
+    const label    = `screen-${i}`;
     const existing = WebviewWindow.getByLabel(label);
 
     if (existing) {
@@ -96,7 +102,7 @@ async function openOnAllScreens() {
     // Create a new window, then position + maximise once it has loaded
     const win = new WebviewWindow(label, {
       url:   '/',
-      title: `prop-control-gui — Screen ${i + 2}`,
+      title: `prop-control-gui — Screen ${i + 1}`,
     });
 
     win.once('tauri://created', async () => {
