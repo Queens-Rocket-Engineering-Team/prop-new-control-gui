@@ -221,7 +221,9 @@ onMounted(() => {
         @resize="onNavResize"
       ></nav-bar>
 
-      <component :is="window_content" class="swap-container"></component>
+      <KeepAlive>
+        <component :is="window_content" class="swap-container"></component>
+      </KeepAlive>
     </div>
 
     <settings-modal
