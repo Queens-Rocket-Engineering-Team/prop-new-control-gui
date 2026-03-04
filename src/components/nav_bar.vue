@@ -78,6 +78,13 @@ async function openOnAllScreens() {
   const monitors   = await availableMonitors();
   const currentWin = getCurrentWindow();
 
+  console.log(`[NavBar] Detected ${monitors.length} monitor(s):`, monitors.map(m => ({
+    name: m.name,
+    size: `${m.size.width}x${m.size.height}`,
+    position: `(${m.position.x}, ${m.position.y})`,
+    scaleFactor: m.scaleFactor,
+  })));
+
   // Maximise the main window on whatever screen it started on
   await currentWin.maximize();
 
