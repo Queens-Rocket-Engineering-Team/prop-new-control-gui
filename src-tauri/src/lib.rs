@@ -241,6 +241,13 @@ pub fn run() {
             let monitors = main_win.available_monitors().unwrap_or_default();
             println!("[Setup] Detected {} monitor(s)", monitors.len());
 
+            // Log every monitor so we can see all positions
+            for (i, m) in monitors.iter().enumerate() {
+                let pos  = m.position();
+                let size = m.size();
+                println!("[Setup] Monitor {}: name={:?}, pos=({}, {}), size={}x{}, scale={}", i, m.name(), pos.x, pos.y, size.width, size.height, m.scale_factor());
+            }
+
             for (i, monitor) in monitors.into_iter().enumerate().skip(1) {
                 let pos   = monitor.position();
                 let scale = monitor.scale_factor();
