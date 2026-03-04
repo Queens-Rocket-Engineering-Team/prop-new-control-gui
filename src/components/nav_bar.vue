@@ -94,31 +94,25 @@ async function openOnAllScreens() {
   // Using index-based selection avoids relying on currentMonitor() which can
   // return null before the window is fully positioned (e.g. at startup).
   for (let i = 1; i < monitors.length; i++) {
-    const monitor  = monitors[i];
-    const label    = `screen-${i}`;
-    const existing = WebviewWindow.getByLabel(label);
+    const monitor = monitors[i];
+    const label   = `screen-${i}`;
 
-    if (existing) {
-      // Window already open — move it to this monitor and bring it to focus
-      await existing.setPosition(new PhysicalPosition(monitor.position.x, monitor.position.y));
-      await existing.maximize();
-      await existing.setFocus();
-      continue;
-    }
-
-    // Create a new window, then position + maximise once it has loaded
     const win = new WebviewWindow(label, {
       url:   '/',
       title: `prop-control-gui — Screen ${i + 1}`,
     });
 
     win.once('tauri://created', async () => {
+      console.log(`[NavBar] Window ${label} created, positioning on monitor ${i}`);
       await win.setPosition(new PhysicalPosition(monitor.position.x, monitor.position.y));
       await win.maximize();
     });
 
+    // Silently ignore "already exists" errors; log anything else
     win.once('tauri://error', (e) => {
-      console.error(`[NavBar] Failed to create window ${label}:`, e);
+      if (!String(e).includes('already exists')) {
+        console.error(`[NavBar] Failed to create window ${label}:`, e);
+      }
     });
   }
 }
