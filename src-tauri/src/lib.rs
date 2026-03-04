@@ -4,6 +4,7 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::string::String;
 use std::sync::{LazyLock, Mutex};
+use tauri::Manager;
 
 static IP_ADDRESS: Mutex<String> = Mutex::new(String::new());
 
@@ -231,6 +232,39 @@ async fn append_camera_recording_chunk(filename: String, data: Vec<u8>) -> Resul
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            // Maximize the main window
+            let main_win = app.get_webview_window("main").expect("main window");
+            let _ = main_win.maximize();
+
+            // Spawn one maximized window on each additional monitor
+            let monitors = main_win.available_monitors().unwrap_or_default();
+            println!("[Setup] Detected {} monitor(s)", monitors.len());
+
+            for (i, monitor) in monitors.into_iter().enumerate().skip(1) {
+                let pos   = monitor.position();
+                let scale = monitor.scale_factor();
+                let lx    = pos.x as f64 / scale;
+                let ly    = pos.y as f64 / scale;
+                println!("[Setup] Spawning screen-{} at physical ({}, {}), logical ({:.0}, {:.0}), scale {}", i, pos.x, pos.y, lx, ly, scale);
+
+                let result = tauri::WebviewWindowBuilder::new(
+                    app,
+                    format!("screen-{}", i),
+                    tauri::WebviewUrl::App("/".into()),
+                )
+                .title(format!("prop-control-gui — Screen {}", i + 1))
+                .position(lx, ly)
+                .maximized(true)
+                .build();
+
+                if let Err(e) = result {
+                    eprintln!("[Setup] Failed to create screen-{}: {}", i, e);
+                }
+            }
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             fetch_server_ip,
             submit_ip,

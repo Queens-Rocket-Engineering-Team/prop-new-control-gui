@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, inject, onMounted, onUnmounted, nextTick } from "vue";
+import { ref, watch, inject, onMounted, onUnmounted } from "vue";
 import Button from "primevue/button";
 import ServerBar from "./server_bar.vue";
 import { availableMonitors, getCurrentWindow } from "@tauri-apps/api/window";
@@ -23,15 +23,7 @@ const navbarWidth  = ref(DEFAULT_WIDTH);
 const isCollapsed  = ref(false);
 
 watch(navbarWidth, (w) => emit("resize", w));
-onMounted(() => {
-  emit("resize", navbarWidth.value);
-  // Auto-spawn windows on all monitors at startup.
-  // Guard: only the main window should do this — screen-* windows also mount
-  // NavBar and must not trigger another round of spawning.
-  if (getCurrentWindow().label === 'main') {
-    nextTick(() => openOnAllScreens());
-  }
-});
+onMounted(() => emit("resize", navbarWidth.value));
 
 // ── Resize drag ─────────────────────────────────────────────────────────────
 
@@ -78,13 +70,6 @@ async function openOnAllScreens() {
   const monitors   = await availableMonitors();
   const currentWin = getCurrentWindow();
 
-  console.log(`[NavBar] Detected ${monitors.length} monitor(s):`, monitors.map(m => ({
-    name: m.name,
-    size: `${m.size.width}x${m.size.height}`,
-    position: `(${m.position.x}, ${m.position.y})`,
-    scaleFactor: m.scaleFactor,
-  })));
-
   // Maximise the main window on whatever screen it started on
   await currentWin.maximize();
 
@@ -112,7 +97,6 @@ async function openOnAllScreens() {
     });
 
     win.once('tauri://created', async () => {
-      console.log(`[NavBar] Window ${label} created, maximizing`);
       await win.maximize();
     });
 
