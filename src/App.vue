@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, provide, ref, shallowRef, watch } from "vue";
+import { onMounted, onUnmounted, provide, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useServerApi } from "./composables/useServerApi.js";
 import { useLogStream } from "./composables/useLogStream.js";
@@ -41,13 +41,169 @@ provide('pidConfig', pidConfig);
 
 const valveStates     = ref({});
 const auxiliaryStates = ref({});
+const valveStatusByControl = ref({});
+let valveStatusSeq = 0;
 provide('valveStates',     valveStates);
 provide('auxiliaryStates', auxiliaryStates);
+provide('valveStatusByControl', valveStatusByControl);
 
 // Clear valve states whenever the P&ID diagram is switched (keys become stale).
-watch(pidConfig, () => { valveStates.value = {}; });
+watch(pidConfig, () => {
+  valveStates.value = {};
+  requestStatusSnapshot();
+});
 
-const { fetchConfig, sendCommand, fetchKasaDevices, discoverKasaDevices, controlKasaDevice } = useServerApi(server_ip);
+const { fetchConfig, fetchStatus, sendCommand, fetchKasaDevices, discoverKasaDevices, controlKasaDevice } = useServerApi(server_ip);
+let refreshConfigPromise = null;
+let syncStreamPromise = null;
+let requestStatusPromise = null;
+let statusRefreshTimer = null;
+const STATUS_REFRESH_MS = 10_000;
+
+async function refreshServerConfig() {
+  if (!server_ip.value) return;
+  if (refreshConfigPromise) return refreshConfigPromise;
+
+  refreshConfigPromise = (async () => {
+    try {
+      serverConfig.value = await fetchConfig();
+    } catch (err) {
+      console.error('[App] refresh server config failed:', err);
+    } finally {
+      refreshConfigPromise = null;
+    }
+  })();
+
+  return refreshConfigPromise;
+}
+
+async function syncStreamForCurrentMode() {
+  if (!server_ip.value) return;
+  if (syncStreamPromise) return syncStreamPromise;
+
+  syncStreamPromise = (async () => {
+    const rate = testActive.value ? '100' : '10';
+    try {
+      await sendCommand('STREAM', [rate]);
+    } catch (err) {
+      console.error(`[App] sync STREAM ${rate} failed:`, err);
+    } finally {
+      syncStreamPromise = null;
+    }
+  })();
+
+  return syncStreamPromise;
+}
+
+async function requestStatusSnapshot() {
+  if (!server_ip.value) return;
+  if (requestStatusPromise) return requestStatusPromise;
+
+  requestStatusPromise = (async () => {
+    try {
+      await fetchStatus();
+    } catch (err) {
+      console.error('[App] request status snapshot failed:', err);
+    } finally {
+      requestStatusPromise = null;
+    }
+  })();
+
+  return requestStatusPromise;
+}
+
+function stopStatusRefresh() {
+  if (!statusRefreshTimer) return;
+  clearInterval(statusRefreshTimer);
+  statusRefreshTimer = null;
+}
+
+function startStatusRefresh() {
+  stopStatusRefresh();
+  if (!server_ip.value) return;
+  statusRefreshTimer = setInterval(() => {
+    requestStatusSnapshot();
+  }, STATUS_REFRESH_MS);
+}
+
+function normalizeDeviceName(name) {
+  return String(name ?? '').trim().toLowerCase();
+}
+
+function toMatchToken(value) {
+  return String(value ?? '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+}
+
+function removeDisconnectedDevices(deviceKeysToRemove) {
+  const cfg = serverConfig.value;
+  if (!cfg?.configs) return;
+  if (!deviceKeysToRemove?.length) return;
+
+  const removeSet = new Set(deviceKeysToRemove);
+  const nextConfigs = {};
+  let removed = false;
+
+  for (const [deviceKey, deviceCfg] of Object.entries(cfg.configs)) {
+    if (removeSet.has(deviceKey)) {
+      removed = true;
+      continue;
+    }
+    nextConfigs[deviceKey] = deviceCfg;
+  }
+
+  if (!removed) return;
+
+  serverConfig.value = {
+    ...cfg,
+    count: Object.keys(nextConfigs).length,
+    configs: nextConfigs,
+  };
+}
+
+function getDisconnectedDeviceKeys(message) {
+  const cfg = serverConfig.value;
+  if (!cfg?.configs) return [];
+
+  const raw = String(message ?? '').trim();
+  if (!/\bDISCONNECTED\b/i.test(raw)) return [];
+
+  const messageToken = toMatchToken(raw);
+  const keys = [];
+
+  for (const [deviceKey, deviceCfg] of Object.entries(cfg.configs)) {
+    const keyToken = toMatchToken(deviceKey);
+    const nameToken = toMatchToken(deviceCfg?.deviceName);
+
+    if (keyToken && messageToken.includes(`${keyToken}disconnected`)) {
+      keys.push(deviceKey);
+      continue;
+    }
+    if (nameToken && messageToken.includes(`${nameToken}disconnected`)) {
+      keys.push(deviceKey);
+    }
+  }
+
+  return keys;
+}
+
+function isConnectedMessage(message) {
+  const raw = String(message ?? '').trim();
+  if (!raw) return false;
+  return /\bCONNECTED\b/i.test(raw) && !/\bDISCONNECTED\b/i.test(raw);
+}
+
+function parseValveStatusMessage(message) {
+  const raw = String(message ?? '').trim();
+  const match = raw.match(/^(.+?)\s+STATUS\s+(\S+)\s+(OPEN|CLOSED)\s*$/i);
+  if (!match) return null;
+
+  const [, deviceName, valveName, state] = match;
+  return {
+    deviceName: deviceName.trim(),
+    valveName: valveName.trim(),
+    state: state.toUpperCase(),
+  };
+}
 
 // ── Kasa smart plugs ──────────────────────────────────────────────────────────
 
@@ -109,6 +265,38 @@ const { logLines, wsStatus, sensorData, clearLogs, clearSensorData } =
       invoke('write_sensor_batch', { timestamp, readings: taredReadings }).catch((err) =>
         console.error('[App] CSV write failed:', err)
       );
+    },
+    onLog(channel, message) {
+      const ch = String(channel ?? '').toLowerCase();
+      if (ch !== 'log' && ch !== 'syslog') return;
+
+      if (ch === 'log') {
+        const valveStatus = parseValveStatusMessage(message);
+        if (valveStatus) {
+          const key = toMatchToken(valveStatus.valveName);
+          valveStatusSeq += 1;
+          valveStatusByControl.value = {
+            ...valveStatusByControl.value,
+            [key]: {
+              ...valveStatus,
+              seq: valveStatusSeq,
+            },
+          };
+        }
+      }
+
+      if (isConnectedMessage(message)) {
+        (async () => {
+          await refreshServerConfig();
+          await syncStreamForCurrentMode();
+          await requestStatusSnapshot();
+        })();
+        return;
+      }
+
+      const keys = getDisconnectedDeviceKeys(message);
+      if (keys.length === 0) return;
+      removeDisconnectedDevices(keys);
     },
   });
 
@@ -174,8 +362,15 @@ watch(server_ip, async (ip) => {
 
   tares.value         = {};
   auxiliaryStates.value = {};
+  valveStatusSeq = 0;
+  valveStatusByControl.value = {};
 
-  if (!ip) { serverConfig.value = null; kasaDevices.value = []; return; }
+  if (!ip) {
+    stopStatusRefresh();
+    serverConfig.value = null;
+    kasaDevices.value = [];
+    return;
+  }
   try {
     serverConfig.value = await fetchConfig();
   } catch (err) {
@@ -192,6 +387,8 @@ watch(server_ip, async (ip) => {
   try { await sendCommand('STREAM', ['10']); } catch (err) {
     console.error('[App] preview STREAM failed:', err);
   }
+  await requestStatusSnapshot();
+  startStatusRefresh();
 });
 
 // ── Settings ─────────────────────────────────────────────────────────────────
@@ -206,6 +403,10 @@ onMounted(() => {
   invoke("fetch_server_ip")
     .then((ip) => { if (ip) server_ip.value = ip; })
     .catch(() => {});
+});
+
+onUnmounted(() => {
+  stopStatusRefresh();
 });
 </script>
 
