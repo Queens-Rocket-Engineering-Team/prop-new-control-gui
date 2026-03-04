@@ -97,14 +97,22 @@ async function openOnAllScreens() {
     const monitor = monitors[i];
     const label   = `screen-${i}`;
 
+    // Start the window AT the target monitor's position so that maximize()
+    // fires on the correct screen. x/y in the constructor are logical pixels;
+    // dividing by scaleFactor converts from the physical coords availableMonitors() returns.
+    const lx = Math.round(monitor.position.x / monitor.scaleFactor);
+    const ly = Math.round(monitor.position.y / monitor.scaleFactor);
+    console.log(`[NavBar] Creating window ${label} at logical (${lx}, ${ly}), physical (${monitor.position.x}, ${monitor.position.y}), scale ${monitor.scaleFactor}`);
+
     const win = new WebviewWindow(label, {
       url:   '/',
       title: `prop-control-gui — Screen ${i + 1}`,
+      x:     lx,
+      y:     ly,
     });
 
     win.once('tauri://created', async () => {
-      console.log(`[NavBar] Window ${label} created, positioning on monitor ${i}`);
-      await win.setPosition(new PhysicalPosition(monitor.position.x, monitor.position.y));
+      console.log(`[NavBar] Window ${label} created, maximizing`);
       await win.maximize();
     });
 
