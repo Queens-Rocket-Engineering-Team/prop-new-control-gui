@@ -1,13 +1,20 @@
 <script setup>
-import { inject, ref, watch, nextTick } from 'vue'
+// Helper to get log class for color coding
+function getLogClass(line) {
+  if (line.startsWith('[log]')) return 'log-line-log';
+  if (line.startsWith('[sys]')) return 'log-line-syslog';
+  if (line.startsWith('[err]')) return 'log-line-errlog';
+  if (line.startsWith('[debug]')) return 'log-line-debuglog';
+  if (line.startsWith('[packet]')) return 'log-line-packetlog';
+  return '';
+}
+import { inject, ref, watch, nextTick, computed } from 'vue'
 
 const logLines  = inject('logLines',  ref([]))
 const wsStatus  = inject('wsStatus',  ref('disconnected'))
 const clearLogs = inject('clearLogs', () => {})
 
 const logEl = ref(null)
-
-import { computed } from 'vue'
 
 // Channel filter state
 const availableChannels = [
@@ -19,19 +26,28 @@ const availableChannels = [
 ]
 const selectedChannels = ref(availableChannels.map(c => c.key))
 
-// Filter log lines by selected channels
+// Filter log lines by selected channels (match only first prefix)
+
+function extractChannel(line) {
+  const match = line.match(/^\[(\w+)\]/);
+  if (!match) return null;
+  switch (match[1]) {
+    case 'log': return 'log';
+    case 'sys': return 'syslog';
+    case 'err': return 'errlog';
+    case 'dbg': return 'debuglog';
+    case 'pkt': return 'packetlog';
+    default: return null;
+  }
+}
+
 const filteredLogLines = computed(() => {
-  if (selectedChannels.value.length === availableChannels.length) return logLines.value
+  if (selectedChannels.value.length === availableChannels.length) return logLines.value;
   return logLines.value.filter(line => {
-    // Match prefix: [sys], [log], [err], [debug]
-    if (selectedChannels.value.includes('log') && line.startsWith('[log]')) return true
-    if (selectedChannels.value.includes('syslog') && line.startsWith('[sys]')) return true
-    if (selectedChannels.value.includes('errlog') && line.startsWith('[err]')) return true
-    if (selectedChannels.value.includes('debuglog') && line.startsWith('[debug]')) return true
-    if (selectedChannels.value.includes('packetlog') && line.startsWith('[packet]')) return true
-    return false
-  })
-})
+    const channel = extractChannel(line);
+    return channel && selectedChannels.value.includes(channel);
+  });
+});
 
 // Auto-scroll to bottom whenever new lines arrive
 watch(filteredLogLines, async () => {
@@ -70,7 +86,7 @@ watch(filteredLogLines, async () => {
       <div
         v-for="(line, i) in filteredLogLines"
         :key="i"
-        class="log-line"
+        :class="['log-line', getLogClass(line)]"
       >{{ line }}</div>
     </div>
   </div>
@@ -80,7 +96,8 @@ watch(filteredLogLines, async () => {
 .debug-panel {
   display: flex;
   flex-direction: column;
-  max-height: 90%;
+  height: 100vh;
+  max-height: 100vh;
   background: var(--bg-primary);
   font-family: 'Consolas', 'Menlo', 'Monaco', monospace;
 }
@@ -146,11 +163,14 @@ watch(filteredLogLines, async () => {
 }
 
 .log-output {
-  flex: 1;
+  flex: 1 1 auto;
   overflow-y: auto;
   padding: 8px 10px;
   font-size: 0.78rem;
   line-height: 1.5;
+  box-sizing: border-box;
+  background: var(--bg-primary);
+  min-height: 0;
 }
 
 .log-empty {
@@ -163,6 +183,23 @@ watch(filteredLogLines, async () => {
   word-break: break-all;
   color: var(--text-primary);
 }
+  /* Color coding for log channels */
+  .log-line-log {
+    color: #2ecc71;
+  }
+  .log-line-syslog {
+    color: #3498db;
+  }
+  .log-line-errlog {
+    color: #e74c3c;
+    font-weight: bold;
+  }
+  .log-line-debuglog {
+    color: #f39c12;
+  }
+  .log-line-packetlog {
+    color: #9b59b6;
+  }
 
 .log-line:hover {
   background: var(--bg-secondary);
