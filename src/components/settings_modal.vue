@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, nextTick } from "vue";
+import { ref, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
@@ -15,9 +15,42 @@ const emit = defineEmits(["close", "update-ip", "update-pid-config"]);
 const ipMode = ref("none");
 const customIp = ref("");
 const cameraRecordingDir = ref("");
-const darkMode = ref(false);  // false = light, true = dark
 const localPidConfig = ref("rocket-launch");
 const overlayRef = ref(null);
+
+// ── Dark mode — persisted in localStorage, synced across windows ──────────────
+// localStorage is shared across all Tauri windows (same WebView2 data dir),
+// so new windows automatically inherit the saved state on mount.
+
+const darkMode = ref(localStorage.getItem('qret-dark-mode') === 'true');
+
+function applyDarkMode(isDark) {
+  document.documentElement.classList.toggle('dark-mode', isDark);
+  document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+}
+
+// Apply saved state immediately when this window opens (before any user action)
+onMounted(() => applyDarkMode(darkMode.value));
+
+const _settingsChannel = new BroadcastChannel('qret-settings');
+let _applyingBroadcast = false;
+
+watch(darkMode, (isDark) => {
+  applyDarkMode(isDark);
+  localStorage.setItem('qret-dark-mode', isDark);
+  if (!_applyingBroadcast) {
+    _settingsChannel.postMessage({ type: 'darkMode', value: isDark });
+  }
+});
+
+_settingsChannel.onmessage = (e) => {
+  if (e.data.type !== 'darkMode') return;
+  _applyingBroadcast = true;
+  darkMode.value = e.data.value;
+  _applyingBroadcast = false;
+};
+
+onUnmounted(() => _settingsChannel.close());
 
 watch(
   () => props.isOpen,
@@ -49,12 +82,6 @@ watch(localPidConfig, (cfg) => {
   emit("update-pid-config", cfg);
 });
 
-watch(darkMode, (isDark) => {
-  document.documentElement.classList.toggle("dark-mode", isDark);
-  // Set color-scheme so the SVG's light-dark() CSS function resolves correctly
-  document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
-});
-
 function isValidIp(ip) {
   const ipv4Pattern = /^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/;
   return ipv4Pattern.test(ip);
@@ -62,6 +89,7 @@ function isValidIp(ip) {
 
 function applyIp() {
   if (ipMode.value === "none") {
+    invoke("submit_ip", { newIp: "" });
     emit("update-ip", "");
     return;
   }

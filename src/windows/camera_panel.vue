@@ -1,8 +1,32 @@
 <script setup>
 import { invoke } from "@tauri-apps/api/core";
-import { inject, ref, nextTick, onUnmounted } from "vue";
+import { inject, ref, nextTick, onMounted, onUnmounted, onActivated } from "vue";
 
 import Button from "primevue/button";
+
+// Required so <KeepAlive include="CameraPanel"> in App.vue matches this component
+defineOptions({ name: 'CameraPanel' });
+
+// ── Stream resume ─────────────────────────────────────────────────────────────
+// WebRTC streams can pause when switching OS windows or navigating away and back.
+// Resume is triggered by two mechanisms:
+//   1. onActivated — fires when Vue's KeepAlive restores this panel after SPA navigation
+//   2. visibilitychange — fires when the OS window regains focus / becomes visible
+
+function resumeAllStreams() {
+    for (const videoEl of Object.values(videoRefs)) {
+        if (videoEl?.srcObject && videoEl.paused) {
+            videoEl.play().catch(() => {});
+        }
+    }
+}
+
+function onVisibilityChange() {
+    if (!document.hidden) resumeAllStreams();
+}
+
+onActivated(resumeAllStreams);
+onMounted(() => document.addEventListener('visibilitychange', onVisibilityChange));
 
 // activeRecordings tracks which camera IPs are currently recording (reactive for UI)
 const activeRecordings = ref({});
@@ -41,6 +65,7 @@ function onTileResizeEnd() {
 onUnmounted(() => {
     document.removeEventListener('mousemove', onTileResizeMove);
     document.removeEventListener('mouseup',  onTileResizeEnd);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
 });
 
 const server_ip = inject("serverIp");

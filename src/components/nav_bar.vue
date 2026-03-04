@@ -2,6 +2,9 @@
 import { ref, watch, inject, onMounted, onUnmounted } from "vue";
 import Button from "primevue/button";
 import ServerBar from "./server_bar.vue";
+import { availableMonitors, getCurrentWindow } from "@tauri-apps/api/window";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { PhysicalPosition } from "@tauri-apps/api/dpi";
 
 import CameraPanel from "../windows/camera_panel.vue";
 import GraphPanel from "../windows/graph_panel.vue";
@@ -61,6 +64,52 @@ onUnmounted(() => {
   clearInterval(timerInterval);
 });
 
+// ── Multi-monitor window spawning ────────────────────────────────────────────
+
+async function openOnAllScreens() {
+  const monitors   = await availableMonitors();
+  const currentWin = getCurrentWindow();
+  const currentMon = await currentWin.currentMonitor();
+
+  // Maximise this window on whatever screen it's already on
+  await currentWin.maximize();
+
+  if (monitors.length <= 1) return;
+
+  // Spawn one window per additional monitor, positioned so the OS knows which
+  // screen to maximise it on. Creating the window first then moving+maximising
+  // is more reliable than setting x/y in the constructor.
+  const otherMonitors = monitors.filter(m => m.name !== currentMon?.name);
+
+  for (const [i, monitor] of otherMonitors.entries()) {
+    const label    = `screen-${i + 1}`;
+    const existing = WebviewWindow.getByLabel(label);
+
+    if (existing) {
+      // Window already open — move it to this monitor and bring it to focus
+      await existing.setPosition(new PhysicalPosition(monitor.position.x, monitor.position.y));
+      await existing.maximize();
+      await existing.setFocus();
+      continue;
+    }
+
+    // Create a new window, then position + maximise once it has loaded
+    const win = new WebviewWindow(label, {
+      url:   '/',
+      title: `prop-control-gui — Screen ${i + 2}`,
+    });
+
+    win.once('tauri://created', async () => {
+      await win.setPosition(new PhysicalPosition(monitor.position.x, monitor.position.y));
+      await win.maximize();
+    });
+
+    win.once('tauri://error', (e) => {
+      console.error(`[NavBar] Failed to create window ${label}:`, e);
+    });
+  }
+}
+
 function toggleCollapse() {
   if (isCollapsed.value) {
     isCollapsed.value = false;
@@ -111,6 +160,9 @@ function formatElapsed(ms) {
       </div>
       <div id="gear-button" @click="emit('open-settings')" title="Settings">
         <i class="pi pi-cog" style="font-size: 24px"></i>
+      </div>
+      <div id="screens-button" @click="openOnAllScreens" title="Open on all screens">
+        <i class="pi pi-clone" style="font-size: 24px"></i>
       </div>
     </div>
 
@@ -204,6 +256,19 @@ function formatElapsed(ms) {
 
 #gear-button:hover { color: var(--text-primary); }
 
+#screens-button {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: var(--text-secondary);
+  border-radius: 4px;
+}
+
+#screens-button:hover { color: var(--text-primary); }
+
 /* Nav sections */
 #collapse {
   display: flex;
@@ -290,7 +355,8 @@ function formatElapsed(ms) {
 
 #navbar,
 #menu-button,
-#gear-button {
+#gear-button,
+#screens-button {
   transition: var(--theme-transition);
 }
 </style>

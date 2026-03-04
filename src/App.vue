@@ -33,7 +33,7 @@ provide('serverIp', server_ip);
 const serverConfig = ref(null);
 provide('serverConfig', serverConfig);
 
-const pidConfig = ref('rocket-launch');
+const pidConfig = ref(localStorage.getItem('qret-pid-config') || 'rocket-launch');
 provide('pidConfig', pidConfig);
 
 // ── Persistent control panel state ───────────────────────────────────────────
@@ -194,6 +194,44 @@ watch(server_ip, async (ip) => {
   }
 });
 
+// ── Cross-window IP sync via BroadcastChannel ─────────────────────────────────
+// All Tauri windows share the same Rust process, so invoke("fetch_server_ip")
+// already returns the correct IP when a new window opens. BroadcastChannel
+// covers the real-time case: IP changed in one window while others are open.
+
+const _ipChannel = new BroadcastChannel('qret-server-ip');
+let _receivingBroadcast = false;
+
+// When our IP changes (from settings), tell other windows
+watch(server_ip, (ip) => {
+  if (!_receivingBroadcast) _ipChannel.postMessage(ip);
+});
+
+// When another window changes the IP, update ours — which automatically
+// triggers the existing watch(server_ip) for reconnecting useLogStream etc.
+_ipChannel.onmessage = (e) => {
+  if (server_ip.value === e.data) return;
+  _receivingBroadcast = true;
+  server_ip.value = e.data;
+  _receivingBroadcast = false;
+};
+
+// ── Settings sync (pidConfig) across windows ──────────────────────────────────
+// darkMode is handled in settings_modal.vue; pidConfig lives here in App.vue.
+// Both use the same 'qret-settings' channel with typed messages.
+
+const _settingsChannel = new BroadcastChannel('qret-settings');
+
+watch(pidConfig, (cfg) => {
+  localStorage.setItem('qret-pid-config', cfg);
+  _settingsChannel.postMessage({ type: 'pidConfig', value: cfg });
+});
+
+_settingsChannel.onmessage = (e) => {
+  if (e.data.type === 'pidConfig') pidConfig.value = e.data.value;
+  // darkMode messages are handled by settings_modal.vue's own channel instance
+};
+
 // ── Settings ─────────────────────────────────────────────────────────────────
 
 function get_ip(new_ip) {
@@ -221,7 +259,8 @@ onMounted(() => {
         @resize="onNavResize"
       ></nav-bar>
 
-      <KeepAlive>
+      <!-- KeepAlive preserves CameraPanel's WebRTC streams across SPA navigation -->
+      <KeepAlive include="CameraPanel">
         <component :is="window_content" class="swap-container"></component>
       </KeepAlive>
     </div>
