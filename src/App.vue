@@ -58,7 +58,9 @@ let refreshConfigPromise = null;
 let syncStreamPromise = null;
 let requestStatusPromise = null;
 let statusRefreshTimer = null;
+let configRefreshTimer = null;
 const STATUS_REFRESH_MS = 10_000;
+const CONFIG_REFRESH_MS =  5_000;
 
 async function refreshServerConfig() {
   if (!server_ip.value) return;
@@ -66,7 +68,9 @@ async function refreshServerConfig() {
 
   refreshConfigPromise = (async () => {
     try {
-      serverConfig.value = await fetchConfig();
+      const cfg = await fetchConfig();
+      serverConfig.value = cfg;
+      _settingsChannel.postMessage({ type: 'serverConfig', value: cfg });
     } catch (err) {
       console.error('[App] refresh server config failed:', err);
     } finally {
@@ -75,6 +79,18 @@ async function refreshServerConfig() {
   })();
 
   return refreshConfigPromise;
+}
+
+function stopConfigRefresh() {
+  if (!configRefreshTimer) return;
+  clearInterval(configRefreshTimer);
+  configRefreshTimer = null;
+}
+
+function startConfigRefresh() {
+  stopConfigRefresh();
+  if (!server_ip.value) return;
+  configRefreshTimer = setInterval(refreshServerConfig, CONFIG_REFRESH_MS);
 }
 
 async function syncStreamForCurrentMode() {
@@ -367,14 +383,16 @@ watch(server_ip, async (ip) => {
 
   if (!ip) {
     stopStatusRefresh();
+    stopConfigRefresh();
     serverConfig.value = null;
     kasaDevices.value = [];
     _settingsChannel.postMessage({ type: 'serverConfig', value: null });
     return;
   }
   try {
-    serverConfig.value = await fetchConfig();
-    _settingsChannel.postMessage({ type: 'serverConfig', value: serverConfig.value });
+    const cfg = await fetchConfig();
+    serverConfig.value = cfg;
+    _settingsChannel.postMessage({ type: 'serverConfig', value: cfg });
   } catch (err) {
     console.error('[App] fetchConfig failed:', err);
     serverConfig.value = null;
@@ -391,6 +409,7 @@ watch(server_ip, async (ip) => {
   }
   await requestStatusSnapshot();
   startStatusRefresh();
+  startConfigRefresh();
 });
 
 // ── Cross-window IP sync via BroadcastChannel ─────────────────────────────────
@@ -448,6 +467,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopStatusRefresh();
+  stopConfigRefresh();
 });
 </script>
 
