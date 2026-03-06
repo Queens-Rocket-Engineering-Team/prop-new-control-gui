@@ -53,6 +53,23 @@ export function useServerApi(serverIp) {
   }
 
   /**
+   * GET /status
+    * Triggers a status request broadcast to connected devices.
+    * Device valve states are reported asynchronously on the log stream as:
+    * "<device name> STATUS <valve name> <OPEN|CLOSED>"
+    * @returns {Promise<object>}
+   */
+  async function fetchStatus() {
+    if (!baseUrl.value) throw new Error('No server IP configured')
+    const res = await fetch(`${baseUrl.value}/status`)
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText)
+      throw new Error(`${res.status}: ${text}`)
+    }
+    return res.json()
+  }
+
+  /**
    * GET /v1/kasa
    * @returns {Promise<KasaDeviceInfo[]>}
    */
@@ -97,5 +114,13 @@ export function useServerApi(serverIp) {
     return res.json()
   }
 
-  return { sendCommand, fetchConfig, fetchKasaDevices, discoverKasaDevices, controlKasaDevice, baseUrl }
+  return {
+    sendCommand,
+    fetchConfig,
+    fetchStatus,
+    fetchKasaDevices,
+    discoverKasaDevices,
+    controlKasaDevice,
+    baseUrl,
+  }
 }

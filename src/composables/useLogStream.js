@@ -21,10 +21,13 @@ function getUnit(name) {
  * Manages a persistent WebSocket connection to /ws/logs.
  *
  * @param {import('vue').Ref<string>} serverIp
- * @param {{ onBatch?: (timestamp: number, readings: Record<string,number>) => void }} [opts]
+ * @param {{
+ *   onBatch?: (timestamp: number, readings: Record<string,number>) => void,
+ *   onLog?: (channel: string, message: string) => void,
+ * }} [opts]
  * @returns {{ logLines, wsStatus, sensorData, clearLogs, clearSensorData }}
  */
-export function useLogStream(serverIp, { onBatch } = {}) {
+export function useLogStream(serverIp, { onBatch, onLog } = {}) {
   const logLines  = ref([])
   const wsStatus  = ref('disconnected')
 
@@ -130,6 +133,7 @@ export function useLogStream(serverIp, { onBatch } = {}) {
       if (parsed?.channel && parsed?.data) {
         const prefix = parsed.channel === 'syslog' ? '[sys]' : '[log]'
         pushLogLine(`${prefix} ${parsed.data}`)
+        onLog?.(parsed.channel, String(parsed.data))
 
         if (parsed.channel === 'log') {
           const reading = parseSensorLine(parsed.data)
