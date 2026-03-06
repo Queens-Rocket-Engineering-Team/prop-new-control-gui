@@ -175,9 +175,15 @@ watch(server_ip, async (ip) => {
   tares.value         = {};
   auxiliaryStates.value = {};
 
-  if (!ip) { serverConfig.value = null; kasaDevices.value = []; return; }
+  if (!ip) {
+    serverConfig.value = null;
+    kasaDevices.value  = [];
+    _settingsChannel.postMessage({ type: 'serverConfig', value: null });
+    return;
+  }
   try {
     serverConfig.value = await fetchConfig();
+    _settingsChannel.postMessage({ type: 'serverConfig', value: serverConfig.value });
   } catch (err) {
     console.error('[App] fetchConfig failed:', err);
     serverConfig.value = null;
@@ -228,7 +234,8 @@ watch(pidConfig, (cfg) => {
 });
 
 _settingsChannel.onmessage = (e) => {
-  if (e.data.type === 'pidConfig') pidConfig.value = e.data.value;
+  if (e.data.type === 'pidConfig')    pidConfig.value    = e.data.value;
+  if (e.data.type === 'serverConfig') serverConfig.value = e.data.value;
   // darkMode messages are handled by settings_modal.vue's own channel instance
 };
 

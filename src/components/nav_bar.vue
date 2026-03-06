@@ -2,9 +2,7 @@
 import { ref, watch, inject, onMounted, onUnmounted } from "vue";
 import Button from "primevue/button";
 import ServerBar from "./server_bar.vue";
-import { availableMonitors, getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { PhysicalPosition } from "@tauri-apps/api/dpi";
 
 import CameraPanel from "../windows/camera_panel.vue";
 import GraphPanel from "../windows/graph_panel.vue";
@@ -64,49 +62,22 @@ onUnmounted(() => {
   clearInterval(timerInterval);
 });
 
-// ── Multi-monitor window spawning ────────────────────────────────────────────
+// ── Extra window spawning ─────────────────────────────────────────────────────
 
-async function openOnAllScreens() {
-  const monitors   = await availableMonitors();
-  const currentWin = getCurrentWindow();
+let _extraWindowCount = 0;
 
-  // Maximise the main window on whatever screen it started on
-  await currentWin.maximize();
-
-  if (monitors.length <= 1) return;
-
-  // Spawn one window on each monitor beyond the first (index 0).
-  // Using index-based selection avoids relying on currentMonitor() which can
-  // return null before the window is fully positioned (e.g. at startup).
-  for (let i = 1; i < monitors.length; i++) {
-    const monitor = monitors[i];
-    const label   = `screen-${i}`;
-
-    // Start the window AT the target monitor's position so that maximize()
-    // fires on the correct screen. x/y in the constructor are logical pixels;
-    // dividing by scaleFactor converts from the physical coords availableMonitors() returns.
-    const lx = Math.round(monitor.position.x / monitor.scaleFactor);
-    const ly = Math.round(monitor.position.y / monitor.scaleFactor);
-    console.log(`[NavBar] Creating window ${label} at logical (${lx}, ${ly}), physical (${monitor.position.x}, ${monitor.position.y}), scale ${monitor.scaleFactor}`);
-
-    const win = new WebviewWindow(label, {
-      url:   '/',
-      title: `prop-control-gui — Screen ${i + 1}`,
-      x:     lx,
-      y:     ly,
-    });
-
-    win.once('tauri://created', async () => {
-      await win.maximize();
-    });
-
-    // Silently ignore "already exists" errors; log anything else
-    win.once('tauri://error', (e) => {
-      if (!String(e).includes('already exists')) {
-        console.error(`[NavBar] Failed to create window ${label}:`, e);
-      }
-    });
-  }
+function addWindow() {
+  _extraWindowCount++;
+  const label = `extra-${_extraWindowCount}`;
+  const win = new WebviewWindow(label, {
+    url:   '/',
+    title: `prop-control-gui — Window ${_extraWindowCount + 1}`,
+    width:  1280,
+    height: 800,
+  });
+  win.once('tauri://error', (e) => {
+    console.error(`[NavBar] Failed to create window ${label}:`, e);
+  });
 }
 
 function toggleCollapse() {
@@ -160,8 +131,8 @@ function formatElapsed(ms) {
       <div id="gear-button" @click="emit('open-settings')" title="Settings">
         <i class="pi pi-cog" style="font-size: 24px"></i>
       </div>
-      <div id="screens-button" @click="openOnAllScreens" title="Open on all screens">
-        <i class="pi pi-clone" style="font-size: 24px"></i>
+      <div id="screens-button" @click="addWindow" title="Add window">
+        <i class="pi pi-plus-circle" style="font-size: 24px"></i>
       </div>
     </div>
 
