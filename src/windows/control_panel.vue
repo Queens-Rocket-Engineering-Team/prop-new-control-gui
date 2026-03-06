@@ -13,7 +13,8 @@ const kasaDevices     = inject('kasaDevices',     ref([]))
 const setKasaState    = inject('setKasaState',    () => {})
 const valveStates     = inject('valveStates',     ref({}))
 const auxiliaryStates = inject('auxiliaryStates', ref({}))
-const { sendCommand } = useServerApi(serverIp)
+const valveStatusByControl = inject('valveStatusByControl', ref({}))
+const { sendCommand, fetchStatus } = useServerApi(serverIp)
 
 // ── SVG URL mapping (the only static config needed) ─────────────────────────
 
@@ -90,6 +91,19 @@ function normalizeId(id) {
 // 'AV-DUMP' → 'AVDUMP', 'AV-N2FILL' → 'AVN2FILL'
 function toControlKey(id) {
   return id.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()
+}
+
+function getBestMatchingValveIds(statusControlKey) {
+  const statusNorm = normalizeId(statusControlKey)
+  const ids = Object.keys(valveStates.value)
+  const matches = ids
+    .map((id) => ({ id, norm: normalizeId(id) }))
+    .filter(({ norm }) => statusNorm === norm || statusNorm.startsWith(norm))
+
+  if (matches.length === 0) return []
+
+  const bestLen = Math.max(...matches.map((m) => m.norm.length))
+  return matches.filter((m) => m.norm.length === bestLen).map((m) => m.id)
 }
 
 // ── Server-enabled controls ──────────────────────────────────────────────────
@@ -224,6 +238,47 @@ watch(serverConfig, (cfg) => {
   auxiliaryStates.value = s
 }, { immediate: true })
 
+const lastAppliedStatusSeqByControl = ref({})
+
+function applyValveStatusMap(statusMap) {
+  const nextApplied = { ...lastAppliedStatusSeqByControl.value }
+
+  for (const [controlKey, statusInfo] of Object.entries(statusMap ?? {})) {
+    const seq = Number(statusInfo?.seq ?? 0)
+    const lastSeq = Number(nextApplied[controlKey] ?? 0)
+    if (!seq || seq <= lastSeq) continue
+
+    const state = String(statusInfo?.state ?? '').toUpperCase()
+    if (state !== 'OPEN' && state !== 'CLOSED') continue
+
+    const matchedIds = getBestMatchingValveIds(controlKey)
+    if (matchedIds.length === 0) continue
+
+    for (const id of matchedIds) {
+      valveStates.value[id] = state === 'OPEN'
+    }
+
+    nextApplied[controlKey] = seq
+  }
+
+  lastAppliedStatusSeqByControl.value = nextApplied
+}
+
+watch(valveStatusByControl, (statusMap) => {
+  applyValveStatusMap(statusMap)
+}, { deep: true })
+
+watch(
+  () => Object.keys(valveStates.value).sort().join('|'),
+  () => {
+    applyValveStatusMap(valveStatusByControl.value)
+  }
+)
+
+watch(pidConfig, () => {
+  lastAppliedStatusSeqByControl.value = {}
+})
+
 async function onAuxToggle(key, newState) {
   auxiliaryStates.value[key] = newState  // optimistic update
   try {
@@ -239,12 +294,19 @@ async function onAuxToggle(key, newState) {
 
 async function onValveToggle(id, newState) {
   if (!isValveEnabled(id)) return
-  valveStates.value[id] = newState  // optimistic update
+  const controlKey = toControlKey(id)
 
   try {
-    await sendCommand('CONTROL', [toControlKey(id), newState ? 'OPEN' : 'CLOSE'])
+    valveStates.value[id] = newState  // optimistic update
+
+    await sendCommand('CONTROL', [controlKey, newState ? 'OPEN' : 'CLOSE'])
+
+    // Trigger fresh device STATUS reporting, but do not block UI on validation.
+    fetchStatus().catch((err) => {
+      console.error(`[ControlPanel] STATUS trigger after ${controlKey} failed:`, err)
+    })
   } catch (err) {
-    console.error(`[ControlPanel] CONTROL ${toControlKey(id)} failed:`, err)
+    console.error(`[ControlPanel] CONTROL ${controlKey} failed:`, err)
     valveStates.value[id] = !newState  // revert on failure
   }
 }
