@@ -194,6 +194,33 @@ async fn set_camera_recording_dir(new_dir: String) {
     *gaurded_dir = String::from(new_dir);
 }
 
+// ---------- keybinding file helpers ----------------------------------------
+fn keybindings_path() -> PathBuf {
+    let dir = data_dir();
+    fs::create_dir_all(&dir).ok();
+    dir.join("keybindings.json")
+}
+
+#[tauri::command]
+fn load_keybindings() -> Result<HashMap<String, serde_json::Value>, String> {
+    let path = keybindings_path();
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let contents = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&contents).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_keybindings(bindings: HashMap<String, serde_json::Value>) -> Result<(), String> {
+    let path = keybindings_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let contents = serde_json::to_string_pretty(&bindings).map_err(|e| e.to_string())?;
+    fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
 fn camera_recording_path(filename: &str) -> Result<PathBuf, String> {
     let videos_dir = PathBuf::from(CAMERA_RECORDING_DIR.lock().unwrap().to_string());
     fs::create_dir_all(&videos_dir).map_err(|e| e.to_string())?;
@@ -239,6 +266,8 @@ pub fn run() {
             stop_recording,
             fetch_camera_recording_dir,
             set_camera_recording_dir,
+            load_keybindings,
+            save_keybindings,
             init_camera_recording_file,
             append_camera_recording_chunk,
         ])
