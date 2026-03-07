@@ -262,7 +262,16 @@ const { logLines, wsStatus, sensorData, clearLogs, clearSensorData } =
       for (const [name, val] of Object.entries(readings)) {
         taredReadings[name] = val - (tares.value[name] ?? 0);
       }
-      invoke('write_sensor_batch', { timestamp, readings: taredReadings }).catch((err) =>
+      const valveStateBits = {};
+      for (const [name, isOpen] of Object.entries(valveStates.value)) {
+        valveStateBits[name] = isOpen ? 1 : 0;
+      }
+
+      invoke('write_sensor_batch', {
+        timestamp,
+        readings: taredReadings,
+        valveStates: valveStateBits,
+      }).catch((err) =>
         console.error('[App] CSV write failed:', err)
       );
     },

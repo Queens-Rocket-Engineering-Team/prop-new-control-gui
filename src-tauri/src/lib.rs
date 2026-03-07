@@ -40,9 +40,10 @@ const HEADER_BATCHES: usize = 30;  // ~0.3 s at 100 Hz
 struct CsvRecorder {
     writer:         BufWriter<File>,
     columns:        Vec<String>,
+    valve_columns:  Vec<String>,
     write_count:    u32,
     /// Batches accumulated before the header is written
-    pending:        Vec<(f64, HashMap<String, f64>)>,
+    pending:        Vec<(f64, HashMap<String, f64>, HashMap<String, u8>)>,
     header_written: bool,
 }
 
@@ -60,26 +61,66 @@ fn data_dir() -> PathBuf {
 fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
     // Collect every sensor name seen across all buffered batches (sorted)
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    for (_, batch) in &recorder.pending {
+    let mut seen_valves: BTreeSet<String> = BTreeSet::new();
+    for (_, batch, valve_states) in &recorder.pending {
         seen.extend(batch.keys().cloned());
+        seen_valves.extend(valve_states.keys().cloned());
     }
     let columns: Vec<String> = seen.into_iter().collect();
+    let valve_columns: Vec<String> = seen_valves.into_iter().collect();
 
     // Write header
-    let header = format!("device_timestamp,{}\n", columns.join(","));
+    let sensor_header = columns.join(",");
+    let valve_header = valve_columns
+        .iter()
+        .map(|name| format!("valve_{}", name))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let header_tail = match (sensor_header.is_empty(), valve_header.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => sensor_header,
+        (true, false) => valve_header,
+        (false, false) => format!("{},{}", sensor_header, valve_header),
+    };
+
+    let header = if header_tail.is_empty() {
+        "device_timestamp\n".to_string()
+    } else {
+        format!("device_timestamp,{}\n", header_tail)
+    };
     recorder.writer.write_all(header.as_bytes())?;
 
     // Write all buffered rows — use std::mem::take to avoid borrow conflicts
     let pending = std::mem::take(&mut recorder.pending);
-    for (ts, batch) in &pending {
-        let vals: Vec<String> = columns.iter()
+    for (ts, batch, valve_states) in &pending {
+        let sensor_vals: Vec<String> = columns.iter()
             .map(|c| batch.get(c).map(|v| format!("{:.4}", v)).unwrap_or_default())
             .collect();
-        recorder.writer.write_all(format!("{:.4},{}\n", ts, vals.join(",")).as_bytes())?;
+        let valve_vals: Vec<String> = valve_columns
+            .iter()
+            .map(|c| valve_states.get(c).copied().unwrap_or(0).to_string())
+            .collect();
+
+        let row_tail = match (sensor_vals.is_empty(), valve_vals.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => sensor_vals.join(","),
+            (true, false) => valve_vals.join(","),
+            (false, false) => format!("{},{}", sensor_vals.join(","), valve_vals.join(",")),
+        };
+
+        let row = if row_tail.is_empty() {
+            format!("{:.4}\n", ts)
+        } else {
+            format!("{:.4},{}\n", ts, row_tail)
+        };
+
+        recorder.writer.write_all(row.as_bytes())?;
     }
 
     recorder.writer.flush()?;
     recorder.columns        = columns;
+    recorder.valve_columns  = valve_columns;
     recorder.header_written = true;
     recorder.write_count    = 0;
     Ok(())
@@ -116,6 +157,7 @@ fn start_recording(mode: String, datetime: String) -> Result<String, String> {
     *guard = Some(CsvRecorder {
         writer:         BufWriter::new(file),
         columns:        Vec::new(),
+        valve_columns:  Vec::new(),
         write_count:    0,
         pending:        Vec::new(),
         header_written: false,
@@ -130,15 +172,21 @@ fn start_recording(mode: String, datetime: String) -> Result<String, String> {
 /// sensor names can be determined before the header is written.  After that,
 /// rows are written immediately and flushed every 10 writes.
 #[tauri::command]
-fn write_sensor_batch(timestamp: f64, readings: HashMap<String, f64>) -> Result<(), String> {
+fn write_sensor_batch(
+    timestamp: f64,
+    readings: HashMap<String, f64>,
+    valve_states: Option<HashMap<String, u8>>,
+) -> Result<(), String> {
     let mut guard = RECORDER.lock().map_err(|e| e.to_string())?;
     let recorder  = match guard.as_mut() {
         Some(r) => r,
         None    => return Ok(()),  // no recording in progress — silently skip
     };
 
+    let valve_states = valve_states.unwrap_or_default();
+
     if !recorder.header_written {
-        recorder.pending.push((timestamp, readings));
+        recorder.pending.push((timestamp, readings, valve_states));
 
         if recorder.pending.len() >= HEADER_BATCHES {
             flush_pending(recorder).map_err(|e| e.to_string())?;
@@ -147,11 +195,25 @@ fn write_sensor_batch(timestamp: f64, readings: HashMap<String, f64>) -> Result<
     }
 
     // Header already written — append the row directly
-    let row_values: Vec<String> = recorder.columns.iter()
+    let sensor_values: Vec<String> = recorder.columns.iter()
         .map(|col| readings.get(col).map(|v| format!("{:.4}", v)).unwrap_or_default())
         .collect();
+    let valve_values: Vec<String> = recorder.valve_columns
+        .iter()
+        .map(|col| valve_states.get(col).copied().unwrap_or(0).to_string())
+        .collect();
 
-    let row = format!("{:.4},{}\n", timestamp, row_values.join(","));
+    let row_tail = match (sensor_values.is_empty(), valve_values.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => sensor_values.join(","),
+        (true, false) => valve_values.join(","),
+        (false, false) => format!("{},{}", sensor_values.join(","), valve_values.join(",")),
+    };
+    let row = if row_tail.is_empty() {
+        format!("{:.4}\n", timestamp)
+    } else {
+        format!("{:.4},{}\n", timestamp, row_tail)
+    };
     recorder.writer.write_all(row.as_bytes()).map_err(|e| e.to_string())?;
 
     recorder.write_count += 1;
