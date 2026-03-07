@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, provide, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useServerApi } from "./composables/useServerApi.js";
 import { useLogStream } from "./composables/useLogStream.js";
+import { useKeyBindings } from "./composables/useKeyBindings.js";
 import "primeicons/primeicons.css";
 
 import NavBar from "./components/nav_bar.vue";
@@ -16,6 +17,26 @@ import FlightPanel from "./windows/flight_panel.vue";
 import SettingsModal from "./components/settings_modal.vue";
 
 const window_content = shallowRef(ControlPanel);
+
+// expose keybinding utilities globally so panels/modal can access them
+const {
+  controlKeyMap,
+  idToKey,
+  buildDefaultBindings,
+  loadKeyBindings,
+  knownValves,
+  knownAux,
+  knownKasa,
+  userBindings,
+} = useKeyBindings();
+
+provide('controlKeyMap', controlKeyMap);
+provide('idToKey', idToKey);
+provide('buildDefaultBindings', buildDefaultBindings);
+provide('knownValves', knownValves);
+provide('knownAux', knownAux);
+provide('knownKasa', knownKasa);
+provide('userBindings', userBindings);
 function setActive(component) {
   window_content.value = component;
 }
@@ -26,6 +47,10 @@ function onNavResize(w) {
 }
 
 // ── Server connection ────────────────────────────────────────────────────────
+// load any previously-saved keybindings
+onMounted(() => {
+  loadKeyBindings();
+});
 
 const server_ip = ref("");
 provide('serverIp', server_ip);
