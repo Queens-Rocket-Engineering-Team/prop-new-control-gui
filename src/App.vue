@@ -33,7 +33,7 @@ provide('serverIp', server_ip);
 const serverConfig = ref(null);
 provide('serverConfig', serverConfig);
 
-const pidConfig = ref('rocket-launch');
+const pidConfig = ref(localStorage.getItem('qret-pid-config') || 'rocket-launch');
 provide('pidConfig', pidConfig);
 
 // ── Persistent control panel state ───────────────────────────────────────────
@@ -58,7 +58,9 @@ let refreshConfigPromise = null;
 let syncStreamPromise = null;
 let requestStatusPromise = null;
 let statusRefreshTimer = null;
+let configRefreshTimer = null;
 const STATUS_REFRESH_MS = 10_000;
+const CONFIG_REFRESH_MS =  5_000;
 
 async function refreshServerConfig() {
   if (!server_ip.value) return;
@@ -66,7 +68,9 @@ async function refreshServerConfig() {
 
   refreshConfigPromise = (async () => {
     try {
-      serverConfig.value = await fetchConfig();
+      const cfg = await fetchConfig();
+      serverConfig.value = cfg;
+      _settingsChannel.postMessage({ type: 'serverConfig', value: cfg });
     } catch (err) {
       console.error('[App] refresh server config failed:', err);
     } finally {
@@ -75,6 +79,18 @@ async function refreshServerConfig() {
   })();
 
   return refreshConfigPromise;
+}
+
+function stopConfigRefresh() {
+  if (!configRefreshTimer) return;
+  clearInterval(configRefreshTimer);
+  configRefreshTimer = null;
+}
+
+function startConfigRefresh() {
+  stopConfigRefresh();
+  if (!server_ip.value) return;
+  configRefreshTimer = setInterval(refreshServerConfig, CONFIG_REFRESH_MS);
 }
 
 async function syncStreamForCurrentMode() {
@@ -397,12 +413,16 @@ watch(server_ip, async (ip) => {
 
   if (!ip) {
     stopStatusRefresh();
+    stopConfigRefresh();
     serverConfig.value = null;
     kasaDevices.value = [];
+    _settingsChannel.postMessage({ type: 'serverConfig', value: null });
     return;
   }
   try {
-    serverConfig.value = await fetchConfig();
+    const cfg = await fetchConfig();
+    serverConfig.value = cfg;
+    _settingsChannel.postMessage({ type: 'serverConfig', value: cfg });
   } catch (err) {
     console.error('[App] fetchConfig failed:', err);
     serverConfig.value = null;
@@ -419,7 +439,47 @@ watch(server_ip, async (ip) => {
   }
   await requestStatusSnapshot();
   startStatusRefresh();
+  startConfigRefresh();
 });
+
+// ── Cross-window IP sync via BroadcastChannel ─────────────────────────────────
+// All Tauri windows share the same Rust process, so invoke("fetch_server_ip")
+// already returns the correct IP when a new window opens. BroadcastChannel
+// covers the real-time case: IP changed in one window while others are open.
+
+const _ipChannel = new BroadcastChannel('qret-server-ip');
+let _receivingBroadcast = false;
+
+// When our IP changes (from settings), tell other windows
+watch(server_ip, (ip) => {
+  if (!_receivingBroadcast) _ipChannel.postMessage(ip);
+});
+
+// When another window changes the IP, update ours — which automatically
+// triggers the existing watch(server_ip) for reconnecting useLogStream etc.
+_ipChannel.onmessage = (e) => {
+  if (server_ip.value === e.data) return;
+  _receivingBroadcast = true;
+  server_ip.value = e.data;
+  _receivingBroadcast = false;
+};
+
+// ── Settings sync (pidConfig) across windows ──────────────────────────────────
+// darkMode is handled in settings_modal.vue; pidConfig lives here in App.vue.
+// Both use the same 'qret-settings' channel with typed messages.
+
+const _settingsChannel = new BroadcastChannel('qret-settings');
+
+watch(pidConfig, (cfg) => {
+  localStorage.setItem('qret-pid-config', cfg);
+  _settingsChannel.postMessage({ type: 'pidConfig', value: cfg });
+});
+
+_settingsChannel.onmessage = (e) => {
+  if (e.data.type === 'pidConfig')    pidConfig.value    = e.data.value;
+  if (e.data.type === 'serverConfig') serverConfig.value = e.data.value;
+  // darkMode messages are handled by settings_modal.vue's own channel instance
+};
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 
@@ -437,6 +497,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopStatusRefresh();
+  stopConfigRefresh();
 });
 </script>
 
@@ -452,7 +513,8 @@ onUnmounted(() => {
         @resize="onNavResize"
       ></nav-bar>
 
-      <KeepAlive>
+      <!-- KeepAlive preserves CameraPanel's WebRTC streams across SPA navigation -->
+      <KeepAlive include="CameraPanel">
         <component :is="window_content" class="swap-container"></component>
       </KeepAlive>
     </div>

@@ -2,6 +2,7 @@
 import { ref, watch, inject, onMounted, onUnmounted } from "vue";
 import Button from "primevue/button";
 import ServerBar from "./server_bar.vue";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 import CameraPanel from "../windows/camera_panel.vue";
 import GraphPanel from "../windows/graph_panel.vue";
@@ -61,6 +62,24 @@ onUnmounted(() => {
   clearInterval(timerInterval);
 });
 
+// ── Extra window spawning ─────────────────────────────────────────────────────
+
+let _extraWindowCount = 0;
+
+function addWindow() {
+  _extraWindowCount++;
+  const label = `extra-${_extraWindowCount}`;
+  const win = new WebviewWindow(label, {
+    url:   '/',
+    title: `prop-control-gui — Window ${_extraWindowCount + 1}`,
+    width:  1280,
+    height: 800,
+  });
+  win.once('tauri://error', (e) => {
+    console.error(`[NavBar] Failed to create window ${label}:`, e);
+  });
+}
+
 function toggleCollapse() {
   if (isCollapsed.value) {
     isCollapsed.value = false;
@@ -111,6 +130,9 @@ function formatElapsed(ms) {
       </div>
       <div id="gear-button" @click="emit('open-settings')" title="Settings">
         <i class="pi pi-cog" style="font-size: 24px"></i>
+      </div>
+      <div id="screens-button" @click="addWindow" title="Add window">
+        <i class="pi pi-plus-circle" style="font-size: 24px"></i>
       </div>
     </div>
 
@@ -204,6 +226,19 @@ function formatElapsed(ms) {
 
 #gear-button:hover { color: var(--text-primary); }
 
+#screens-button {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: var(--text-secondary);
+  border-radius: 4px;
+}
+
+#screens-button:hover { color: var(--text-primary); }
+
 /* Nav sections */
 #collapse {
   display: flex;
@@ -290,7 +325,8 @@ function formatElapsed(ms) {
 
 #navbar,
 #menu-button,
-#gear-button {
+#gear-button,
+#screens-button {
   transition: var(--theme-transition);
 }
 </style>
