@@ -42,9 +42,10 @@ struct CsvRecorder {
     columns:        Vec<String>,
     valve_columns:  Vec<String>,
     auxiliary_columns: Vec<String>,
+    kasa_columns:   Vec<String>,
     write_count:    u32,
     /// Batches accumulated before the header is written
-    pending:        Vec<(f64, HashMap<String, f64>, HashMap<String, u8>, HashMap<String, u8>)>,
+    pending:        Vec<(f64, HashMap<String, f64>, HashMap<String, u8>, HashMap<String, u8>, HashMap<String, u8>)>,
     header_written: bool,
 }
 
@@ -64,14 +65,17 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut seen_valves: BTreeSet<String> = BTreeSet::new();
     let mut seen_aux: BTreeSet<String> = BTreeSet::new();
-    for (_, batch, valve_states, auxiliary_states) in &recorder.pending {
+    let mut seen_kasa: BTreeSet<String> = BTreeSet::new();
+    for (_, batch, valve_states, auxiliary_states, kasa_states) in &recorder.pending {
         seen.extend(batch.keys().cloned());
         seen_valves.extend(valve_states.keys().cloned());
         seen_aux.extend(auxiliary_states.keys().cloned());
+        seen_kasa.extend(kasa_states.keys().cloned());
     }
     let columns: Vec<String> = seen.into_iter().collect();
     let valve_columns: Vec<String> = seen_valves.into_iter().collect();
     let auxiliary_columns: Vec<String> = seen_aux.into_iter().collect();
+    let kasa_columns: Vec<String> = seen_kasa.into_iter().collect();
 
     // Write header
     let sensor_header = columns.join(",");
@@ -85,6 +89,11 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
         .map(|name| format!("aux_{}", name))
         .collect::<Vec<_>>()
         .join(",");
+    let kasa_header = kasa_columns
+        .iter()
+        .map(|name| format!("kasa_{}", name))
+        .collect::<Vec<_>>()
+        .join(",");
 
     let mut header_parts: Vec<String> = Vec::new();
     if !sensor_header.is_empty() {
@@ -95,6 +104,9 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
     }
     if !auxiliary_header.is_empty() {
         header_parts.push(auxiliary_header);
+    }
+    if !kasa_header.is_empty() {
+        header_parts.push(kasa_header);
     }
     let header_tail = header_parts.join(",");
 
@@ -107,7 +119,7 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
 
     // Write all buffered rows — use std::mem::take to avoid borrow conflicts
     let pending = std::mem::take(&mut recorder.pending);
-    for (ts, batch, valve_states, auxiliary_states) in &pending {
+    for (ts, batch, valve_states, auxiliary_states, kasa_states) in &pending {
         let sensor_vals: Vec<String> = columns.iter()
             .map(|c| batch.get(c).map(|v| format!("{:.4}", v)).unwrap_or_default())
             .collect();
@@ -119,6 +131,10 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
             .iter()
             .map(|c| auxiliary_states.get(c).copied().unwrap_or(0).to_string())
             .collect();
+        let kasa_vals: Vec<String> = kasa_columns
+            .iter()
+            .map(|c| kasa_states.get(c).copied().unwrap_or(0).to_string())
+            .collect();
 
         let mut row_parts: Vec<String> = Vec::new();
         if !sensor_vals.is_empty() {
@@ -129,6 +145,9 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
         }
         if !auxiliary_vals.is_empty() {
             row_parts.push(auxiliary_vals.join(","));
+        }
+        if !kasa_vals.is_empty() {
+            row_parts.push(kasa_vals.join(","));
         }
         let row_tail = row_parts.join(",");
 
@@ -145,6 +164,7 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
     recorder.columns           = columns;
     recorder.valve_columns     = valve_columns;
     recorder.auxiliary_columns = auxiliary_columns;
+    recorder.kasa_columns      = kasa_columns;
     recorder.header_written    = true;
     recorder.write_count       = 0;
     Ok(())
@@ -183,6 +203,7 @@ fn start_recording(mode: String, datetime: String) -> Result<String, String> {
         columns:        Vec::new(),
         valve_columns:  Vec::new(),
         auxiliary_columns: Vec::new(),
+        kasa_columns:   Vec::new(),
         write_count:    0,
         pending:        Vec::new(),
         header_written: false,
@@ -202,6 +223,7 @@ fn write_sensor_batch(
     readings: HashMap<String, f64>,
     valve_states: Option<HashMap<String, u8>>,
     auxiliary_states: Option<HashMap<String, u8>>,
+    kasa_states: Option<HashMap<String, u8>>,
 ) -> Result<(), String> {
     let mut guard = RECORDER.lock().map_err(|e| e.to_string())?;
     let recorder  = match guard.as_mut() {
@@ -211,9 +233,10 @@ fn write_sensor_batch(
 
     let valve_states = valve_states.unwrap_or_default();
     let auxiliary_states = auxiliary_states.unwrap_or_default();
+    let kasa_states = kasa_states.unwrap_or_default();
 
     if !recorder.header_written {
-        recorder.pending.push((timestamp, readings, valve_states, auxiliary_states));
+        recorder.pending.push((timestamp, readings, valve_states, auxiliary_states, kasa_states));
 
         if recorder.pending.len() >= HEADER_BATCHES {
             flush_pending(recorder).map_err(|e| e.to_string())?;
@@ -233,6 +256,10 @@ fn write_sensor_batch(
         .iter()
         .map(|col| auxiliary_states.get(col).copied().unwrap_or(0).to_string())
         .collect();
+    let kasa_values: Vec<String> = recorder.kasa_columns
+        .iter()
+        .map(|col| kasa_states.get(col).copied().unwrap_or(0).to_string())
+        .collect();
 
     let mut row_parts: Vec<String> = Vec::new();
     if !sensor_values.is_empty() {
@@ -243,6 +270,9 @@ fn write_sensor_batch(
     }
     if !auxiliary_values.is_empty() {
         row_parts.push(auxiliary_values.join(","));
+    }
+    if !kasa_values.is_empty() {
+        row_parts.push(kasa_values.join(","));
     }
     let row_tail = row_parts.join(",");
     let row = if row_tail.is_empty() {

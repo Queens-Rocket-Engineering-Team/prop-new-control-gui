@@ -270,12 +270,28 @@ const { logLines, wsStatus, sensorData, clearLogs, clearSensorData } =
       for (const [name, isClosed] of Object.entries(auxiliaryStates.value)) {
         auxiliaryStateBits[name] = isClosed ? 1 : 0;
       }
+      const kasaStateBits = {};
+      const kasaAliasCounts = {};
+      for (const device of kasaDevices.value) {
+        const aliasBase = String(device?.alias ?? '').trim();
+        const fallback = String(device?.host ?? '').trim();
+        const rawBase = aliasBase || fallback;
+        const sanitizedBase = rawBase.replace(/[^a-zA-Z0-9]/g, '_').replace(/^_+|_+$/g, '');
+        if (!sanitizedBase) continue;
+
+        const count = (kasaAliasCounts[sanitizedBase] ?? 0) + 1;
+        kasaAliasCounts[sanitizedBase] = count;
+        const key = count === 1 ? sanitizedBase : `${sanitizedBase}_${count}`;
+
+        kasaStateBits[key] = device?.active ? 1 : 0;
+      }
 
       invoke('write_sensor_batch', {
         timestamp,
         readings: taredReadings,
         valveStates: valveStateBits,
         auxiliaryStates: auxiliaryStateBits,
+        kasaStates: kasaStateBits,
       }).catch((err) =>
         console.error('[App] CSV write failed:', err)
       );
