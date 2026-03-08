@@ -41,9 +41,10 @@ struct CsvRecorder {
     writer:         BufWriter<File>,
     columns:        Vec<String>,
     valve_columns:  Vec<String>,
+    auxiliary_columns: Vec<String>,
     write_count:    u32,
     /// Batches accumulated before the header is written
-    pending:        Vec<(f64, HashMap<String, f64>, HashMap<String, u8>)>,
+    pending:        Vec<(f64, HashMap<String, f64>, HashMap<String, u8>, HashMap<String, u8>)>,
     header_written: bool,
 }
 
@@ -62,12 +63,15 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
     // Collect every sensor name seen across all buffered batches (sorted)
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut seen_valves: BTreeSet<String> = BTreeSet::new();
-    for (_, batch, valve_states) in &recorder.pending {
+    let mut seen_aux: BTreeSet<String> = BTreeSet::new();
+    for (_, batch, valve_states, auxiliary_states) in &recorder.pending {
         seen.extend(batch.keys().cloned());
         seen_valves.extend(valve_states.keys().cloned());
+        seen_aux.extend(auxiliary_states.keys().cloned());
     }
     let columns: Vec<String> = seen.into_iter().collect();
     let valve_columns: Vec<String> = seen_valves.into_iter().collect();
+    let auxiliary_columns: Vec<String> = seen_aux.into_iter().collect();
 
     // Write header
     let sensor_header = columns.join(",");
@@ -76,13 +80,23 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
         .map(|name| format!("valve_{}", name))
         .collect::<Vec<_>>()
         .join(",");
+    let auxiliary_header = auxiliary_columns
+        .iter()
+        .map(|name| format!("aux_{}", name))
+        .collect::<Vec<_>>()
+        .join(",");
 
-    let header_tail = match (sensor_header.is_empty(), valve_header.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => sensor_header,
-        (true, false) => valve_header,
-        (false, false) => format!("{},{}", sensor_header, valve_header),
-    };
+    let mut header_parts: Vec<String> = Vec::new();
+    if !sensor_header.is_empty() {
+        header_parts.push(sensor_header);
+    }
+    if !valve_header.is_empty() {
+        header_parts.push(valve_header);
+    }
+    if !auxiliary_header.is_empty() {
+        header_parts.push(auxiliary_header);
+    }
+    let header_tail = header_parts.join(",");
 
     let header = if header_tail.is_empty() {
         "device_timestamp\n".to_string()
@@ -93,7 +107,7 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
 
     // Write all buffered rows — use std::mem::take to avoid borrow conflicts
     let pending = std::mem::take(&mut recorder.pending);
-    for (ts, batch, valve_states) in &pending {
+    for (ts, batch, valve_states, auxiliary_states) in &pending {
         let sensor_vals: Vec<String> = columns.iter()
             .map(|c| batch.get(c).map(|v| format!("{:.4}", v)).unwrap_or_default())
             .collect();
@@ -101,13 +115,22 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
             .iter()
             .map(|c| valve_states.get(c).copied().unwrap_or(0).to_string())
             .collect();
+        let auxiliary_vals: Vec<String> = auxiliary_columns
+            .iter()
+            .map(|c| auxiliary_states.get(c).copied().unwrap_or(0).to_string())
+            .collect();
 
-        let row_tail = match (sensor_vals.is_empty(), valve_vals.is_empty()) {
-            (true, true) => String::new(),
-            (false, true) => sensor_vals.join(","),
-            (true, false) => valve_vals.join(","),
-            (false, false) => format!("{},{}", sensor_vals.join(","), valve_vals.join(",")),
-        };
+        let mut row_parts: Vec<String> = Vec::new();
+        if !sensor_vals.is_empty() {
+            row_parts.push(sensor_vals.join(","));
+        }
+        if !valve_vals.is_empty() {
+            row_parts.push(valve_vals.join(","));
+        }
+        if !auxiliary_vals.is_empty() {
+            row_parts.push(auxiliary_vals.join(","));
+        }
+        let row_tail = row_parts.join(",");
 
         let row = if row_tail.is_empty() {
             format!("{:.4}\n", ts)
@@ -119,10 +142,11 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
     }
 
     recorder.writer.flush()?;
-    recorder.columns        = columns;
-    recorder.valve_columns  = valve_columns;
-    recorder.header_written = true;
-    recorder.write_count    = 0;
+    recorder.columns           = columns;
+    recorder.valve_columns     = valve_columns;
+    recorder.auxiliary_columns = auxiliary_columns;
+    recorder.header_written    = true;
+    recorder.write_count       = 0;
     Ok(())
 }
 
@@ -158,6 +182,7 @@ fn start_recording(mode: String, datetime: String) -> Result<String, String> {
         writer:         BufWriter::new(file),
         columns:        Vec::new(),
         valve_columns:  Vec::new(),
+        auxiliary_columns: Vec::new(),
         write_count:    0,
         pending:        Vec::new(),
         header_written: false,
@@ -176,6 +201,7 @@ fn write_sensor_batch(
     timestamp: f64,
     readings: HashMap<String, f64>,
     valve_states: Option<HashMap<String, u8>>,
+    auxiliary_states: Option<HashMap<String, u8>>,
 ) -> Result<(), String> {
     let mut guard = RECORDER.lock().map_err(|e| e.to_string())?;
     let recorder  = match guard.as_mut() {
@@ -184,9 +210,10 @@ fn write_sensor_batch(
     };
 
     let valve_states = valve_states.unwrap_or_default();
+    let auxiliary_states = auxiliary_states.unwrap_or_default();
 
     if !recorder.header_written {
-        recorder.pending.push((timestamp, readings, valve_states));
+        recorder.pending.push((timestamp, readings, valve_states, auxiliary_states));
 
         if recorder.pending.len() >= HEADER_BATCHES {
             flush_pending(recorder).map_err(|e| e.to_string())?;
@@ -202,13 +229,22 @@ fn write_sensor_batch(
         .iter()
         .map(|col| valve_states.get(col).copied().unwrap_or(0).to_string())
         .collect();
+    let auxiliary_values: Vec<String> = recorder.auxiliary_columns
+        .iter()
+        .map(|col| auxiliary_states.get(col).copied().unwrap_or(0).to_string())
+        .collect();
 
-    let row_tail = match (sensor_values.is_empty(), valve_values.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => sensor_values.join(","),
-        (true, false) => valve_values.join(","),
-        (false, false) => format!("{},{}", sensor_values.join(","), valve_values.join(",")),
-    };
+    let mut row_parts: Vec<String> = Vec::new();
+    if !sensor_values.is_empty() {
+        row_parts.push(sensor_values.join(","));
+    }
+    if !valve_values.is_empty() {
+        row_parts.push(valve_values.join(","));
+    }
+    if !auxiliary_values.is_empty() {
+        row_parts.push(auxiliary_values.join(","));
+    }
+    let row_tail = row_parts.join(",");
     let row = if row_tail.is_empty() {
         format!("{:.4}\n", timestamp)
     } else {
