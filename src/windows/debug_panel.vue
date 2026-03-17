@@ -60,7 +60,7 @@ const filteredLines = computed(() => {
 const logEl = ref(null)
 watch(filteredLines, async () => {
   await nextTick()
-  if (logEl.value) logEl.value.scrollTop = logEl.value.scrollHeight
+  if (logEl.value) logEl.value.scrollBottom = logEl.value.scrollHeight
 }, { deep: true })
 
 // ── Add / Remove views ────────────────────────────────────────────────────────
