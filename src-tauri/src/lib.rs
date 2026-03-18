@@ -4,6 +4,7 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::string::String;
 use std::sync::{LazyLock, Mutex};
+use tauri::Manager;
 
 static IP_ADDRESS: Mutex<String> = Mutex::new(String::new());
 
@@ -40,9 +41,12 @@ const HEADER_BATCHES: usize = 30;  // ~0.3 s at 100 Hz
 struct CsvRecorder {
     writer:         BufWriter<File>,
     columns:        Vec<String>,
+    valve_columns:  Vec<String>,
+    auxiliary_columns: Vec<String>,
+    kasa_columns:   Vec<String>,
     write_count:    u32,
     /// Batches accumulated before the header is written
-    pending:        Vec<(f64, HashMap<String, f64>)>,
+    pending:        Vec<(f64, HashMap<String, f64>, HashMap<String, u8>, HashMap<String, u8>, HashMap<String, u8>)>,
     header_written: bool,
 }
 
@@ -60,28 +64,110 @@ fn data_dir() -> PathBuf {
 fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
     // Collect every sensor name seen across all buffered batches (sorted)
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    for (_, batch) in &recorder.pending {
+    let mut seen_valves: BTreeSet<String> = BTreeSet::new();
+    let mut seen_aux: BTreeSet<String> = BTreeSet::new();
+    let mut seen_kasa: BTreeSet<String> = BTreeSet::new();
+    for (_, batch, valve_states, auxiliary_states, kasa_states) in &recorder.pending {
         seen.extend(batch.keys().cloned());
+        seen_valves.extend(valve_states.keys().cloned());
+        seen_aux.extend(auxiliary_states.keys().cloned());
+        seen_kasa.extend(kasa_states.keys().cloned());
     }
     let columns: Vec<String> = seen.into_iter().collect();
+    let valve_columns: Vec<String> = seen_valves.into_iter().collect();
+    let auxiliary_columns: Vec<String> = seen_aux.into_iter().collect();
+    let kasa_columns: Vec<String> = seen_kasa.into_iter().collect();
 
     // Write header
-    let header = format!("device_timestamp,{}\n", columns.join(","));
+    let sensor_header = columns.join(",");
+    let valve_header = valve_columns
+        .iter()
+        .map(|name| format!("valve_{}", name))
+        .collect::<Vec<_>>()
+        .join(",");
+    let auxiliary_header = auxiliary_columns
+        .iter()
+        .map(|name| format!("aux_{}", name))
+        .collect::<Vec<_>>()
+        .join(",");
+    let kasa_header = kasa_columns
+        .iter()
+        .map(|name| format!("kasa_{}", name))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let mut header_parts: Vec<String> = Vec::new();
+    if !sensor_header.is_empty() {
+        header_parts.push(sensor_header);
+    }
+    if !valve_header.is_empty() {
+        header_parts.push(valve_header);
+    }
+    if !auxiliary_header.is_empty() {
+        header_parts.push(auxiliary_header);
+    }
+    if !kasa_header.is_empty() {
+        header_parts.push(kasa_header);
+    }
+    let header_tail = header_parts.join(",");
+
+    let header = if header_tail.is_empty() {
+        "device_timestamp\n".to_string()
+    } else {
+        format!("device_timestamp,{}\n", header_tail)
+    };
     recorder.writer.write_all(header.as_bytes())?;
 
     // Write all buffered rows — use std::mem::take to avoid borrow conflicts
     let pending = std::mem::take(&mut recorder.pending);
-    for (ts, batch) in &pending {
-        let vals: Vec<String> = columns.iter()
+    for (ts, batch, valve_states, auxiliary_states, kasa_states) in &pending {
+        let sensor_vals: Vec<String> = columns.iter()
             .map(|c| batch.get(c).map(|v| format!("{:.4}", v)).unwrap_or_default())
             .collect();
-        recorder.writer.write_all(format!("{:.4},{}\n", ts, vals.join(",")).as_bytes())?;
+        let valve_vals: Vec<String> = valve_columns
+            .iter()
+            .map(|c| valve_states.get(c).copied().unwrap_or(0).to_string())
+            .collect();
+        let auxiliary_vals: Vec<String> = auxiliary_columns
+            .iter()
+            .map(|c| auxiliary_states.get(c).copied().unwrap_or(0).to_string())
+            .collect();
+        let kasa_vals: Vec<String> = kasa_columns
+            .iter()
+            .map(|c| kasa_states.get(c).copied().unwrap_or(0).to_string())
+            .collect();
+
+        let mut row_parts: Vec<String> = Vec::new();
+        if !sensor_vals.is_empty() {
+            row_parts.push(sensor_vals.join(","));
+        }
+        if !valve_vals.is_empty() {
+            row_parts.push(valve_vals.join(","));
+        }
+        if !auxiliary_vals.is_empty() {
+            row_parts.push(auxiliary_vals.join(","));
+        }
+        if !kasa_vals.is_empty() {
+            row_parts.push(kasa_vals.join(","));
+        }
+        let row_tail = row_parts.join(",");
+
+        let row = if row_tail.is_empty() {
+            format!("{:.4}\n", ts)
+        } else {
+            format!("{:.4},{}\n", ts, row_tail)
+        };
+
+        recorder.writer.write_all(row.as_bytes())?;
     }
 
     recorder.writer.flush()?;
-    recorder.columns        = columns;
-    recorder.header_written = true;
-    recorder.write_count    = 0;
+    recorder.columns           = columns;
+    recorder.valve_columns     = valve_columns;
+    recorder.auxiliary_columns = auxiliary_columns;
+    recorder.kasa_columns      = kasa_columns;
+    recorder.header_written    = true;
+    recorder.write_count       = 0;
     Ok(())
 }
 
@@ -116,6 +202,9 @@ fn start_recording(mode: String, datetime: String) -> Result<String, String> {
     *guard = Some(CsvRecorder {
         writer:         BufWriter::new(file),
         columns:        Vec::new(),
+        valve_columns:  Vec::new(),
+        auxiliary_columns: Vec::new(),
+        kasa_columns:   Vec::new(),
         write_count:    0,
         pending:        Vec::new(),
         header_written: false,
@@ -130,15 +219,25 @@ fn start_recording(mode: String, datetime: String) -> Result<String, String> {
 /// sensor names can be determined before the header is written.  After that,
 /// rows are written immediately and flushed every 10 writes.
 #[tauri::command]
-fn write_sensor_batch(timestamp: f64, readings: HashMap<String, f64>) -> Result<(), String> {
+fn write_sensor_batch(
+    timestamp: f64,
+    readings: HashMap<String, f64>,
+    valve_states: Option<HashMap<String, u8>>,
+    auxiliary_states: Option<HashMap<String, u8>>,
+    kasa_states: Option<HashMap<String, u8>>,
+) -> Result<(), String> {
     let mut guard = RECORDER.lock().map_err(|e| e.to_string())?;
     let recorder  = match guard.as_mut() {
         Some(r) => r,
         None    => return Ok(()),  // no recording in progress — silently skip
     };
 
+    let valve_states = valve_states.unwrap_or_default();
+    let auxiliary_states = auxiliary_states.unwrap_or_default();
+    let kasa_states = kasa_states.unwrap_or_default();
+
     if !recorder.header_written {
-        recorder.pending.push((timestamp, readings));
+        recorder.pending.push((timestamp, readings, valve_states, auxiliary_states, kasa_states));
 
         if recorder.pending.len() >= HEADER_BATCHES {
             flush_pending(recorder).map_err(|e| e.to_string())?;
@@ -147,11 +246,41 @@ fn write_sensor_batch(timestamp: f64, readings: HashMap<String, f64>) -> Result<
     }
 
     // Header already written — append the row directly
-    let row_values: Vec<String> = recorder.columns.iter()
+    let sensor_values: Vec<String> = recorder.columns.iter()
         .map(|col| readings.get(col).map(|v| format!("{:.4}", v)).unwrap_or_default())
         .collect();
+    let valve_values: Vec<String> = recorder.valve_columns
+        .iter()
+        .map(|col| valve_states.get(col).copied().unwrap_or(0).to_string())
+        .collect();
+    let auxiliary_values: Vec<String> = recorder.auxiliary_columns
+        .iter()
+        .map(|col| auxiliary_states.get(col).copied().unwrap_or(0).to_string())
+        .collect();
+    let kasa_values: Vec<String> = recorder.kasa_columns
+        .iter()
+        .map(|col| kasa_states.get(col).copied().unwrap_or(0).to_string())
+        .collect();
 
-    let row = format!("{:.4},{}\n", timestamp, row_values.join(","));
+    let mut row_parts: Vec<String> = Vec::new();
+    if !sensor_values.is_empty() {
+        row_parts.push(sensor_values.join(","));
+    }
+    if !valve_values.is_empty() {
+        row_parts.push(valve_values.join(","));
+    }
+    if !auxiliary_values.is_empty() {
+        row_parts.push(auxiliary_values.join(","));
+    }
+    if !kasa_values.is_empty() {
+        row_parts.push(kasa_values.join(","));
+    }
+    let row_tail = row_parts.join(",");
+    let row = if row_tail.is_empty() {
+        format!("{:.4}\n", timestamp)
+    } else {
+        format!("{:.4},{}\n", timestamp, row_tail)
+    };
     recorder.writer.write_all(row.as_bytes()).map_err(|e| e.to_string())?;
 
     recorder.write_count += 1;
@@ -258,6 +387,46 @@ async fn append_camera_recording_chunk(filename: String, data: Vec<u8>) -> Resul
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            // Maximize the main window
+            let main_win = app.get_webview_window("main").expect("main window");
+            let _ = main_win.maximize();
+
+            // Spawn one maximized window on each additional monitor
+            let monitors = main_win.available_monitors().unwrap_or_default();
+            println!("[Setup] Detected {} monitor(s)", monitors.len());
+
+            // Log every monitor so we can see all positions
+            for (i, m) in monitors.iter().enumerate() {
+                let pos  = m.position();
+                let size = m.size();
+                println!("[Setup] Monitor {}: name={:?}, pos=({}, {}), size={}x{}, scale={}", i, m.name(), pos.x, pos.y, size.width, size.height, m.scale_factor());
+            }
+
+            for (i, monitor) in monitors.into_iter().enumerate().skip(1) {
+                let pos   = monitor.position();
+                let scale = monitor.scale_factor();
+                let lx    = pos.x as f64 / scale;
+                let ly    = pos.y as f64 / scale;
+                println!("[Setup] Spawning screen-{} at physical ({}, {}), logical ({:.0}, {:.0}), scale {}", i, pos.x, pos.y, lx, ly, scale);
+
+                let result = tauri::WebviewWindowBuilder::new(
+                    app,
+                    format!("screen-{}", i),
+                    tauri::WebviewUrl::App("/".into()),
+                )
+                .title(format!("prop-control-gui — Screen {}", i + 1))
+                .position(lx, ly)
+                .maximized(true)
+                .build();
+
+                if let Err(e) = result {
+                    eprintln!("[Setup] Failed to create screen-{}: {}", i, e);
+                }
+            }
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             fetch_server_ip,
             submit_ip,
