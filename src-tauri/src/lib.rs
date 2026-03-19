@@ -4,9 +4,69 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::string::String;
 use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use tauri::Manager;
 
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::BOOL;
+#[cfg(target_os = "windows")]
+use windows::Win32::Media::Audio::{eCapture, eCommunications, Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator};
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
+
 static IP_ADDRESS: Mutex<String> = Mutex::new(String::new());
+static VOICE_WINDOW_PRESENT: Mutex<bool> = Mutex::new(false);
+static VOICE_PTT_HELD: Mutex<bool> = Mutex::new(false);
+#[allow(dead_code)]
+static VOICE_PTT_SEQUENCE: Mutex<u64> = Mutex::new(0);
+static VOICE_LAST_PRESS_AT: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
+
+#[cfg(target_os = "windows")]
+#[link(name = "user32")]
+extern "system" {
+    fn GetAsyncKeyState(vkey: i32) -> i16;
+}
+
+#[cfg(target_os = "windows")]
+fn is_alt_v_physically_held() -> bool {
+    const VK_MENU: i32 = 0x12; // Alt
+    const VK_V: i32 = 0x56;    // V
+    const KEY_DOWN_MASK: i16 = i16::MIN;
+    unsafe {
+        let alt_down = (GetAsyncKeyState(VK_MENU) & KEY_DOWN_MASK) != 0;
+        let v_down = (GetAsyncKeyState(VK_V) & KEY_DOWN_MASK) != 0;
+        alt_down && v_down
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_system_mic_muted(muted: bool) -> Result<(), String> {
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
+            .map_err(|e| e.to_string())?;
+
+        let result = (|| {
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|e| e.to_string())?;
+
+            let device = enumerator
+                .GetDefaultAudioEndpoint(eCapture, eCommunications)
+                .map_err(|e| e.to_string())?;
+
+            let endpoint: IAudioEndpointVolume =
+                device.Activate(CLSCTX_ALL, None).map_err(|e| e.to_string())?;
+
+            endpoint
+                .SetMute(BOOL::from(muted), std::ptr::null())
+                .map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
+        })();
+
+        CoUninitialize();
+        result
+    }
+}
 
 // Default camera recording directory set to Videos folder, can be changed
 static CAMERA_RECORDING_DIR: LazyLock<Mutex<String>> = LazyLock::new(|| {
@@ -26,6 +86,19 @@ async fn submit_ip(new_ip: String) {
     let mut ip = IP_ADDRESS.lock().unwrap();
     println!("New IP Submitted: {}", new_ip);
     *ip = new_ip;
+}
+
+#[tauri::command]
+async fn fetch_ptt_state() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        is_alt_v_physically_held()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        *VOICE_PTT_HELD.lock().unwrap()
+    }
 }
 
 // ── CSV recorder ─────────────────────────────────────────────────────────────
@@ -355,6 +428,283 @@ async fn append_camera_recording_chunk(filename: String, data: Vec<u8>) -> Resul
     Ok(())
 }
 
+#[allow(dead_code)]
+fn dispatch_voice_ptt(app: &tauri::AppHandle, pressed: bool) {
+        let pressed_literal = if pressed { "true" } else { "false" };
+        let sequence = {
+            let mut guard = VOICE_PTT_SEQUENCE.lock().unwrap();
+            *guard += 1;
+            *guard
+        };
+        let script = r#"
+(() => {
+    const desiredPressed = __PRESSED__;
+    const seq = __SEQ__;
+
+    if (!window.__qretVoicePtt) {
+        window.__qretVoicePtt = {
+            desiredPressed: false,
+            seq: 0,
+            desiredChangedAt: 0,
+            lastReleaseAt: 0,
+            lastServerSyncAt: 0,
+            serverSyncInFlight: false,
+            configured: false,
+            lastConfigAttemptAt: 0,
+            timer: null,
+        };
+    }
+
+    const state = window.__qretVoicePtt;
+
+    const isVisible = (el) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    };
+
+    const firstVisible = (selectors, root = document) => {
+        for (const selector of selectors) {
+            const nodes = Array.from(root.querySelectorAll(selector));
+            const found = nodes.find(isVisible);
+            if (found) return found;
+        }
+        return null;
+    };
+
+    const setSelfTalk = (pressed, forceServer = false) => {
+        const ui = window.mumbleUi;
+        if (!ui || typeof ui.thisUser !== 'function') return false;
+
+        const self = ui.thisUser();
+        if (!self) return false;
+
+        const now = Date.now();
+        const shouldBeMuted = !pressed;
+        const shouldSyncServer = forceServer || (now - state.lastServerSyncAt > 320);
+
+        // Apply local state immediately so hold feels responsive.
+        if (pressed) {
+            if (typeof ui.requestUnmute === 'function') ui.requestUnmute(self);
+            if (typeof ui.selfMute === 'function') ui.selfMute(false);
+        } else {
+            if (typeof ui.requestMute === 'function') ui.requestMute(self);
+            if (typeof ui.selfMute === 'function') ui.selfMute(true);
+        }
+
+        if (!shouldSyncServer || state.serverSyncInFlight) {
+            return true;
+        }
+
+        if (ui.client && typeof ui.client.setSelfMute === 'function') {
+            state.lastServerSyncAt = now;
+            try {
+                const res = ui.client.setSelfMute(shouldBeMuted);
+                if (res && typeof res.then === 'function') {
+                    state.serverSyncInFlight = true;
+                    res.finally(() => { state.serverSyncInFlight = false; });
+                }
+            } catch (_e) {
+                state.serverSyncInFlight = false;
+                return false;
+            }
+            return true;
+        }
+
+        return true;
+    };
+
+    const getMuteState = () => {
+        const ui = window.mumbleUi;
+        if (!ui || typeof ui.selfMute !== 'function' || typeof ui.thisUser !== 'function') return null;
+        try {
+            const self = ui.thisUser();
+            const localMuted = !!ui.selfMute();
+            const serverMuted = self && typeof self.mute === 'function' ? !!self.mute() : localMuted;
+            return { localMuted, serverMuted };
+        } catch (_e) {
+            return null;
+        }
+    };
+
+    const configureMumblePtt = () => {
+        if (state.configured) return;
+
+        const now = Date.now();
+        if (now - state.lastConfigAttemptAt < 300) return;
+        state.lastConfigAttemptAt = now;
+
+        try {
+            localStorage.setItem('mumble.voiceMode', 'cont');
+        } catch (_e) {
+            // Ignore storage failures; we'll still try runtime settings.
+        }
+
+        const ui = window.mumbleUi;
+        if (ui && ui.settings) {
+            ui.settings.voiceMode = 'cont';
+            if (typeof ui.settings.save === 'function') {
+                ui.settings.save();
+            }
+            if (typeof ui._updateVoiceHandler === 'function') {
+                ui._updateVoiceHandler();
+            }
+            if (typeof ui.closeSettings === 'function') {
+                ui.closeSettings();
+            }
+
+            // Start muted and let global keybind control unmute/mute transitions.
+            setSelfTalk(false, true);
+            state.configured = true;
+            return;
+        }
+
+        // If UI API is not ready yet, keep retrying until it is.
+    };
+
+    const reconcile = () => {
+        configureMumblePtt();
+
+        const muteState = getMuteState();
+        if (muteState == null) return;
+
+        const shouldBeMuted = !state.desiredPressed;
+        const localMismatch = muteState.localMuted !== shouldBeMuted;
+        const serverMismatch = muteState.serverMuted !== shouldBeMuted;
+
+        // Server is authoritative. Retry with higher urgency right after edge transitions.
+        const changedRecently = Date.now() - state.desiredChangedAt < 450;
+        if (serverMismatch) {
+            setSelfTalk(state.desiredPressed, changedRecently);
+        }
+
+        // Mirror local UI only after server has the expected state.
+        if (localMismatch) {
+            if (!serverMismatch) {
+                const ui = window.mumbleUi;
+                if (ui && typeof ui.selfMute === 'function') {
+                    ui.selfMute(shouldBeMuted);
+                }
+            }
+        }
+
+        // Release watchdog: periodically re-emit keyup to avoid sticky pressed state.
+        if (!state.desiredPressed && Date.now() - state.lastReleaseAt > 900) {
+            setSelfTalk(false, false);
+            state.lastReleaseAt = Date.now();
+        }
+    };
+
+    if (seq >= state.seq) {
+        const changed = state.desiredPressed !== desiredPressed;
+        state.seq = seq;
+        state.desiredPressed = desiredPressed;
+        if (changed) state.desiredChangedAt = Date.now();
+        if (!desiredPressed) state.lastReleaseAt = Date.now();
+    }
+
+    if (!state.timer) {
+        state.timer = setInterval(reconcile, 80);
+    }
+
+    reconcile();
+})();
+"#
+    .replace("__PRESSED__", pressed_literal)
+    .replace("__SEQ__", &sequence.to_string());
+
+        if let Some(voice_window) = app.get_webview_window("voice-client") {
+            let _ = voice_window.eval(&script);
+        }
+}
+
+fn dispatch_voice_autoconnect(app: &tauri::AppHandle) {
+    let script = r#"
+(() => {
+    const desiredUsername = 'Control';
+
+    const isVisible = (el) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    };
+
+    const setInputValue = (input, value) => {
+        if (!input) return;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (setter) {
+            setter.call(input, value);
+        } else {
+            input.value = value;
+        }
+        input.setAttribute('value', value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'l' }));
+        input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'l' }));
+    };
+
+    const firstVisible = (selectors, root = document) => {
+        for (const selector of selectors) {
+            const nodes = Array.from(root.querySelectorAll(selector));
+            const found = nodes.find(isVisible);
+            if (found) return found;
+        }
+        return null;
+    };
+
+    const dialog = document.querySelector('.connect-dialog.dialog');
+    const usernameInput = firstVisible([
+        '#username',
+        'input[name="username"]',
+        '.connect-dialog input[type="text"]'
+    ]) || document.querySelector('#username, input[name="username"], .connect-dialog input[type="text"]');
+
+    if (!usernameInput) return;
+
+    if (usernameInput.value !== desiredUsername) {
+        setInputValue(usernameInput, desiredUsername);
+    }
+
+    if (!dialog || !isVisible(dialog)) return;
+
+    if (usernameInput.value.trim() !== desiredUsername) {
+        setInputValue(usernameInput, desiredUsername);
+    }
+
+    const connectBtn = firstVisible([
+        '#connect-dialog_controls_connect',
+        '.connect-dialog input.dialog-submit[type="submit"][value="Connect"]',
+        '.connect-dialog input[type="submit"][value="Connect"]',
+        '.connect-dialog button.dialog-submit[type="submit"]',
+        '.connect-dialog button[type="submit"]'
+    ]) || document.querySelector('#connect-dialog_controls_connect, .connect-dialog input[type="submit"], .connect-dialog button[type="submit"]');
+
+    const form = dialog.querySelector('form') || usernameInput.closest('form');
+
+    if (connectBtn && !connectBtn.disabled && isVisible(connectBtn)) {
+        connectBtn.click();
+        return;
+    }
+
+    if (form && usernameInput.value.trim() === desiredUsername) {
+        if (typeof form.requestSubmit === 'function') {
+            form.requestSubmit(connectBtn || undefined);
+        } else {
+            form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+            if (typeof form.submit === 'function') form.submit();
+        }
+    }
+})();
+"#;
+
+    if let Some(voice_window) = app.get_webview_window("voice-client") {
+        let _ = voice_window.eval(script);
+    }
+}
+
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -398,10 +748,106 @@ pub fn run() {
                 }
             }
 
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_global_shortcut::ShortcutState;
+
+                app.handle().plugin(
+                    tauri_plugin_global_shortcut::Builder::new()
+                        .with_shortcuts(["alt+v"])?
+                        .with_handler(|_app, _shortcut, event| {
+                            match event.state {
+                                ShortcutState::Pressed => {
+                                    if *VOICE_PTT_HELD.lock().unwrap() {
+                                        return;
+                                    }
+                                    *VOICE_LAST_PRESS_AT.lock().unwrap() = Some(Instant::now());
+                                    *VOICE_PTT_HELD.lock().unwrap() = true;
+                                    #[cfg(target_os = "windows")]
+                                    {
+                                        if let Err(err) = set_system_mic_muted(false) {
+                                            eprintln!("[Voice] Failed to unmute system mic: {}", err);
+                                        }
+                                    }
+                                }
+                                ShortcutState::Released => {
+                                    if !*VOICE_PTT_HELD.lock().unwrap() {
+                                        return;
+                                    }
+                                    // Guard against spurious quick-release events from OS/global shortcut handling.
+                                    let ignore_release = VOICE_LAST_PRESS_AT
+                                        .lock()
+                                        .unwrap()
+                                        .map(|t| t.elapsed() < Duration::from_millis(120))
+                                        .unwrap_or(false);
+                                    if ignore_release {
+                                        return;
+                                    }
+                                    *VOICE_PTT_HELD.lock().unwrap() = false;
+                                    #[cfg(target_os = "windows")]
+                                    {
+                                        if let Err(err) = set_system_mic_muted(true) {
+                                            eprintln!("[Voice] Failed to mute system mic: {}", err);
+                                        }
+                                    }
+                                }
+                            }
+                        })
+                        .build(),
+                )?;
+                println!("[Voice] Global push-to-talk shortcut registered: Alt+V");
+
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    loop {
+                        let has_voice_window = app_handle.get_webview_window("voice-client").is_some();
+                        let mut startup_mute = false;
+                        {
+                            let mut was_present = VOICE_WINDOW_PRESENT.lock().unwrap();
+                            if has_voice_window && !*was_present {
+                                *was_present = true;
+                                *VOICE_PTT_HELD.lock().unwrap() = false;
+                                startup_mute = true;
+                            } else if !has_voice_window && *was_present {
+                                *was_present = false;
+                                *VOICE_PTT_HELD.lock().unwrap() = false;
+                            }
+                        }
+
+                        if startup_mute {
+                            #[cfg(target_os = "windows")]
+                            {
+                                if let Err(err) = set_system_mic_muted(true) {
+                                    eprintln!("[Voice] Failed to apply startup system mute: {}", err);
+                                }
+                            }
+                        }
+
+                        #[cfg(target_os = "windows")]
+                        {
+                            let physically_held = is_alt_v_physically_held();
+                            let mut held = VOICE_PTT_HELD.lock().unwrap();
+                            if *held != physically_held {
+                                *held = physically_held;
+                                if let Err(err) = set_system_mic_muted(!physically_held) {
+                                    eprintln!("[Voice] Failed to reconcile system mic mute: {}", err);
+                                }
+                            }
+                        }
+
+                        dispatch_voice_autoconnect(&app_handle);
+
+                        std::thread::sleep(Duration::from_millis(160));
+                    }
+                });
+                println!("[Voice] Auto-connect loop active (username: Control)");
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             fetch_server_ip,
+            fetch_ptt_state,
             submit_ip,
             start_recording,
             write_sensor_batch,

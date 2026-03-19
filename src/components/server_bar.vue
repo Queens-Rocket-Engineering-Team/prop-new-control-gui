@@ -1,5 +1,6 @@
 <script setup>
 import { ref, watch, onMounted, onUnmounted } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 
 const props = defineProps({
   serverIp: {
@@ -8,39 +9,56 @@ const props = defineProps({
   },
 });
 
-// 'grey' = no IP set / never connected, 'yellow' = waiting / 1 miss, 'green' = healthy, 'red' = 2+ misses
-const ledColor = ref("grey");
-const missedCount = ref(0);
-let hasConnected = false;
+const apiColor = ref("grey");
+const voiceColor = ref("grey");
+const pttColor = ref("grey");
 let intervalId = null;
+let pttIntervalId = null;
 
-async function checkHealth() {
+function getHost() {
+  if (!props.serverIp) return "";
+  return props.serverIp === "localhost" ? "127.0.0.1" : props.serverIp;
+}
+
+async function checkApi() {
   if (!props.serverIp) {
-    ledColor.value = "grey";
+    apiColor.value = "grey";
     return;
   }
 
-  const host = props.serverIp === "localhost" ? "127.0.0.1" : props.serverIp;
+  const host = getHost();
   try {
     const response = await fetch(`http://${host}:8000/health`, {
-      signal: AbortSignal.timeout(3000),
+      signal: AbortSignal.timeout(2500),
+      cache: "no-store",
     });
-    if (response.ok) {
-      hasConnected = true;
-      missedCount.value = 0;
-      ledColor.value = "green";
-    } else {
-      handleMiss();
-    }
+    apiColor.value = response.ok ? "green" : "red";
   } catch {
-    handleMiss();
+    apiColor.value = "red";
   }
 }
 
-function handleMiss() {
-  if (!hasConnected) return;
-  missedCount.value++;
-  ledColor.value = missedCount.value === 1 ? "yellow" : "red";
+async function checkVoice() {
+  if (!props.serverIp) {
+    voiceColor.value = "grey";
+    return;
+  }
+
+  const host = getHost();
+  try {
+    await fetch(`http://${host}:8080`, {
+      mode: "no-cors",
+      signal: AbortSignal.timeout(2500),
+      cache: "no-store",
+    });
+    voiceColor.value = "green";
+  } catch {
+    voiceColor.value = "red";
+  }
+}
+
+async function checkHealth() {
+  await Promise.all([checkApi(), checkVoice()]);
 }
 
 function startChecks() {
@@ -56,16 +74,38 @@ function stopChecks() {
   }
 }
 
+async function checkPttState() {
+  try {
+    const held = await invoke("fetch_ptt_state");
+    pttColor.value = held ? "green" : "grey";
+  } catch {
+    pttColor.value = "grey";
+  }
+}
+
+function startPttChecks() {
+  stopPttChecks();
+  checkPttState();
+  pttIntervalId = setInterval(checkPttState, 150);
+}
+
+function stopPttChecks() {
+  if (pttIntervalId !== null) {
+    clearInterval(pttIntervalId);
+    pttIntervalId = null;
+  }
+}
+
 watch(
   () => props.serverIp,
   (newIp) => {
     if (newIp) {
-      missedCount.value = 0;
-      hasConnected = false;
-      ledColor.value = "grey";
+      apiColor.value = "grey";
+      voiceColor.value = "grey";
       startChecks();
     } else {
-      ledColor.value = "grey";
+      apiColor.value = "grey";
+      voiceColor.value = "grey";
       stopChecks();
     }
   }
@@ -75,17 +115,30 @@ onMounted(() => {
   if (props.serverIp) {
     startChecks();
   }
+  startPttChecks();
 });
 
 onUnmounted(() => {
   stopChecks();
+  stopPttChecks();
 });
 </script>
 
 <template>
   <div id="server-indicator">
-    <div class="led-dot" :class="`led-${ledColor}`"></div>
     <span class="server-ip-text">{{ serverIp || "No Server" }}</span>
+    <div class="status-item">
+      <span class="status-label">API</span>
+      <span class="led-dot" :class="`led-${apiColor}`"></span>
+    </div>
+    <div class="status-item">
+      <span class="status-label">Voice</span>
+      <span class="led-dot" :class="`led-${voiceColor}`"></span>
+    </div>
+    <div class="status-item">
+      <span class="status-label">PTT</span>
+      <span class="led-dot" :class="`led-${pttColor}`"></span>
+    </div>
   </div>
 </template>
 
@@ -95,7 +148,8 @@ onUnmounted(() => {
 #server-indicator {
   display: flex;
   align-items: center;
-  gap: 7px;
+  justify-content: space-between;
+  gap: 10px;
   background-color: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: 6px;
@@ -109,6 +163,20 @@ onUnmounted(() => {
 .server-ip-text {
   color: var(--text-muted);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 52%;
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.status-label {
+  color: var(--text-secondary);
+  font-size: 10px;
 }
 
 .led-dot {
@@ -126,11 +194,6 @@ onUnmounted(() => {
 .led-green {
   background-color: #2ecc71;
   box-shadow: 0 0 6px #2ecc71;
-}
-
-.led-yellow {
-  background-color: #f39c12;
-  box-shadow: 0 0 6px #f39c12;
 }
 
 .led-red {

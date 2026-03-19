@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, onUnmounted, provide, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useServerApi } from "./composables/useServerApi.js";
 import { useLogStream } from "./composables/useLogStream.js";
 import "primeicons/primeicons.css";
@@ -61,6 +62,135 @@ let statusRefreshTimer = null;
 let configRefreshTimer = null;
 const STATUS_REFRESH_MS = 10_000;
 const CONFIG_REFRESH_MS =  5_000;
+const VOICE_WINDOW_LABEL = "voice-client";
+const VOICE_POLL_MS = 5000;
+let voicePollTimer = null;
+let voiceSyncPromise = null;
+
+function getServerHost(ip) {
+  const raw = String(ip ?? "").trim();
+  if (!raw) return "";
+  return raw === "localhost" ? "127.0.0.1" : raw;
+}
+
+function getVoiceUrl(ip) {
+  const host = getServerHost(ip);
+  if (!host) return "";
+  return `http://${host}:8080`;
+}
+
+async function isVoiceAvailable(ip) {
+  const host = getServerHost(ip);
+  if (!host) return false;
+
+  try {
+    await fetch(`http://${host}:8080`, {
+      mode: "no-cors",
+      signal: AbortSignal.timeout(2000),
+      cache: "no-store",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function closeVoiceWindow() {
+  const existing = await WebviewWindow.getByLabel(VOICE_WINDOW_LABEL);
+  if (!existing) return;
+  try {
+    await existing.close();
+  } catch {
+    // Window may already be closing.
+  }
+}
+
+async function configureVoiceWindow(win, voiceUrl, minimizeAfterConfigure) {
+  const routeScript = `(() => {
+    const target = ${JSON.stringify(voiceUrl)};
+    if (!String(window.location.href).startsWith(target)) {
+      window.location.replace(target);
+    }
+  })();`;
+
+  try {
+    await win.eval(routeScript);
+  } catch {
+    // Ignore races while the webview is still loading.
+  }
+
+  if (!minimizeAfterConfigure) return;
+  try {
+    await win.minimize();
+  } catch {
+    // Ignore if minimize is unsupported in the current state.
+  }
+}
+
+async function ensureVoiceWindow(ip, minimizeWhenCreated = false) {
+  const voiceUrl = getVoiceUrl(ip);
+  if (!voiceUrl) {
+    await closeVoiceWindow();
+    return;
+  }
+
+  const available = await isVoiceAvailable(ip);
+  if (!available) {
+    await closeVoiceWindow();
+    return;
+  }
+
+  const existing = await WebviewWindow.getByLabel(VOICE_WINDOW_LABEL);
+  if (existing) {
+    await configureVoiceWindow(existing, voiceUrl, false);
+    return;
+  }
+
+  const win = new WebviewWindow(VOICE_WINDOW_LABEL, {
+    url: voiceUrl,
+    title: "Voice Client",
+    width: 420,
+    height: 280,
+    center: true,
+  });
+
+  win.once("tauri://created", async () => {
+    await configureVoiceWindow(win, voiceUrl, minimizeWhenCreated);
+  });
+
+  win.once("tauri://error", (err) => {
+    console.error("[App] Failed to create Voice window:", err);
+  });
+}
+
+function stopVoicePolling() {
+  if (!voicePollTimer) return;
+  clearInterval(voicePollTimer);
+  voicePollTimer = null;
+}
+
+function startVoicePolling() {
+  stopVoicePolling();
+  if (!server_ip.value) return;
+
+  const sync = async (minimizeWhenCreated = false) => {
+    if (!server_ip.value) return;
+    if (voiceSyncPromise) return voiceSyncPromise;
+    voiceSyncPromise = (async () => {
+      try {
+        await ensureVoiceWindow(server_ip.value, minimizeWhenCreated);
+      } finally {
+        voiceSyncPromise = null;
+      }
+    })();
+    return voiceSyncPromise;
+  };
+
+  sync(true);
+  voicePollTimer = setInterval(() => {
+    sync(false);
+  }, VOICE_POLL_MS);
+}
 
 async function refreshServerConfig() {
   if (!server_ip.value) return;
@@ -442,6 +572,15 @@ watch(server_ip, async (ip) => {
   startConfigRefresh();
 });
 
+watch(server_ip, async (ip) => {
+  if (!ip) {
+    stopVoicePolling();
+    await closeVoiceWindow();
+    return;
+  }
+  startVoicePolling();
+}, { immediate: true });
+
 // ── Cross-window IP sync via BroadcastChannel ─────────────────────────────────
 // All Tauri windows share the same Rust process, so invoke("fetch_server_ip")
 // already returns the correct IP when a new window opens. BroadcastChannel
@@ -498,6 +637,7 @@ onMounted(() => {
 onUnmounted(() => {
   stopStatusRefresh();
   stopConfigRefresh();
+  stopVoicePolling();
 });
 </script>
 
