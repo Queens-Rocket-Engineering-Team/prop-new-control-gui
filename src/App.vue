@@ -54,7 +54,17 @@ watch(pidConfig, () => {
   requestStatusSnapshot();
 });
 
-const { fetchConfig, fetchStatus, sendCommand, fetchKasaDevices, discoverKasaDevices, controlKasaDevice } = useServerApi(server_ip);
+const {
+  fetchConfig,
+  fetchStatus,
+  sendCommand,
+  fetchKasaDevices,
+  discoverKasaDevices,
+  controlKasaDevice,
+  startAudioRecording,
+  stopAudioRecording,
+  getAudioFileUrl,
+} = useServerApi(server_ip);
 let refreshConfigPromise = null;
 let syncStreamPromise = null;
 let requestStatusPromise = null;
@@ -487,6 +497,8 @@ function formatDatetime() {
 async function startTest() {
   if (testActive.value) return;
   clearSensorData();
+  let csvStarted = false;
+  let audioStarted = false;
   try {
     await sendCommand('STOP', []);
     await sendCommand('STREAM', ['100']);
@@ -494,9 +506,43 @@ async function startTest() {
       mode:     pidConfig.value,
       datetime: formatDatetime(),
     });
+    csvStarted = true;
+
+    const audioStart = await startAudioRecording();
+    if (audioStart?.error) {
+      throw new Error(audioStart.error);
+    }
+    if (audioStart?.status !== 'started') {
+      throw new Error(`Audio start returned unexpected response: ${JSON.stringify(audioStart)}`);
+    }
+    audioStarted = true;
+
     testActive.value    = true;
     testStartTime.value = Date.now();
   } catch (err) {
+    if (audioStarted) {
+      try {
+        await stopAudioRecording();
+      } catch (rollbackErr) {
+        console.error('[App] rollback audio stop failed:', rollbackErr);
+      }
+    }
+
+    if (csvStarted) {
+      try {
+        await invoke('stop_recording');
+      } catch (rollbackErr) {
+        console.error('[App] rollback CSV stop failed:', rollbackErr);
+      }
+    }
+
+    try {
+      await sendCommand('STOP', []);
+      await sendCommand('STREAM', ['10']);
+    } catch {
+      // Ignore cleanup errors while preserving the primary failure in logs.
+    }
+
     console.error('[App] startTest failed:', err);
   }
 }
@@ -505,15 +551,63 @@ async function stopTest() {
   if (!testActive.value) return;
   testActive.value    = false;
   testStartTime.value = null;
+  let stopError = null;
   try {
     await sendCommand('STOP', []);
+  } catch (err) {
+    stopError = stopError ?? err;
+    console.error('[App] stopTest STOP failed:', err);
+  }
+
+  try {
     await invoke('stop_recording');
   } catch (err) {
-    console.error('[App] stopTest failed:', err);
+    stopError = stopError ?? err;
+    console.error('[App] stopTest CSV stop failed:', err);
   }
+
+  try {
+    const audioStop = await stopAudioRecording();
+    if (audioStop?.error) {
+      throw new Error(audioStop.error);
+    }
+    if (audioStop?.status !== 'stopped') {
+      throw new Error(`Audio stop returned unexpected response: ${JSON.stringify(audioStop)}`);
+    }
+    if (audioStop?.file) {
+      const audioFileUrl = getAudioFileUrl(audioStop.file);
+      const audioRes = await fetch(audioFileUrl, { cache: 'no-store' });
+      if (!audioRes.ok) {
+        const text = await audioRes.text().catch(() => audioRes.statusText);
+        throw new Error(`Failed to download audio file ${audioStop.file}: ${audioRes.status} ${text}`);
+      }
+
+      const bytes = Array.from(new Uint8Array(await audioRes.arrayBuffer()));
+      const localPath = await invoke('save_audio_recording_file', {
+        filename: audioStop.file,
+        data: bytes,
+      });
+
+      console.log(`[App] Audio saved on server: ${audioStop.file}`);
+      console.log(`[App] Audio copied to local file: ${localPath}`);
+    }
+  } catch (err) {
+    stopError = stopError ?? err;
+    console.error('[App] stopTest audio stop failed:', err);
+  }
+
   // Restart preview stream after test ends
   if (server_ip.value) {
-    try { await sendCommand('STREAM', ['10']); } catch { /* ignore */ }
+    try {
+      await sendCommand('STREAM', ['10']);
+    } catch (err) {
+      stopError = stopError ?? err;
+      console.error('[App] stopTest preview STREAM failed:', err);
+    }
+  }
+
+  if (stopError) {
+    console.error('[App] stopTest completed with one or more failures.');
   }
 }
 

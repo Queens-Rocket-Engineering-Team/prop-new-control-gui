@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::string::String;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -426,6 +426,36 @@ async fn append_camera_recording_chunk(filename: String, data: Vec<u8>) -> Resul
 
     file.write_all(&data).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+async fn save_audio_recording_file(filename: String, data: Vec<u8>) -> Result<String, String> {
+    let mut safe_name = PathBuf::from(filename)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("audio_recording.opus")
+        .replace(['/', '\\', '\0'], "_");
+
+    if Path::new(&safe_name).extension().is_none() {
+        safe_name.push_str(".opus");
+    }
+
+    let audio_dir = data_dir().join("audio");
+    fs::create_dir_all(&audio_dir).map_err(|e| e.to_string())?;
+
+    let path = audio_dir.join(safe_name);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+
+    file.write_all(&data).map_err(|e| e.to_string())?;
+    file.flush().map_err(|e| e.to_string())?;
+
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[allow(dead_code)]
@@ -856,6 +886,7 @@ pub fn run() {
             set_camera_recording_dir,
             init_camera_recording_file,
             append_camera_recording_chunk,
+            save_audio_recording_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

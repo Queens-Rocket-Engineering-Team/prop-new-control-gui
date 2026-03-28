@@ -114,6 +114,68 @@ export function useServerApi(serverIp) {
     return res.json()
   }
 
+  /**
+   * POST /v1/audio/start
+   * @returns {Promise<{status?: string, error?: string}>}
+   */
+  async function startAudioRecording() {
+    if (!baseUrl.value) throw new Error('No server IP configured')
+    const res = await fetch(`${baseUrl.value}/v1/audio/start`, {
+      method: 'POST',
+    })
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText)
+      throw new Error(`${res.status}: ${text}`)
+    }
+
+    return res.json()
+  }
+
+  /**
+   * POST /v1/audio/stop
+   * @returns {Promise<{status?: string, file?: string, error?: string}>}
+   */
+  async function stopAudioRecording() {
+    if (!baseUrl.value) throw new Error('No server IP configured')
+    const res = await fetch(`${baseUrl.value}/v1/audio/stop`, {
+      method: 'POST',
+    })
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText)
+      throw new Error(`${res.status}: ${text}`)
+    }
+
+    return res.json()
+  }
+
+  /**
+   * GET /v1/audio/files
+   * @returns {Promise<{files?: string[]}>}
+   */
+  async function listAudioFiles() {
+    if (!baseUrl.value) throw new Error('No server IP configured')
+    const res = await fetch(`${baseUrl.value}/v1/audio/files`)
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText)
+      throw new Error(`${res.status}: ${text}`)
+    }
+
+    return res.json()
+  }
+
+  /**
+   * Returns a direct URL for GET /v1/audio/files/<file name>
+   * @param {string} fileName
+   * @returns {string}
+   */
+  function getAudioFileUrl(fileName) {
+    if (!baseUrl.value) throw new Error('No server IP configured')
+    return `${baseUrl.value}/v1/audio/files/${encodeURIComponent(fileName)}`
+  }
+
   return {
     sendCommand,
     fetchConfig,
@@ -121,6 +183,10 @@ export function useServerApi(serverIp) {
     fetchKasaDevices,
     discoverKasaDevices,
     controlKasaDevice,
+    startAudioRecording,
+    stopAudioRecording,
+    listAudioFiles,
+    getAudioFileUrl,
     baseUrl,
   }
 }
