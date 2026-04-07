@@ -330,29 +330,17 @@ fn camera_recording_path(filename: &str) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-async fn init_camera_recording_file(filename: String) -> Result<String, String> {
+async fn save_downloaded_camera_recording(filename: String, data: Vec<u8>) -> Result<String, String> {
     let path = camera_recording_path(&filename)?;
-    OpenOptions::new()
+    let mut file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
         .open(&path)
         .map_err(|e| e.to_string())?;
 
-    Ok(path.to_string_lossy().to_string())
-}
-
-#[tauri::command]
-async fn append_camera_recording_chunk(filename: String, data: Vec<u8>) -> Result<(), String> {
-    let path = camera_recording_path(&filename)?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
-
     file.write_all(&data).map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(path.to_string_lossy().to_string())
 }
 
 
@@ -408,8 +396,7 @@ pub fn run() {
             stop_recording,
             fetch_camera_recording_dir,
             set_camera_recording_dir,
-            init_camera_recording_file,
-            append_camera_recording_chunk,
+            save_downloaded_camera_recording,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
