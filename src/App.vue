@@ -63,6 +63,7 @@ const {
   controlKasaDevice,
   startAudioRecording,
   stopAudioRecording,
+  listAudioFiles,
   getAudioFileUrl,
 } = useServerApi(server_ip);
 let refreshConfigPromise = null;
@@ -575,20 +576,38 @@ async function stopTest() {
       throw new Error(`Audio stop returned unexpected response: ${JSON.stringify(audioStop)}`);
     }
     if (audioStop?.file) {
-      const audioFileUrl = getAudioFileUrl(audioStop.file);
+      const listed = await listAudioFiles();
+      const files = Array.isArray(listed?.files) ? listed.files : [];
+      const stoppedFile = String(audioStop.file ?? '').trim();
+      const matched = files.find((item) => {
+        if (!item || typeof item !== 'object') return false;
+        const filename = typeof item.filename === 'string' ? item.filename.trim() : '';
+        const basename = filename.replace(/\.[^/.]+$/, '');
+        const hasDownloadPath = typeof item.download_path === 'string' && item.download_path.trim();
+        return hasDownloadPath && (filename === stoppedFile || basename === stoppedFile);
+      });
+
+      if (!matched) {
+        throw new Error(`No downloadable audio file found for ${stoppedFile} in /v1/audio/files response`);
+      }
+      if (typeof matched.filename !== 'string' || !matched.filename.trim()) {
+        throw new Error(`Matched audio file is missing a valid filename: ${JSON.stringify(matched)}`);
+      }
+
+      const audioFileUrl = getAudioFileUrl(matched.download_path);
       const audioRes = await fetch(audioFileUrl, { cache: 'no-store' });
       if (!audioRes.ok) {
         const text = await audioRes.text().catch(() => audioRes.statusText);
-        throw new Error(`Failed to download audio file ${audioStop.file}: ${audioRes.status} ${text}`);
+        throw new Error(`Failed to download audio file ${matched.filename}: ${audioRes.status} ${text}`);
       }
 
       const bytes = Array.from(new Uint8Array(await audioRes.arrayBuffer()));
       const localPath = await invoke('save_audio_recording_file', {
-        filename: audioStop.file,
+        filename: matched.filename,
         data: bytes,
       });
 
-      console.log(`[App] Audio saved on server: ${audioStop.file}`);
+      console.log(`[App] Audio saved on server: ${matched.filename}`);
       console.log(`[App] Audio copied to local file: ${localPath}`);
     }
   } catch (err) {

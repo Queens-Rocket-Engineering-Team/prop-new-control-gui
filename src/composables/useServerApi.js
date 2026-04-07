@@ -152,7 +152,7 @@ export function useServerApi(serverIp) {
 
   /**
    * GET /v1/audio/files
-   * @returns {Promise<{files?: string[]}>}
+   * @returns {Promise<{files?: Array<string | { filename?: string, download_path?: string }>}>}
    */
   async function listAudioFiles() {
     if (!baseUrl.value) throw new Error('No server IP configured')
@@ -167,13 +167,18 @@ export function useServerApi(serverIp) {
   }
 
   /**
-   * Returns a direct URL for GET /v1/audio/files/<file name>
-   * @param {string} fileName
+   * Returns a direct URL for an audio file download.
+   * Accepts either a file name (legacy) or a download path from /v1/audio/files.
+   * @param {string} fileNameOrPath
    * @returns {string}
    */
-  function getAudioFileUrl(fileName) {
+  function getAudioFileUrl(fileNameOrPath) {
     if (!baseUrl.value) throw new Error('No server IP configured')
-    return `${baseUrl.value}/v1/audio/files/${encodeURIComponent(fileName)}`
+    const target = String(fileNameOrPath ?? '').trim()
+    if (!target) throw new Error('No audio file name or download path provided')
+    if (/^https?:\/\//i.test(target)) return target
+    if (target.startsWith('/')) return `${baseUrl.value}${target}`
+    return `${baseUrl.value}/v1/audio/files/${encodeURIComponent(target)}`
   }
 
   return {
