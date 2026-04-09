@@ -54,20 +54,20 @@ async function onDiscover() {
 }
 
 const CATEGORY_LABELS = {
-  thermocouples:       'Thermocouple',
-  pressureTransducers: 'Pressure Transducer',
-  loadCells:           'Load Cell',
-  current:             'Current Sensor',
-  resistance:          'Resistance Sensor',
+  thermocouple:        'Thermocouple',
+  pressure_transducer: 'Pressure Transducer',
+  load_cell:           'Load Cell',
+  current_sensor:      'Current Sensor',
+  resistance_sensor:   'Resistance Sensor',
 }
 
 // Defines display order for sensor categories
 const CATEGORY_ORDER = {
-  pressureTransducers: 0,
-  thermocouples:       1,
-  loadCells:           2,
-  current:             3,
-  resistance:          4,
+  pressure_transducer: 0,
+  thermocouple:        1,
+  load_cell:           2,
+  current_sensor:      3,
+  resistance_sensor:   4,
 }
 
 function getControls(deviceConfig) {
@@ -75,8 +75,7 @@ function getControls(deviceConfig) {
     .map(([name, cfg]) => ({
       name,
       type:         cfg.type ?? '—',
-      defaultState: cfg.defaultState ?? '—',
-      pin:          cfg.pin ?? '—',
+      defaultState: cfg.default_state ?? '—',
     }))
     .sort((a, b) => {
       const byType = (a.type ?? '').localeCompare(b.type ?? '')
@@ -86,7 +85,7 @@ function getControls(deviceConfig) {
 
 function getSensors(deviceConfig) {
   const result = []
-  for (const [category, items] of Object.entries(deviceConfig.sensorInfo ?? {})) {
+  for (const [category, items] of Object.entries(deviceConfig.sensor_info ?? {})) {
     if (typeof items !== 'object' || Array.isArray(items)) continue
     const order = CATEGORY_ORDER[category] ?? 99
     for (const name of Object.keys(items)) {
@@ -125,8 +124,8 @@ function getSensors(deviceConfig) {
       >
         <!-- Device banner -->
         <div class="device-banner">
-          <span class="device-name">{{ config.deviceName ?? deviceKey }}</span>
-          <span class="device-type-badge">{{ config.deviceType ?? 'Device' }}</span>
+          <span class="device-name">{{ config.device_name ?? deviceKey }}</span>
+          <span class="device-type-badge">{{ config.device_type ?? 'Device' }}</span>
         </div>
 
         <!-- Controls + Sensors side by side -->
@@ -145,7 +144,6 @@ function getSensors(deviceConfig) {
                   <th>Name</th>
                   <th>Type</th>
                   <th>Default</th>
-                  <th>Pin</th>
                 </tr>
               </thead>
               <tbody>
@@ -158,7 +156,6 @@ function getSensors(deviceConfig) {
                       :class="ctrl.defaultState === 'CLOSED' ? 'state-closed' : 'state-open'"
                     >{{ ctrl.defaultState }}</span>
                   </td>
-                  <td class="mono">{{ ctrl.pin }}</td>
                 </tr>
               </tbody>
             </table>

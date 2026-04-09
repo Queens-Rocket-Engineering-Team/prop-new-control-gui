@@ -188,7 +188,7 @@ function getDisconnectedDeviceKeys(message) {
 
   for (const [deviceKey, deviceCfg] of Object.entries(cfg.configs)) {
     const keyToken = toMatchToken(deviceKey);
-    const nameToken = toMatchToken(deviceCfg?.deviceName);
+    const nameToken = toMatchToken(deviceCfg?.device_name);
 
     if (keyToken && messageToken.includes(`${keyToken}disconnected`)) {
       keys.push(deviceKey);

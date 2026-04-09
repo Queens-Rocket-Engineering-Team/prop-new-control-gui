@@ -4,8 +4,8 @@ const MAX_LINES    = 1000   // debug log buffer
 const SNAP_INTERVAL = 100  // ms — how often sensorData ref is updated (10 Hz)
 const CHART_POINTS  = 3500 // max history points exposed to charts (~35 s @ 100 Hz)
 
-// Regex: "[21:02:21] PANDA-V3 36.799 SensorName:-152.70"
-const LOG_RE = /\[[\d:]+\] \S+ ([\d.]+) ([A-Za-z]\w+):([-\d.]+)/
+// Regex: "PANDA-V3 108700.620 SensorName:-152.70"
+const LOG_RE = /\S+ ([\d.]+) ([A-Za-z]\w+):([-\d.]+)/
 
 function getUnit(name) {
   const u = name.toUpperCase()
