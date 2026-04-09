@@ -136,7 +136,7 @@ function getValveDefaultState(drawioId) {
   if (!cfg) return '—'
   for (const device of Object.values(cfg.configs)) {
     for (const [key, ctrl] of Object.entries(device.controls ?? {})) {
-      if (normalizeId(key).startsWith(norm)) return ctrl.defaultState ?? '—'
+      if (normalizeId(key).startsWith(norm)) return ctrl.default_state ?? '—'
     }
   }
   return '—'
@@ -149,7 +149,7 @@ const enabledSensors = computed(() => {
   if (!cfg) return new Set()
   const keys = new Set()
   for (const device of Object.values(cfg.configs)) {
-    for (const category of Object.values(device.sensorInfo ?? {})) {
+    for (const category of Object.values(device.sensor_info ?? {})) {
       if (typeof category !== 'object' || Array.isArray(category)) continue
       for (const key of Object.keys(category)) {
         keys.add(normalizeId(key))
@@ -213,7 +213,7 @@ const auxiliaryControls = computed(() => {
         result.push({
           key:          name,
           label:        toControlKey(name),   // e.g. "IgnPrime" → "IGNPRIME"
-          defaultState: ctrl.defaultState ?? '—',
+          defaultState: ctrl.default_state ?? '—',
         })
       }
     }
@@ -231,7 +231,7 @@ watch(serverConfig, (cfg) => {
         // Relay semantics: CLOSED = energised = true, OPEN = de-energised = false
         s[name] = name in auxiliaryStates.value
           ? auxiliaryStates.value[name]
-          : (ctrl.defaultState ?? '').toUpperCase() === 'CLOSED'
+          : (ctrl.default_state ?? '').toUpperCase() === 'CLOSED'
       }
     }
   }
