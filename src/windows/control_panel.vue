@@ -1,8 +1,9 @@
 <script setup>
-import { ref, inject, computed, watch } from 'vue'
+import { ref, inject, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 import PidDiagram from '../components/PidDiagram.vue'
 import { useServerApi } from '../composables/useServerApi.js'
+import { useKeyBindings } from '../composables/useKeyBindings.js'
 
 const serverIp        = inject('serverIp',        ref(''))
 const serverConfig    = inject('serverConfig',    ref(null))
@@ -15,6 +16,25 @@ const valveStates     = inject('valveStates',     ref({}))
 const auxiliaryStates = inject('auxiliaryStates', ref({}))
 const valveStatusByControl = inject('valveStatusByControl', ref({}))
 const { sendCommand, fetchStatus } = useServerApi(serverIp)
+
+// keybinding helpers are managed centrally; rebuild defaults when our
+// control lists change and expose the map/lookup for rendering and input.
+const { controlKeyMap, idToKey, buildDefaultBindings } = useKeyBindings();
+
+// Helper to build a normalized key combination string from a KeyboardEvent
+function buildKeyCombo(event) {
+  const parts = [];
+  if (event.ctrlKey) parts.push('ctrl');
+  if (event.altKey) parts.push('alt');
+  if (event.shiftKey) parts.push('shift');
+  if (event.metaKey) parts.push('meta');
+  const key = event.key.toLowerCase();
+  if (key && !['control', 'alt', 'shift', 'meta'].includes(key)) {
+    parts.push(key);
+  }
+  return parts.join('+');
+}
+
 
 // ── SVG URL mapping (the only static config needed) ─────────────────────────
 
@@ -238,6 +258,36 @@ watch(serverConfig, (cfg) => {
   auxiliaryStates.value = s
 }, { immediate: true })
 
+// rebuild default binding map whenever our control lists change
+watch([valves, auxiliaryControls, kasaDevices], () => {
+  buildDefaultBindings(valves.value, auxiliaryControls.value, kasaDevices.value);
+}, { immediate: true });
+
+// onKeydown remains the same but uses the imported `controlKeyMap`
+
+function onKeydown(evt) {
+  if (
+    evt.target &&
+    ['INPUT', 'TEXTAREA', 'SELECT'].includes(evt.target.tagName)
+  )
+    return
+  const combo = buildKeyCombo(evt)
+  const action = controlKeyMap.value[combo]
+  if (!action) return
+  evt.preventDefault()
+  if (action.type === 'valve') {
+    onValveToggle(action.id, !valveStates.value[action.id])
+  } else if (action.type === 'aux') {
+    onAuxToggle(action.key, !auxiliaryStates.value[action.key])
+  } else if (action.type === 'kasa') {
+    const dev = kasaDevices.value.find((d) => d.host === action.host)
+    if (dev) setKasaState(dev.host, !dev.active)
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+
 const lastAppliedStatusSeqByControl = ref({})
 
 function applyValveStatusMap(statusMap) {
@@ -328,11 +378,9 @@ async function onValveToggle(id, newState) {
             :key="ctrl.key"
             class="aux-row"
           >
-            <span class="aux-label">{{ ctrl.label }}</span>
-            <span class="card-badge">{{ ctrl.defaultState }}</span>
-            <span class="state-indicator" :class="auxiliaryStates[ctrl.key] ? 'relay-closed' : 'relay-open'">
-              <span class="state-led" />
-              {{ auxiliaryStates[ctrl.key] ? 'CLOSED' : 'OPEN' }}
+            <span class="aux-label">
+              {{ ctrl.label }}
+              <span v-if="idToKey[ctrl.key]" class="keybind">[{{ idToKey[ctrl.key] }}]</span>
             </span>
             <ToggleSwitch
               :modelValue="auxiliaryStates[ctrl.key]"
@@ -350,7 +398,10 @@ async function onValveToggle(id, newState) {
               :key="dev.host"
               class="aux-row"
             >
-              <span class="aux-label">{{ dev.alias || dev.host }}</span>
+              <span class="aux-label">
+                {{ dev.alias || dev.host }}
+                <span v-if="idToKey[dev.host]" class="keybind">[{{ idToKey[dev.host] }}]</span>
+              </span>
               <span class="state-indicator" :class="dev.active ? 'relay-closed' : 'relay-open'">
                 <span class="state-led" />
                 {{ dev.active ? 'ON' : 'OFF' }}
@@ -374,6 +425,7 @@ async function onValveToggle(id, newState) {
           <div class="valve-card" :class="{ open: valveStates[id], locked: !isValveEnabled(id) }">
             <div class="card-id">
               {{ id }}
+              <span v-if="idToKey[id]" class="keybind">[{{ idToKey[id] }}]</span>
               <span v-if="!isValveEnabled(id)" class="lock-badge">NO CTRL</span>
             </div>
             <div class="valve-card-body">
@@ -487,6 +539,14 @@ async function onValveToggle(id, newState) {
   align-items: center;
   justify-content: space-between;
   gap: 4px;
+}
+
+/* small label for keybinds */
+.keybind {
+  font-size: 6px;
+  color: var(--text-muted);
+  margin-left: 2px;
+  white-space: nowrap;
 }
 
 /* ── Locked state ── */
