@@ -131,10 +131,10 @@ const statusClass = computed(() => {
           class="tab-close"
           @click.stop="removeView(v.id)"
           title="Remove view"
-        >×</button>
+        >x</button>
       </div>
 
-      <button class="add-tab-btn" @click="addView" title="Add view">＋</button>
+      <button class="add-tab-btn" @click="addView" title="Add view">+</button>
     </div>
 
     <!-- ── Filter toolbar ── -->
@@ -178,7 +178,7 @@ const statusClass = computed(() => {
   flex-direction: column;
   height: 100vh;
   max-height: 100vh;
-  background: var(--bg-primary, #0d1117);
+  background: var(--bg-primary);
   font-family: 'Consolas', 'Menlo', 'Monaco', monospace;
   color: var(--text-primary, #c9d1d9);
 }
@@ -187,8 +187,8 @@ const statusClass = computed(() => {
 .tab-bar {
   display: flex;
   align-items: stretch;
-  background: var(--bg-tertiary, #010409);
-  border-bottom: 1px solid var(--border-color, #30363d);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
   overflow-x: auto;
   flex-shrink: 0;
   scrollbar-width: none;
@@ -201,7 +201,7 @@ const statusClass = computed(() => {
   gap: 5px;
   padding: 5px 10px 5px 10px;
   font-size: 0.72rem;
-  color: var(--text-muted, #8b949e);
+  color: var(--text-muted);
   cursor: pointer;
   white-space: nowrap;
   border-bottom: 2px solid transparent;
@@ -215,12 +215,13 @@ const statusClass = computed(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 120px;
+  color: var(--text-primary);
 }
 
 .tab-rename-input {
   font-family: inherit;
   font-size: inherit;
-  background: var(--bg-tertiary, #010409);
+  background: var(--bg-secondary);
   color: #e6edf3;
   border: 1px solid #58a6ff;
   border-radius: 3px;
@@ -301,19 +302,19 @@ const statusClass = computed(() => {
   font-size: 0.7rem;
   padding: 2px 8px;
   border-radius: 10px;
-  border: 1px solid var(--border-color, #30363d);
+  border: 1px solid var(--border-color);
   background: transparent;
-  color: var(--text-muted, #8b949e);
+  color: var(--text-muted);
   cursor: pointer;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
 .channel-pill:hover { border-color: #8b949e; color: #c9d1d9; }
 
-.ch-log.ch-active       { background: #1a3a27; color: #2ecc71; border-color: #2ecc71; }
-.ch-syslog.ch-active    { background: #0e2a3d; color: #3498db; border-color: #3498db; }
-.ch-errlog.ch-active    { background: #3d0e0e; color: #e74c3c; border-color: #e74c3c; }
-.ch-debuglog.ch-active  { background: #3d2a0e; color: #f39c12; border-color: #f39c12; }
-.ch-packetlog.ch-active { background: #2a0e3d; color: #9b59b6; border-color: #9b59b6; }
+.ch-log.ch-active       { background: --bg-secondary; color: #2ecc71; border-color: #2ecc71; }
+.ch-syslog.ch-active    { background: --bg-secondary; color: #3498db; border-color: #3498db; }
+.ch-errlog.ch-active    { background: --bg-secondary; color: #e74c3c; border-color: #e74c3c; }
+.ch-debuglog.ch-active  { background: --bg-secondary; color: #f39c12; border-color: #f39c12; }
+.ch-packetlog.ch-active { background: --bg-secondary; color: #9b59b6; border-color: #9b59b6; }
 
 /* ── Clear ── */
 .clear-btn {

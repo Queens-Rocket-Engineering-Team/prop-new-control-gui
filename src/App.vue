@@ -272,6 +272,8 @@ provide('setTare', setTare);
 const { logLines, wsStatus, sensorData, clearLogs, clearSensorData } =
   useLogStream(server_ip, {
     onBatch(timestamp, readings) {
+      // onBatch is used for CSV writing. useLogStream is a generic log/sensor stream handler, so it doesn't know about
+      // taring or test state. We provide an onBatch callback to inject that logic at the right point.
       if (!testActive.value) return;
       // Apply tare offsets before writing to CSV
       const taredReadings = {};

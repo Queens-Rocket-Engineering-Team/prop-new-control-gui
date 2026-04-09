@@ -18,7 +18,8 @@ function getUnit(name) {
 }
 
 /**
- * Manages a persistent WebSocket connection to /ws/logs.
+ * Manages a persistent WebSocket connection to /ws/logs. This is a generic log/sensor stream handler, any data
+ * transformation or handling can be handled by a callback function.
  *
  * @param {import('vue').Ref<string>} serverIp
  * @param {{
@@ -126,17 +127,17 @@ export function useLogStream(serverIp, { onBatch, onLog } = {}) {
       startSnap()
     }
 
+    // Expected message format: { channel: 'log' | 'syslog' | 'debuglog' | 'errlog' | 'packetlog', data: string }
+    // This triggers onBatch callbacks and updates the internal store, which is snapshotted to sensorData every SNAP_INTERVAL ms.
     ws.onmessage = (event) => {
       let parsed = null
       try { parsed = JSON.parse(event.data) } catch { /* not JSON */ }
 
       if (parsed?.channel && parsed?.data) {
-        const prefix = (parsed?.channel === 'syslog') ? '[sys]' : 
+        const prefix = (parsed?.channel === 'syslog') ? '[sys]' :
           (parsed?.channel === 'debuglog') ? '[dbg]' :
-          (parsed?.channel === 'errlog') ? '[err]' : 
-          (parsed?.channel === 'packetlog') ? '[pkt]' : '[log]'
-
-        
+          (parsed?.channel === 'errlog') ? '[err]' :
+          (parsed?.channel === 'packetlog') ? '[pkt]' : '[unknown]' // Define an unknown prefix for unrecognized channels
         pushLogLine(`${prefix} ${parsed.data}`)
         onLog?.(parsed.channel, String(parsed.data))
 
