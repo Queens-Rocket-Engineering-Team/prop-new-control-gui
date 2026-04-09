@@ -208,8 +208,8 @@ const statusClass = computed(() => {
   transition: color 0.15s, background 0.15s;
   user-select: none;
 }
-.tab:hover { color: var(--text-primary, #c9d1d9); background: var(--bg-secondary, #161b22); }
-.tab-active { color: #e6edf3; background: var(--bg-primary, #0d1117); border-bottom-color: #58a6ff; }
+.tab:hover { color: var(--text-primary); background: var(--bg-secondary); }
+.tab-active { color: var(--text-primary); background: var(--bg-primary, #0d1117); border-bottom-color: #58a6ff; }
 
 .tab-name {
   overflow: hidden;
@@ -222,7 +222,7 @@ const statusClass = computed(() => {
   font-family: inherit;
   font-size: inherit;
   background: var(--bg-secondary);
-  color: #e6edf3;
+  color: var(--text-primary);
   border: 1px solid #58a6ff;
   border-radius: 3px;
   padding: 1px 4px;
