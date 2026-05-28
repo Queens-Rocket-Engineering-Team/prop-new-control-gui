@@ -19,7 +19,7 @@ const { sendCommand, fetchStatus } = useServerApi(serverIp)
 // ── SVG URL mapping (the only static config needed) ─────────────────────────
 
 const SVG_URLS = {
-  'hot-fire':      '/P&IDs/Hot-Fire-P&ID-01-03-2026.svg',
+  'hot-fire':      '/P&IDs/Hot-Fire-P&ID-26-05-2026.svg',
   'rocket-launch': '/P&IDs/Rocket-P&ID-01-03-2026.svg',
 }
 
