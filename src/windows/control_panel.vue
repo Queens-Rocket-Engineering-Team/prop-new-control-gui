@@ -14,7 +14,27 @@ const setKasaState    = inject('setKasaState',    () => {})
 const valveStates     = inject('valveStates',     ref({}))
 const auxiliaryStates = inject('auxiliaryStates', ref({}))
 const valveStatusByControl = inject('valveStatusByControl', ref({}))
-const { sendCommand, fetchStatus } = useServerApi(serverIp)
+const { sendCommand, fetchStatus, sendEstop } = useServerApi(serverIp)
+
+// ── Emergency stop ───────────────────────────────────────────────────────────
+
+const showEstopConfirm = ref(false)
+const estopPending     = ref(false)
+
+async function confirmEstop() {
+  estopPending.value = true
+  try {
+    await sendEstop()
+    fetchStatus().catch((err) => {
+      console.error('[ControlPanel] STATUS trigger after ESTOP failed:', err)
+    })
+  } catch (err) {
+    console.error('[ControlPanel] ESTOP failed:', err)
+  } finally {
+    estopPending.value     = false
+    showEstopConfirm.value = false
+  }
+}
 
 // ── SVG URL mapping (the only static config needed) ─────────────────────────
 
@@ -240,6 +260,19 @@ watch(serverConfig, (cfg) => {
 
 const lastAppliedStatusSeqByControl = ref({})
 
+function getBestMatchingAuxIds(statusControlKey) {
+  const statusNorm = normalizeId(statusControlKey)
+  const ids = Object.keys(auxiliaryStates.value)
+  const matches = ids
+    .map((id) => ({ id, norm: normalizeId(id) }))
+    .filter(({ norm }) => statusNorm === norm || statusNorm.startsWith(norm))
+
+  if (matches.length === 0) return []
+
+  const bestLen = Math.max(...matches.map((m) => m.norm.length))
+  return matches.filter((m) => m.norm.length === bestLen).map((m) => m.id)
+}
+
 function applyValveStatusMap(statusMap) {
   const nextApplied = { ...lastAppliedStatusSeqByControl.value }
 
@@ -251,14 +284,20 @@ function applyValveStatusMap(statusMap) {
     const state = String(statusInfo?.state ?? '').toUpperCase()
     if (state !== 'OPEN' && state !== 'CLOSED') continue
 
-    const matchedIds = getBestMatchingValveIds(controlKey)
-    if (matchedIds.length === 0) continue
-
-    for (const id of matchedIds) {
+    const matchedValveIds = getBestMatchingValveIds(controlKey)
+    for (const id of matchedValveIds) {
       valveStates.value[id] = state === 'OPEN'
     }
 
-    nextApplied[controlKey] = seq
+    // Relay semantics: CLOSED = energised = true, OPEN = de-energised = false
+    const matchedAuxIds = getBestMatchingAuxIds(controlKey)
+    for (const id of matchedAuxIds) {
+      auxiliaryStates.value[id] = state === 'CLOSED'
+    }
+
+    if (matchedValveIds.length > 0 || matchedAuxIds.length > 0) {
+      nextApplied[controlKey] = seq
+    }
   }
 
   lastAppliedStatusSeqByControl.value = nextApplied
@@ -270,9 +309,12 @@ watch(valveStatusByControl, (statusMap) => {
 
 watch(
   () => Object.keys(valveStates.value).sort().join('|'),
-  () => {
-    applyValveStatusMap(valveStatusByControl.value)
-  }
+  () => { applyValveStatusMap(valveStatusByControl.value) }
+)
+
+watch(
+  () => Object.keys(auxiliaryStates.value).sort().join('|'),
+  () => { applyValveStatusMap(valveStatusByControl.value) }
 )
 
 watch(pidConfig, () => {
@@ -284,6 +326,9 @@ async function onAuxToggle(key, newState) {
   try {
     // Relay semantics: true = CLOSED (energised) → send 'CLOSE'
     await sendCommand('CONTROL', [toControlKey(key), newState ? 'CLOSE' : 'OPEN'])
+    fetchStatus().catch((err) => {
+      console.error(`[ControlPanel] STATUS trigger after ${toControlKey(key)} failed:`, err)
+    })
   } catch (err) {
     console.error(`[ControlPanel] CONTROL ${toControlKey(key)} failed:`, err)
     auxiliaryStates.value[key] = !newState  // revert on failure
@@ -452,11 +497,41 @@ async function onValveToggle(id, newState) {
 
       </template>
     </PidDiagram>
+
+    <!-- ── E-STOP button (fixed top-right) ── -->
+    <button class="estop-btn" @click="showEstopConfirm = true">E-STOP</button>
+
+    <!-- ── E-STOP confirmation dialog ── -->
+    <Teleport to="body">
+      <div v-if="showEstopConfirm" class="estop-overlay" @click.self="showEstopConfirm = false">
+        <div class="estop-dialog">
+          <div class="estop-dialog-title">EMERGENCY STOP</div>
+          <div class="estop-dialog-body">
+            This will immediately send an emergency stop command to the server. <br>
+            All actuated valves will reset to their default state and data streaming will stop. <br>
+            Are you sure?
+          </div>
+          <div class="estop-dialog-actions">
+            <button
+              class="estop-confirm-btn"
+              :disabled="estopPending"
+              @click="confirmEstop"
+            >{{ estopPending ? 'SENDING…' : 'CONFIRM E-STOP' }}</button>
+            <button
+              class="estop-cancel-btn"
+              :disabled="estopPending"
+              @click="showEstopConfirm = false"
+            >Cancel</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <style scoped>
 #control-panel {
+  position: relative;
   width: 100%;
   height: 100vh;
   overflow: hidden;
@@ -701,6 +776,120 @@ async function onValveToggle(id, newState) {
   text-transform: uppercase;
   color: var(--text-muted);
   padding: 3px 8px 1px;
+}
+
+/* ── E-STOP button ── */
+
+.estop-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 100;
+  background: #c0392b;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  border: 2px solid #e74c3c;
+  border-radius: 4px;
+  padding: 6px 16px;
+  cursor: pointer;
+  box-shadow: 0 0 10px rgba(231, 76, 60, 0.5);
+  transition: background 0.15s, box-shadow 0.15s;
+  user-select: none;
+}
+
+.estop-btn:hover {
+  background: #e74c3c;
+  box-shadow: 0 0 16px rgba(231, 76, 60, 0.75);
+}
+
+/* ── E-STOP confirmation dialog ── */
+
+.estop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.estop-dialog {
+  background: var(--bg-secondary);
+  border: 2px solid #e74c3c;
+  border-radius: 6px;
+  padding: 24px 28px;
+  min-width: 320px;
+  box-shadow: 0 0 32px rgba(231, 76, 60, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.estop-dialog-title {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: #e74c3c;
+  text-align: center;
+}
+
+.estop-dialog-body {
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.estop-dialog-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.estop-confirm-btn {
+  background: #c0392b;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  border: none;
+  border-radius: 4px;
+  padding: 8px 0;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.estop-confirm-btn:hover:not(:disabled) {
+  background: #e74c3c;
+}
+
+.estop-confirm-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.estop-cancel-btn {
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 6px 0;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.estop-cancel-btn:hover:not(:disabled) {
+  background: var(--bg-surface);
+}
+
+.estop-cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ── Info cards (MV, Tank, Regulator) ── */

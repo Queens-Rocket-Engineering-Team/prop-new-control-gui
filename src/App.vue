@@ -36,6 +36,9 @@ provide('serverConfig', serverConfig);
 const pidConfig = ref(localStorage.getItem('qret-pid-config') || 'rocket-launch');
 provide('pidConfig', pidConfig);
 
+const testFrequency = ref(parseInt(localStorage.getItem('qret-test-frequency') ?? '', 10) || 190);
+provide('testFrequency', testFrequency);
+
 // ── Persistent control panel state ───────────────────────────────────────────
 // Lifted here so state survives navigation away from the control panel.
 
@@ -53,7 +56,7 @@ watch(pidConfig, () => {
   requestStatusSnapshot();
 });
 
-const { fetchConfig, fetchStatus, sendCommand, fetchKasaDevices, discoverKasaDevices, controlKasaDevice } = useServerApi(server_ip);
+const { fetchConfig, fetchStatus, sendCommand, fetchKasaDevices, discoverKasaDevices, discoverDevices, controlKasaDevice } = useServerApi(server_ip);
 let refreshConfigPromise = null;
 let syncStreamPromise = null;
 let requestStatusPromise = null;
@@ -98,7 +101,7 @@ async function syncStreamForCurrentMode() {
   if (syncStreamPromise) return syncStreamPromise;
 
   syncStreamPromise = (async () => {
-    const rate = testActive.value ? '100' : '10';
+    const rate = testActive.value ? String(testFrequency.value) : '20';
     try {
       await sendCommand('STREAM', [rate]);
     } catch (err) {
@@ -226,14 +229,16 @@ function parseValveStatusMessage(message) {
 const kasaDevices = ref([]);
 provide('kasaDevices', kasaDevices);
 
-async function discoverKasa() {
-  try {
-    kasaDevices.value = await discoverKasaDevices();
-  } catch (err) {
-    console.error('[App] discoverKasa failed:', err);
-  }
+async function discover() {
+  await Promise.allSettled([
+    discoverKasaDevices()
+      .then((devices) => { kasaDevices.value = devices })
+      .catch((err) => console.error('[App] discoverKasa failed:', err)),
+    discoverDevices()
+      .catch((err) => console.error('[App] discoverDevices failed:', err)),
+  ])
 }
-provide('discoverKasa', discoverKasa);
+provide('discover', discover);
 
 async function setKasaState(host, active) {
   const idx = kasaDevices.value.findIndex(d => d.host === host);
@@ -258,6 +263,8 @@ provide('testStartTime', testStartTime);
 
 // ── Tare offsets ─────────────────────────────────────────────────────────────
 // { [sensorName]: rawOffset } — subtracted from displayed values and CSV writes.
+// Persisted to localStorage keyed by server IP so tares survive app restarts
+// and tab navigation. Cleared only when switching to a different server IP.
 
 const tares = ref({});
 provide('tares', tares);
@@ -266,6 +273,23 @@ function setTare(name, rawValue) {
   tares.value[name] = rawValue;
 }
 provide('setTare', setTare);
+
+function _taresKey(ip) { return `qret-tares-${ip}`; }
+
+function _loadTares(ip) {
+  if (!ip) { tares.value = {}; return; }
+  try {
+    const raw = localStorage.getItem(_taresKey(ip));
+    tares.value = raw ? JSON.parse(raw) : {};
+  } catch {
+    tares.value = {};
+  }
+}
+
+watch(tares, (val) => {
+  if (!server_ip.value) return;
+  try { localStorage.setItem(_taresKey(server_ip.value), JSON.stringify(val)); } catch { /* quota */ }
+}, { deep: true });
 
 // ── Log stream + sensor data ─────────────────────────────────────────────────
 
@@ -318,19 +342,18 @@ const { logLines, wsStatus, sensorData, clearLogs, clearSensorData } =
       const ch = String(channel ?? '').toLowerCase();
       if (ch !== 'log' && ch !== 'syslog') return;
 
-      if (ch === 'log') {
-        const valveStatus = parseValveStatusMessage(message);
-        if (valveStatus) {
-          const key = toMatchToken(valveStatus.valveName);
-          valveStatusSeq += 1;
-          valveStatusByControl.value = {
-            ...valveStatusByControl.value,
-            [key]: {
-              ...valveStatus,
-              seq: valveStatusSeq,
-            },
-          };
-        }
+      // STATUS updates may arrive on either 'log' or 'syslog'
+      const valveStatus = parseValveStatusMessage(message);
+      if (valveStatus) {
+        const key = toMatchToken(valveStatus.valveName);
+        valveStatusSeq += 1;
+        valveStatusByControl.value = {
+          ...valveStatusByControl.value,
+          [key]: {
+            ...valveStatus,
+            seq: valveStatusSeq,
+          },
+        };
       }
 
       if (isConnectedMessage(message)) {
@@ -358,10 +381,9 @@ function formatDatetime() {
 
 async function startTest() {
   if (testActive.value) return;
-  clearSensorData();
   try {
     await sendCommand('STOP', []);
-    await sendCommand('STREAM', ['100']);
+    await sendCommand('STREAM', [String(testFrequency.value)]);
     await invoke('start_recording', {
       mode:     pidConfig.value,
       datetime: formatDatetime(),
@@ -385,7 +407,7 @@ async function stopTest() {
   }
   // Restart preview stream after test ends
   if (server_ip.value) {
-    try { await sendCommand('STREAM', ['10']); } catch { /* ignore */ }
+    try { await sendCommand('STREAM', ['20']); } catch { /* ignore */ }
   }
 }
 
@@ -408,7 +430,7 @@ watch(server_ip, async (ip) => {
     try { await sendCommand('STOP', []); } catch { /* ignore */ }
   }
 
-  tares.value         = {};
+  _loadTares(ip);
   auxiliaryStates.value = {};
   valveStatusSeq = 0;
   valveStatusByControl.value = {};
@@ -477,9 +499,15 @@ watch(pidConfig, (cfg) => {
   _settingsChannel.postMessage({ type: 'pidConfig', value: cfg });
 });
 
+watch(testFrequency, (hz) => {
+  localStorage.setItem('qret-test-frequency', String(hz));
+  _settingsChannel.postMessage({ type: 'testFrequency', value: hz });
+});
+
 _settingsChannel.onmessage = (e) => {
-  if (e.data.type === 'pidConfig')    pidConfig.value    = e.data.value;
-  if (e.data.type === 'serverConfig') serverConfig.value = e.data.value;
+  if (e.data.type === 'pidConfig')      pidConfig.value    = e.data.value;
+  if (e.data.type === 'serverConfig')   serverConfig.value = e.data.value;
+  if (e.data.type === 'testFrequency')  testFrequency.value = e.data.value;
   // darkMode messages are handled by settings_modal.vue's own channel instance
 };
 
@@ -525,9 +553,12 @@ onUnmounted(() => {
       :is-open="settingsOpen"
       :current-ip="server_ip"
       :pid-config="pidConfig"
+      :test-frequency="testFrequency"
+      :test-active="testActive"
       @close="settingsOpen = false"
       @update-ip="get_ip"
       @update-pid-config="pidConfig = $event"
+      @update-test-frequency="testFrequency = $event"
     ></settings-modal>
   </main>
 </template>

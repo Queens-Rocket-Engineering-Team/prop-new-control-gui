@@ -5,17 +5,20 @@ import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
 
 const props = defineProps({
-  isOpen: Boolean,
-  currentIp: String,
-  pidConfig: { type: String, default: 'rocket-launch' },
+  isOpen:        Boolean,
+  currentIp:     String,
+  pidConfig:     { type: String,  default: 'rocket-launch' },
+  testFrequency: { type: Number,  default: 190 },
+  testActive:    { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["close", "update-ip", "update-pid-config"]);
+const emit = defineEmits(["close", "update-ip", "update-pid-config", "update-test-frequency"]);
 
 const ipMode = ref("none");
 const customIp = ref("");
 const cameraRecordingDir = ref("");
 const localPidConfig = ref("rocket-launch");
+const localTestFreq = ref(190);
 const overlayRef = ref(null);
 
 // ── Dark mode — persisted in localStorage, synced across windows ──────────────
@@ -67,6 +70,7 @@ watch(
         customIp.value = ip;
       }
       localPidConfig.value = props.pidConfig || "rocket-launch";
+      localTestFreq.value  = props.testFrequency || 190;
 
       try {
         const dir = await invoke("fetch_camera_recording_dir");
@@ -80,6 +84,11 @@ watch(
 
 watch(localPidConfig, (cfg) => {
   emit("update-pid-config", cfg);
+});
+
+watch(localTestFreq, (hz) => {
+  const n = Math.max(1, Math.round(Number(hz)))
+  if (isFinite(n) && n !== props.testFrequency) emit("update-test-frequency", n)
 });
 
 function isValidIp(ip) {
@@ -145,6 +154,21 @@ function applyCameraRecordingDir() {
           <div class="option-row">
             <RadioButton v-model="localPidConfig" value="rocket-launch" inputId="cfg-rocket-launch" />
             <label for="cfg-rocket-launch">Rocket Launch</label>
+          </div>
+        </div>
+        <div class="setting-group">
+          <span class="setting-group-label">Test Stream Frequency</span>
+          <div class="option-row freq-row">
+            <input
+              type="number"
+              v-model.number="localTestFreq"
+              min="1"
+              max="1000"
+              :disabled="props.testActive"
+              class="ip-text-input freq-input"
+            />
+            <span class="freq-unit-label">Hz</span>
+            <span v-if="props.testActive" class="freq-locked-label">locked during test</span>
           </div>
         </div>
         <div class="setting-group">
@@ -296,6 +320,28 @@ function applyCameraRecordingDir() {
 .option-row {
   display: flex;
   align-items: center;
+}
+
+.freq-row {
+  gap: 6px;
+}
+
+.freq-input {
+  width: 72px;
+  flex: none;
+  text-align: right;
+}
+
+.freq-unit-label {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.freq-locked-label {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-left: 4px;
 }
 
 .option-row :deep(.p-radiobutton) {
