@@ -84,6 +84,21 @@ export function useServerApi(serverIp) {
   }
 
   /**
+   * POST /v1/discover
+   * Triggers general network device discovery.
+   * @returns {Promise<object>}
+   */
+  async function discoverDevices() {
+    if (!baseUrl.value) throw new Error('No server IP configured')
+    const res = await fetch(`${baseUrl.value}/v1/discover`, { method: 'POST' })
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText)
+      throw new Error(`${res.status}: ${text}`)
+    }
+    return res.json().catch(() => ({}))
+  }
+
+  /**
    * GET /v1/kasa/discover
    * @returns {Promise<KasaDeviceInfo[]>}
    */
@@ -114,13 +129,29 @@ export function useServerApi(serverIp) {
     return res.json()
   }
 
+  /**
+   * POST /v1/estop
+   * @returns {Promise<object>}
+   */
+  async function sendEstop() {
+    if (!baseUrl.value) throw new Error('No server IP configured')
+    const res = await fetch(`${baseUrl.value}/v1/estop`, { method: 'POST' })
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText)
+      throw new Error(`${res.status}: ${text}`)
+    }
+    return res.json().catch(() => ({}))
+  }
+
   return {
     sendCommand,
     fetchConfig,
     fetchStatus,
     fetchKasaDevices,
     discoverKasaDevices,
+    discoverDevices,
     controlKasaDevice,
+    sendEstop,
     baseUrl,
   }
 }

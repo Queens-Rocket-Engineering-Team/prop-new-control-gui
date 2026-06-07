@@ -6,7 +6,7 @@ const serverConfig = inject('serverConfig', ref(null))
 const sensorData   = inject('sensorData',   ref({}))
 const tares        = inject('tares',        ref({}))
 const kasaDevices  = inject('kasaDevices',  ref([]))
-const discoverKasa = inject('discoverKasa',  () => {})
+const discover = inject('discover', () => {})
 const setKasaState = inject('setKasaState',  () => {})
 
 // ── Live sensor lookup ────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ const discovering = ref(false)
 async function onDiscover() {
   discovering.value = true
   try {
-    await discoverKasa()
+    await discover()
   } finally {
     discovering.value = false
   }
@@ -107,6 +107,10 @@ function getSensors(deviceConfig) {
       <span v-if="serverConfig" class="device-count-badge">
         {{ serverConfig.count }} device{{ serverConfig.count !== 1 ? 's' : '' }}
       </span>
+      <button class="discover-btn" :disabled="discovering" @click="onDiscover">
+        <i class="pi" :class="discovering ? 'pi-spin pi-spinner' : 'pi-refresh'" />
+        {{ discovering ? 'Scanning…' : 'Discover' }}
+      </button>
     </div>
 
     <div v-if="!serverConfig" class="no-connection">
@@ -199,10 +203,6 @@ function getSensors(deviceConfig) {
       <div class="kasa-header">
         <span class="summary-title">Smart Plugs</span>
         <span class="device-count-badge">{{ kasaDevices.length }}</span>
-        <button class="discover-btn" :disabled="discovering" @click="onDiscover">
-          <i class="pi" :class="discovering ? 'pi-spin pi-spinner' : 'pi-refresh'" />
-          {{ discovering ? 'Scanning…' : 'Discover' }}
-        </button>
       </div>
       <p v-if="kasaDevices.length === 0" class="empty-msg kasa-empty">
         No smart plugs found. Click Discover to scan the network.
