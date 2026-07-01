@@ -1,12 +1,43 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::string::String;
 use std::sync::{LazyLock, Mutex};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+mod telemetry_raw;
 
 static IP_ADDRESS: Mutex<String> = Mutex::new(String::new());
+static TARES: LazyLock<Mutex<HashMap<String, f64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+const TARES_UPDATED_EVENT: &str = "tares-updated";
+
+/// Latest known unit for each sensor name, as reported on the raw telemetry
+/// stream. Used to annotate CSV column headers, e.g. "PT101 [PSI]".
+static SENSOR_UNITS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Current server IP, as set via `submit_ip`. Used by the raw telemetry
+/// websocket client to build its connection URL.
+pub(crate) fn server_ip() -> String {
+    IP_ADDRESS.lock().unwrap().clone()
+}
+
+/// Current tare offset for a sensor, or 0.0 if none has been set.
+pub(crate) fn tare_for(name: &str) -> f64 {
+    TARES.lock().unwrap().get(name).copied().unwrap_or(0.0)
+}
+
+/// Record the latest reported unit for a sensor.
+pub(crate) fn set_sensor_unit(name: &str, unit: &str) {
+    SENSOR_UNITS.lock().unwrap().insert(name.to_string(), unit.to_string());
+}
+
+/// Latest known unit for a sensor, if any has been reported.
+fn sensor_unit(name: &str) -> Option<String> {
+    SENSOR_UNITS.lock().unwrap().get(name).cloned()
+}
 
 // Default camera recording directory set to Videos folder, can be changed
 static CAMERA_RECORDING_DIR: LazyLock<Mutex<String>> = LazyLock::new(|| {
@@ -26,6 +57,82 @@ async fn submit_ip(new_ip: String) {
     let mut ip = IP_ADDRESS.lock().unwrap();
     println!("New IP Submitted: {}", new_ip);
     *ip = new_ip;
+}
+
+fn normalize_sensor_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+fn emit_tares_updated(app: &tauri::AppHandle, tares: &HashMap<String, f64>) -> Result<(), String> {
+    for (_, window) in app.webview_windows() {
+        let _ = window.emit(TARES_UPDATED_EVENT, tares);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_tares() -> Result<HashMap<String, f64>, String> {
+    let guard = TARES.lock().map_err(|e| e.to_string())?;
+    Ok(guard.clone())
+}
+
+#[tauri::command]
+fn set_tare(
+    app: tauri::AppHandle,
+    name: String,
+    value: f64,
+) -> Result<HashMap<String, f64>, String> {
+    if !value.is_finite() {
+        return Err("Tare value must be finite".to_string());
+    }
+
+    let sensor_name = name.trim().to_string();
+    if sensor_name.is_empty() {
+        return Err("Sensor name is required".to_string());
+    }
+
+    let snapshot = {
+        let mut guard = TARES.lock().map_err(|e| e.to_string())?;
+        guard.insert(sensor_name, value);
+        guard.clone()
+    };
+
+    emit_tares_updated(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn prune_tares_for_live_sensors(
+    app: tauri::AppHandle,
+    live_sensor_names: Vec<String>,
+) -> Result<HashMap<String, f64>, String> {
+    let live_names: HashSet<String> = live_sensor_names
+        .iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    let live_keys: HashSet<String> = live_names
+        .iter()
+        .map(|name| normalize_sensor_name(name))
+        .filter(|name| !name.is_empty())
+        .collect();
+
+    let (snapshot, changed) = {
+        let mut guard = TARES.lock().map_err(|e| e.to_string())?;
+        let before_len = guard.len();
+        guard.retain(|name, _| {
+            live_names.contains(name) || live_keys.contains(&normalize_sensor_name(name))
+        });
+        (guard.clone(), guard.len() != before_len)
+    };
+
+    if changed {
+        emit_tares_updated(&app, &snapshot)?;
+    }
+    Ok(snapshot)
 }
 
 // ── CSV recorder ─────────────────────────────────────────────────────────────
@@ -78,8 +185,16 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
     let auxiliary_columns: Vec<String> = seen_aux.into_iter().collect();
     let kasa_columns: Vec<String> = seen_kasa.into_iter().collect();
 
-    // Write header
-    let sensor_header = columns.join(",");
+    // Write header — sensor columns are annotated with their unit when known,
+    // e.g. "PT101 [PSI]".
+    let sensor_header = columns
+        .iter()
+        .map(|name| match sensor_unit(name) {
+            Some(unit) if !unit.is_empty() => format!("{} [{}]", name, unit),
+            _ => name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     let valve_header = valve_columns
         .iter()
         .map(|name| format!("valve_{}", name))
@@ -87,7 +202,7 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
         .join(",");
     let auxiliary_header = auxiliary_columns
         .iter()
-        .map(|name| format!("aux_{}", name))
+        .map(|name| format!("relay_{}", name))
         .collect::<Vec<_>>()
         .join(",");
     let kasa_header = kasa_columns
@@ -211,30 +326,27 @@ fn start_recording(mode: String, datetime: String) -> Result<String, String> {
     });
 
     println!("[Recorder] started → {}", path.display());
+    telemetry_raw::start();
     Ok(path.to_string_lossy().to_string())
 }
 
-/// Append one row of sensor readings.
+/// Append one row of sensor readings, sourced from the raw telemetry
+/// websocket stream (see `telemetry_raw`).
 /// For the first HEADER_BATCHES calls, data is buffered so that the full set of
 /// sensor names can be determined before the header is written.  After that,
 /// rows are written immediately and flushed every 10 writes.
-#[tauri::command]
-fn write_sensor_batch(
+pub(crate) fn record_batch(
     timestamp: f64,
     readings: HashMap<String, f64>,
-    valve_states: Option<HashMap<String, u8>>,
-    auxiliary_states: Option<HashMap<String, u8>>,
-    kasa_states: Option<HashMap<String, u8>>,
+    valve_states: HashMap<String, u8>,
+    auxiliary_states: HashMap<String, u8>,
+    kasa_states: HashMap<String, u8>,
 ) -> Result<(), String> {
     let mut guard = RECORDER.lock().map_err(|e| e.to_string())?;
     let recorder  = match guard.as_mut() {
         Some(r) => r,
         None    => return Ok(()),  // no recording in progress — silently skip
     };
-
-    let valve_states = valve_states.unwrap_or_default();
-    let auxiliary_states = auxiliary_states.unwrap_or_default();
-    let kasa_states = kasa_states.unwrap_or_default();
 
     if !recorder.header_written {
         recorder.pending.push((timestamp, readings, valve_states, auxiliary_states, kasa_states));
@@ -296,6 +408,7 @@ fn write_sensor_batch(
 /// If called before the header buffer filled, writes whatever has been collected.
 #[tauri::command]
 fn stop_recording() -> Result<(), String> {
+    telemetry_raw::stop();
     let mut guard = RECORDER.lock().map_err(|e| e.to_string())?;
     if let Some(mut r) = guard.take() {
         if !r.header_written && !r.pending.is_empty() {
@@ -391,9 +504,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             fetch_server_ip,
             submit_ip,
+            get_tares,
+            set_tare,
+            prune_tares_for_live_sensors,
             start_recording,
-            write_sensor_batch,
             stop_recording,
+            telemetry_raw::update_control_states,
             fetch_camera_recording_dir,
             set_camera_recording_dir,
             save_downloaded_camera_recording,

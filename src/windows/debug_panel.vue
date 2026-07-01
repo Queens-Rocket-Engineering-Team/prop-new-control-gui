@@ -1,22 +1,24 @@
 <script setup>
 import { inject, ref, watch, nextTick, computed, reactive } from 'vue'
+import AudioRecorder from '../components/audio_recorder.vue'
 
-// ── log source ────────────────────
+// ── Log source ─────────────────────────────────────────────────────────────────
 const logLines  = inject('logLines',  ref([]))
 const wsStatus  = inject('wsStatus',  ref('disconnected'))
 const clearLogs = inject('clearLogs', () => {})
 
-const CHANNELS = [
-  { key: 'log',       label: 'Log'    },
-  { key: 'syslog',    label: 'Sys'    },
-  { key: 'errlog',    label: 'Err'    },
-  { key: 'debuglog',  label: 'Debug'  },
-  { key: 'packetlog', label: 'Packet' },
+// Log levels emitted by the new /ws/logs format: [LEVEL] <data>
+const LEVELS = [
+  { key: 'DEBUG',    label: 'Debug'    },
+  { key: 'INFO',     label: 'Info'     },
+  { key: 'WARNING',  label: 'Warning'  },
+  { key: 'ERROR',    label: 'Error'    },
+  { key: 'CRITICAL', label: 'Critical' },
 ]
 
-// ── tab names + channel filters ───────────────────
+// ── Tab management ─────────────────────────────────────────────────────────────
 const views = reactive([
-  { id: 'v1', name: 'View 1', filters: CHANNELS.map(c => c.key) }
+  { id: 'v1', name: 'View 1', filters: LEVELS.map(l => l.key) }
 ])
 
 const activeId = ref('v1')
@@ -26,20 +28,22 @@ const activeView = computed(() =>
   views.find(v => v.id === activeId.value) ?? views[0] ?? null
 )
 
-// ── Channel helpers ───────────────────────────────────────────────────────────
-function extractChannel(line) {
-  const m = line.match(/^\[(\w+)\]/)
+// ── Level helpers ──────────────────────────────────────────────────────────────
+
+function extractLevel(line) {
+  const m = line.match(/^\[([A-Z]+)\]/)
   if (!m) return null
-  const map = { log: 'log', sys: 'syslog', err: 'errlog', dbg: 'debuglog', pkt: 'packetlog' }
-  return map[m[1]] ?? null
+  const lvl = m[1]
+  // Accept any of our known levels
+  return LEVELS.find(l => l.key === lvl)?.key ?? null
 }
 
 function getLineClass(line) {
-  const ch = extractChannel(line)
-  return ch ? `log-line-${ch}` : ''
+  const lvl = extractLevel(line)
+  return lvl ? `log-line-${lvl.toLowerCase()}` : ''
 }
 
-function toggleChannel(view, key) {
+function toggleLevel(view, key) {
   const idx = view.filters.indexOf(key)
   if (idx === -1) view.filters.push(key)
   else view.filters.splice(idx, 1)
@@ -49,10 +53,10 @@ function toggleChannel(view, key) {
 const filteredLines = computed(() => {
   const v = activeView.value
   if (!v) return []
-  if (v.filters.length === CHANNELS.length) return logLines.value
+  if (v.filters.length === LEVELS.length) return logLines.value
   return logLines.value.filter(line => {
-    const ch = extractChannel(line)
-    return ch !== null && v.filters.includes(ch)
+    const lvl = extractLevel(line)
+    return lvl !== null && v.filters.includes(lvl)
   })
 })
 
@@ -60,13 +64,13 @@ const filteredLines = computed(() => {
 const logEl = ref(null)
 watch(filteredLines, async () => {
   await nextTick()
-  if (logEl.value) logEl.value.scrollBottom = logEl.value.scrollHeight
+  if (logEl.value) logEl.value.scrollTop = logEl.value.scrollHeight
 }, { deep: true })
 
 // ── Add / Remove views ────────────────────────────────────────────────────────
 function addView() {
   const id = `v${Date.now()}`
-  views.push({ id, name: `View ${viewCounter++}`, filters: CHANNELS.map(c => c.key) })
+  views.push({ id, name: `View ${viewCounter++}`, filters: LEVELS.map(l => l.key) })
   activeId.value = id
 }
 
@@ -82,7 +86,7 @@ const editingId   = ref(null)
 const editingName = ref('')
 
 function startRename(v) {
-  editingId.value = v.id
+  editingId.value   = v.id
   editingName.value = v.name
 }
 
@@ -91,7 +95,7 @@ function commitRename(v) {
   editingId.value = null
 }
 
-// ── WS status helper ──────────────────────────────────────────────────────────
+// ── WS status ──────────────────────────────────────────────────────────────────
 const statusClass = computed(() => {
   const s = wsStatus
   return (s && typeof s === 'object' && 'value' in s) ? s.value : s
@@ -144,15 +148,17 @@ const statusClass = computed(() => {
         {{ statusClass }}
       </span>
 
-      <div class="channel-filter">
+      <div class="level-filter">
         <button
-          v-for="ch in CHANNELS"
-          :key="ch.key"
-          class="channel-pill"
-          :class="[`ch-${ch.key}`, { 'ch-active': activeView && activeView.filters.includes(ch.key) }]"
-          @click="activeView && toggleChannel(activeView, ch.key)"
-        >{{ ch.label }}</button>
+          v-for="lvl in LEVELS"
+          :key="lvl.key"
+          class="level-pill"
+          :class="[`lvl-${lvl.key.toLowerCase()}`, { 'lvl-active': activeView && activeView.filters.includes(lvl.key) }]"
+          @click="activeView && toggleLevel(activeView, lvl.key)"
+        >{{ lvl.label }}</button>
       </div>
+
+      <AudioRecorder class="audio-toolbar-item" />
 
       <button class="clear-btn" @click="clearLogs()">Clear</button>
     </div>
@@ -262,7 +268,7 @@ const statusClass = computed(() => {
 .debug-toolbar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 5px 10px;
   border-bottom: 1px solid var(--border-color, #30363d);
   background: var(--bg-secondary, #161b22);
@@ -289,15 +295,14 @@ const statusClass = computed(() => {
 .ws-status.error .ws-led       { background: #e74c3c; }
 .ws-status.disconnected .ws-led { background: #555; }
 
-/* ── Channel pills ── */
-.channel-filter {
+/* ── Level filter pills ── */
+.level-filter {
   display: flex;
   gap: 4px;
-  flex: 1;
   flex-wrap: wrap;
 }
 
-.channel-pill {
+.level-pill {
   font-family: inherit;
   font-size: 0.7rem;
   padding: 2px 8px;
@@ -308,13 +313,17 @@ const statusClass = computed(() => {
   cursor: pointer;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
-.channel-pill:hover { border-color: #8b949e; color: #c9d1d9; }
+.level-pill:hover { border-color: #8b949e; color: #c9d1d9; }
 
-.ch-log.ch-active       { background: --bg-secondary; color: #2ecc71; border-color: #2ecc71; }
-.ch-syslog.ch-active    { background: --bg-secondary; color: #3498db; border-color: #3498db; }
-.ch-errlog.ch-active    { background: --bg-secondary; color: #e74c3c; border-color: #e74c3c; }
-.ch-debuglog.ch-active  { background: --bg-secondary; color: #f39c12; border-color: #f39c12; }
-.ch-packetlog.ch-active { background: --bg-secondary; color: #9b59b6; border-color: #9b59b6; }
+.lvl-debug.lvl-active    { color: var(--text-muted); border-color: #8b949e; }
+.lvl-info.lvl-active     { color: #2ecc71;  border-color: #2ecc71; }
+.lvl-warning.lvl-active  { color: #f39c12;  border-color: #f39c12; }
+.lvl-error.lvl-active    { color: #e74c3c;  border-color: #e74c3c; }
+.lvl-critical.lvl-active { color: #e74c3c;  border-color: #e74c3c; font-weight: 700; }
+
+.audio-toolbar-item {
+  flex-shrink: 0;
+}
 
 /* ── Clear ── */
 .clear-btn {
@@ -328,6 +337,7 @@ const statusClass = computed(() => {
   font-family: inherit;
   flex-shrink: 0;
   transition: color 0.12s, border-color 0.12s;
+  margin-left: auto;
 }
 .clear-btn:hover { color: #e74c3c; border-color: #e74c3c; }
 
@@ -355,9 +365,10 @@ const statusClass = computed(() => {
 }
 .log-line:hover { background: var(--bg-secondary, #161b22); }
 
-.log-line-log       { color: #2ecc71; }
-.log-line-syslog    { color: #3498db; }
-.log-line-errlog    { color: #e74c3c; font-weight: 600; }
-.log-line-debuglog  { color: #f39c12; }
-.log-line-packetlog { color: #9b59b6; }
+/* Per-level colours */
+.log-line-debug    { color: var(--text-muted, #8b949e); }
+.log-line-info     { color: #2ecc71; }
+.log-line-warning  { color: #f39c12; }
+.log-line-error    { color: #e74c3c; font-weight: 600; }
+.log-line-critical { color: #e74c3c; font-weight: 700; background: rgba(231,76,60,0.08); }
 </style>

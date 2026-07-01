@@ -14,9 +14,9 @@
     "@primeuix/themes": "^2.0.2",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
-    "chart.js": "^4.5.1",
     "primeicons": "^7.0.0",
     "primevue": "^4.5.4",
+    "uplot": "^1.6.32",
     "vue": "^3.5.13"
   },
   "devDependencies": {
