@@ -80,7 +80,7 @@ export function useServerApi(serverIp) {
    * Request current actuator/control status from all connected devices.
    */
   function requestStatus() {
-    return _get('/status')
+    return _post('/v1/status-request')
   }
 
   // ── Discovery ─────────────────────────────────────────────────────────────────
