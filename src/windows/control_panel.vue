@@ -1,20 +1,20 @@
 <script setup>
-import { ref, inject, computed, watch } from 'vue'
+import { ref, inject, computed, reactive, watch } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 import PidDiagram from '../components/PidDiagram.vue'
 import { useServerApi } from '../composables/useServerApi.js'
 
-const serverIp        = inject('serverIp',        ref(''))
-const serverConfig    = inject('serverConfig',    ref(null))
-const pidConfig       = inject('pidConfig',       ref('rocket-launch'))
-const sensorData      = inject('sensorData',      ref({}))
-const tares           = inject('tares',           ref({}))
-const kasaDevices     = inject('kasaDevices',     ref([]))
-const setKasaState    = inject('setKasaState',    () => {})
-const valveStates     = inject('valveStates',     ref({}))
-const auxiliaryStates = inject('auxiliaryStates', ref({}))
-const valveStatusByControl = inject('valveStatusByControl', ref({}))
-const { sendCommand, fetchStatus, sendEstop } = useServerApi(serverIp)
+const serverIp     = inject('serverIp',     ref(''))
+const devices      = inject('devices',      ref([]))
+const commandsById = inject('commandsById', ref(new Map()))
+const pidConfig    = inject('pidConfig',    ref('rocket-launch'))
+const sensorData   = inject('sensorData',   ref({}))
+const tares        = inject('tares',        ref({}))
+const kasaDevices  = inject('kasaDevices',  ref([]))
+const setKasaState = inject('setKasaState', () => {})
+const requestStatusSnapshot = inject('requestStatusSnapshot', () => Promise.resolve())
+
+const { setControl, sendEstop } = useServerApi(serverIp)
 
 // ── Emergency stop ───────────────────────────────────────────────────────────
 
@@ -25,9 +25,7 @@ async function confirmEstop() {
   estopPending.value = true
   try {
     await sendEstop()
-    fetchStatus().catch((err) => {
-      console.error('[ControlPanel] STATUS trigger after ESTOP failed:', err)
-    })
+    await requestStatusSnapshot('estop')
   } catch (err) {
     console.error('[ControlPanel] ESTOP failed:', err)
   } finally {
@@ -36,7 +34,7 @@ async function confirmEstop() {
   }
 }
 
-// ── SVG URL mapping (the only static config needed) ─────────────────────────
+// ── SVG URL mapping ──────────────────────────────────────────────────────────
 
 const SVG_URLS = {
   'hot-fire':      '/P&IDs/Hot-Fire-P&ID-26-05-2026.svg',
@@ -46,20 +44,12 @@ const SVG_URLS = {
 const svgUrl = computed(() => SVG_URLS[pidConfig.value] ?? SVG_URLS['rocket-launch'])
 
 // ── Dynamic element lists (populated from parsed SVG cells) ──────────────────
-// Categorised by ID prefix/pattern:
-//   AV-*         → actuated valve toggle cards
-//   PT-*         → pressure transducer sensor cards  (unit: psi)
-//   TC-*         → thermocouple sensor cards          (unit: °C)
-//   LC-*         → load-cell sensor cards             (unit: kg)
-//   MV-*         → manual valve info cards (below element)
-//   *TANK*       → tank info cards         (centred on element)
-//   REGULATOR-*  → regulator info cards    (right of element)
 
-const valves     = ref([])           // [id, ...]
-const sensors    = ref([])           // [{ id, unit }, ...]
-const mvs        = ref([])           // [id, ...]
-const tanks      = ref([])           // [id, ...]
-const regulators = ref([])           // [id, ...]
+const valves     = ref([])    // drawio IDs starting with AV
+const sensors    = ref([])    // [{ id, unit }, ...]
+const mvs        = ref([])
+const tanks      = ref([])
+const regulators = ref([])
 
 function onCellsParsed(cells) {
   const newValves = [], newSensors = [], newMvs = [], newTanks = [], newRegs = []
@@ -80,116 +70,112 @@ function onCellsParsed(cells) {
   mvs.value        = newMvs
   tanks.value      = newTanks
   regulators.value = newRegs
-
-  // Preserve any user-toggled states; only default-initialise new valve IDs.
-  const s = {}
-  for (const id of newValves) {
-    s[id] = id in valveStates.value ? valveStates.value[id] : false
-  }
-  valveStates.value = s
 }
 
-// Clear stale overlays immediately when the config switches (before the new
-// SVG loads and fires cells-parsed).
 watch(pidConfig, () => {
   valves.value     = []
   sensors.value    = []
   mvs.value        = []
   tanks.value      = []
   regulators.value = []
-  valveStates.value = {}
 })
 
-// ── ID normalization ─────────────────────────────────────────────────────────
+// ── ID normalisation ─────────────────────────────────────────────────────────
 
-// Strip non-alphanumeric, lowercase — for fuzzy matching against server keys.
+// Strip non-alphanumeric, lowercase — for fuzzy matching against server names.
 function normalizeId(id) {
   return id.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()
 }
 
-// Control key sent to the server: strip non-alphanumeric, UPPERCASE.
-// 'AV-DUMP' → 'AVDUMP', 'AV-N2FILL' → 'AVN2FILL'
+// Display label: strip non-alphanumeric, UPPERCASE.
 function toControlKey(id) {
   return id.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()
 }
 
-function getBestMatchingValveIds(statusControlKey) {
-  const statusNorm = normalizeId(statusControlKey)
-  const ids = Object.keys(valveStates.value)
-  const matches = ids
-    .map((id) => ({ id, norm: normalizeId(id) }))
-    .filter(({ norm }) => statusNorm === norm || statusNorm.startsWith(norm))
+// ── Control + sensor indexes (flat maps keyed by normalizeId) ─────────────────
 
-  if (matches.length === 0) return []
-
-  const bestLen = Math.max(...matches.map((m) => m.norm.length))
-  return matches.filter((m) => m.norm.length === bestLen).map((m) => m.id)
-}
-
-// ── Server-enabled controls ──────────────────────────────────────────────────
-
-const enabledControls = computed(() => {
-  const cfg = serverConfig.value
-  if (!cfg) return new Set()
-  const keys = new Set()
-  for (const device of Object.values(cfg.configs)) {
-    for (const key of Object.keys(device.controls ?? {})) {
-      keys.add(normalizeId(key))
+// Flattens all device controls into a Map: normalizeId(name) → control object
+// (with added deviceName for context). Used for fuzzy drawio-ID → server-name matching.
+const normalizedControlLookup = computed(() => {
+  const map = new Map()
+  for (const dev of devices.value) {
+    for (const ctrl of (dev.controls ?? [])) {
+      map.set(normalizeId(ctrl.name), { ...ctrl, deviceName: dev.name })
     }
   }
-  return keys
+  return map
 })
 
-// A valve is enabled if any server control key starts with its normalised form.
-// (handles numbered variants: AVPurge1 / AVPurge2 both match AV-PURGE)
-function isValveEnabled(drawioId) {
-  const norm = normalizeId(drawioId)
-  for (const key of enabledControls.value) {
-    if (key.startsWith(norm)) return true
+// Map: control.name → control object (for direct name lookups)
+const controlLookup = computed(() => {
+  const map = new Map()
+  for (const dev of devices.value) {
+    for (const ctrl of (dev.controls ?? [])) {
+      map.set(ctrl.name, ctrl)
+    }
   }
-  return false
+  return map
+})
+
+// Map: normalizeId(sensor.name) → sensor object
+const normalizedSensorLookup = computed(() => {
+  const map = new Map()
+  for (const dev of devices.value) {
+    for (const s of (dev.sensors ?? [])) {
+      map.set(normalizeId(s.name), s)
+    }
+  }
+  return map
+})
+
+// ── Fuzzy matching: drawio ID → server controls ───────────────────────────────
+// A server control matches a drawio ID when normalizeId(control.name) starts with
+// normalizeId(drawioId). This covers numbered variants:
+//   drawio "AV-PURGE" (norm "avpurge") matches "AVPurge1" (norm "avpurge1") and "AVPurge2".
+// Returns only the longest-matching controls (most specific).
+
+function getMatchingControls(drawioId) {
+  const norm = normalizeId(drawioId)
+  const results = []
+  let bestLen = 0
+  for (const [normKey, ctrl] of normalizedControlLookup.value) {
+    if (normKey.startsWith(norm)) {
+      if (normKey.length > bestLen) bestLen = normKey.length
+      results.push({ normKey, ctrl })
+    }
+  }
+  return results.filter(m => m.normKey.length === bestLen).map(m => m.ctrl)
+}
+
+function isValveEnabled(drawioId) {
+  return getMatchingControls(drawioId).length > 0
 }
 
 function getValveDefaultState(drawioId) {
-  const norm = normalizeId(drawioId)
-  const cfg = serverConfig.value
-  if (!cfg) return '—'
-  for (const device of Object.values(cfg.configs)) {
-    for (const [key, ctrl] of Object.entries(device.controls ?? {})) {
-      if (normalizeId(key).startsWith(norm)) return ctrl.default_state ?? '—'
-    }
-  }
-  return '—'
+  const ctrls = getMatchingControls(drawioId)
+  return ctrls.length > 0 ? (ctrls[0].default_state ?? '—') : '—'
 }
 
-// ── Server-enabled sensors ───────────────────────────────────────────────────
+// Server-authoritative displayed open state:
+// prefer reported_state from STATUS/control.updated, fall back to accepted_state.
+function getDisplayedOpen(drawioId) {
+  const ctrls = getMatchingControls(drawioId)
+  if (ctrls.length === 0) return false
+  const state = ctrls[0].reported_state ?? ctrls[0].accepted_state
+  return state === 'OPEN'
+}
 
-const enabledSensors = computed(() => {
-  const cfg = serverConfig.value
-  if (!cfg) return new Set()
-  const keys = new Set()
-  for (const device of Object.values(cfg.configs)) {
-    for (const category of Object.values(device.sensor_info ?? {})) {
-      if (typeof category !== 'object' || Array.isArray(category)) continue
-      for (const key of Object.keys(category)) {
-        keys.add(normalizeId(key))
-      }
-    }
-  }
-  return keys
-})
+// ── Server-enabled sensors ────────────────────────────────────────────────────
 
 function isSensorEnabled(drawioId) {
   const norm = normalizeId(drawioId)
-  for (const key of enabledSensors.value) {
+  for (const [key] of normalizedSensorLookup.value) {
     if (key.startsWith(norm) || norm.startsWith(key)) return true
   }
   return false
 }
 
-// ── Live sensor value lookup ─────────────────────────────────────────────────
-// sensorData keys are camelCase (e.g. "PTN2Supply"); drawio IDs use hyphens
-// (e.g. "PT-N2-SUPPLY"). normalizeId strips all punctuation + lowercases both.
+// ── Live sensor value lookup ──────────────────────────────────────────────────
 
 const normalizedSensorMap = computed(() => {
   const map = {}
@@ -199,7 +185,6 @@ const normalizedSensorMap = computed(() => {
   return map
 })
 
-// Maps normalizeId(sensorName) → tare offset, for O(1) lookup in getLiveValue.
 const normalizedTaresMap = computed(() => {
   const map = {}
   for (const [name, offset] of Object.entries(tares.value)) {
@@ -220,19 +205,16 @@ function getLiveValue(drawioId) {
   return v.toFixed(2)
 }
 
-// ── Auxiliary controls (non-AV controls from server config) ─────────────────
-// Any control whose normalised name does NOT start with 'av' is shown here.
+// ── Auxiliary controls (non-AV server controls) ───────────────────────────────
 
 const auxiliaryControls = computed(() => {
-  const cfg = serverConfig.value
-  if (!cfg) return []
   const result = []
-  for (const device of Object.values(cfg.configs)) {
-    for (const [name, ctrl] of Object.entries(device.controls ?? {})) {
-      if (!normalizeId(name).startsWith('av')) {
+  for (const dev of devices.value) {
+    for (const ctrl of (dev.controls ?? [])) {
+      if (!normalizeId(ctrl.name).startsWith('av')) {
         result.push({
-          key:          name,
-          label:        toControlKey(name),   // e.g. "IgnPrime" → "IGNPRIME"
+          key:          ctrl.name,
+          label:        toControlKey(ctrl.name),
           defaultState: ctrl.default_state ?? '—',
         })
       }
@@ -241,118 +223,131 @@ const auxiliaryControls = computed(() => {
   return result
 })
 
-watch(serverConfig, (cfg) => {
-  if (!cfg) { auxiliaryStates.value = {}; return }
-  // Preserve any user-toggled states; only default-initialise new keys.
-  const s = {}
-  for (const device of Object.values(cfg.configs)) {
-    for (const [name, ctrl] of Object.entries(device.controls ?? {})) {
-      if (!normalizeId(name).startsWith('av')) {
-        // Relay semantics: CLOSED = energised = true, OPEN = de-energised = false
-        s[name] = name in auxiliaryStates.value
-          ? auxiliaryStates.value[name]
-          : (ctrl.default_state ?? '').toUpperCase() === 'CLOSED'
+// Relay semantics: CLOSED = energised = true; OPEN = de-energised = false.
+function getAuxDisplayed(controlName) {
+  const ctrl = controlLookup.value.get(controlName)
+  if (!ctrl) return false
+  const state = ctrl.reported_state ?? ctrl.accepted_state
+  return state === 'CLOSED'
+}
+
+// ── Pending / NACK tracking ───────────────────────────────────────────────────
+// 'pending[name]' = { requested: 'OPEN'|'CLOSED' }
+// 'warning[name]' = { message: string, errorCode: string|null }
+
+const pending = reactive({})
+const warning = reactive({})
+
+function _clearControl(name) {
+  delete pending[name]
+  delete warning[name]
+}
+
+// When device control state settles to the requested value, clear pending.
+// When a command is nacked or timed out, clear pending and set warning.
+watch([devices, commandsById], () => {
+  for (const dev of devices.value) {
+    for (const ctrl of (dev.controls ?? [])) {
+      const p = pending[ctrl.name]
+      if (!p) continue
+
+      const serverState = ctrl.reported_state ?? ctrl.accepted_state
+      if (serverState === p.requested) {
+        _clearControl(ctrl.name)
+        continue
+      }
+
+      // Check command lifecycle for NACK/timeout
+      const cmdId = ctrl.pending_command_id
+      if (!cmdId) continue
+      const cmd = commandsById.value.get(cmdId)
+      if (!cmd) continue
+      if (cmd.state === 'nacked' || cmd.state === 'timed_out') {
+        delete pending[ctrl.name]
+        warning[ctrl.name] = {
+          message:   cmd.state === 'nacked' ? 'NACK' : 'Timeout',
+          errorCode: cmd.nack_error_code ?? null,
+        }
       }
     }
   }
-  auxiliaryStates.value = s
-}, { immediate: true })
+}, { deep: false })   // shallow watch is enough — devices ref is replaced on each publish
 
-const lastAppliedStatusSeqByControl = ref({})
-
-function getBestMatchingAuxIds(statusControlKey) {
-  const statusNorm = normalizeId(statusControlKey)
-  const ids = Object.keys(auxiliaryStates.value)
-  const matches = ids
-    .map((id) => ({ id, norm: normalizeId(id) }))
-    .filter(({ norm }) => statusNorm === norm || statusNorm.startsWith(norm))
-
-  if (matches.length === 0) return []
-
-  const bestLen = Math.max(...matches.map((m) => m.norm.length))
-  return matches.filter((m) => m.norm.length === bestLen).map((m) => m.id)
-}
-
-function applyValveStatusMap(statusMap) {
-  const nextApplied = { ...lastAppliedStatusSeqByControl.value }
-
-  for (const [controlKey, statusInfo] of Object.entries(statusMap ?? {})) {
-    const seq = Number(statusInfo?.seq ?? 0)
-    const lastSeq = Number(nextApplied[controlKey] ?? 0)
-    if (!seq || seq <= lastSeq) continue
-
-    const state = String(statusInfo?.state ?? '').toUpperCase()
-    if (state !== 'OPEN' && state !== 'CLOSED') continue
-
-    const matchedValveIds = getBestMatchingValveIds(controlKey)
-    for (const id of matchedValveIds) {
-      valveStates.value[id] = state === 'OPEN'
-    }
-
-    // Relay semantics: CLOSED = energised = true, OPEN = de-energised = false
-    const matchedAuxIds = getBestMatchingAuxIds(controlKey)
-    for (const id of matchedAuxIds) {
-      auxiliaryStates.value[id] = state === 'CLOSED'
-    }
-
-    if (matchedValveIds.length > 0 || matchedAuxIds.length > 0) {
-      nextApplied[controlKey] = seq
-    }
-  }
-
-  lastAppliedStatusSeqByControl.value = nextApplied
-}
-
-watch(valveStatusByControl, (statusMap) => {
-  applyValveStatusMap(statusMap)
-}, { deep: true })
-
-watch(
-  () => Object.keys(valveStates.value).sort().join('|'),
-  () => { applyValveStatusMap(valveStatusByControl.value) }
-)
-
-watch(
-  () => Object.keys(auxiliaryStates.value).sort().join('|'),
-  () => { applyValveStatusMap(valveStatusByControl.value) }
-)
-
-watch(pidConfig, () => {
-  lastAppliedStatusSeqByControl.value = {}
+// Clear pending/warning when server IP or P&ID changes (stale keys)
+watch([serverIp, pidConfig], () => {
+  for (const key of Object.keys(pending)) delete pending[key]
+  for (const key of Object.keys(warning)) delete warning[key]
 })
 
-async function onAuxToggle(key, newState) {
-  auxiliaryStates.value[key] = newState  // optimistic update
-  try {
-    // Relay semantics: true = CLOSED (energised) → send 'CLOSE'
-    await sendCommand('CONTROL', [toControlKey(key), newState ? 'CLOSE' : 'OPEN'])
-    fetchStatus().catch((err) => {
-      console.error(`[ControlPanel] STATUS trigger after ${toControlKey(key)} failed:`, err)
-    })
-  } catch (err) {
-    console.error(`[ControlPanel] CONTROL ${toControlKey(key)} failed:`, err)
-    auxiliaryStates.value[key] = !newState  // revert on failure
+function isControlPending(drawioId) {
+  const ctrls = getMatchingControls(drawioId)
+  for (const ctrl of ctrls) {
+    if (pending[ctrl.name]) return true
+    if (ctrl.pending_command_id) {
+      const cmd = commandsById.value.get(ctrl.pending_command_id)
+      if (cmd?.state === 'sent') return true
+    }
   }
+  return false
+}
+
+function isControlWarning(drawioId) {
+  return getMatchingControls(drawioId).some(ctrl => !!warning[ctrl.name])
+}
+
+function isAuxPending(controlName) {
+  if (pending[controlName]) return true
+  const ctrl = controlLookup.value.get(controlName)
+  if (ctrl?.pending_command_id) {
+    const cmd = commandsById.value.get(ctrl.pending_command_id)
+    if (cmd?.state === 'sent') return true
+  }
+  return false
+}
+
+function isAuxWarning(controlName) {
+  return !!warning[controlName]
 }
 
 // ── Valve toggle ─────────────────────────────────────────────────────────────
+// Server-authoritative: do NOT mutate displayed state. Show pending while in-flight.
 
-async function onValveToggle(id, newState) {
-  if (!isValveEnabled(id)) return
-  const controlKey = toControlKey(id)
+async function onValveToggle(drawioId, newOpenState) {
+  if (!isValveEnabled(drawioId)) return
+  const controls   = getMatchingControls(drawioId)
+  const requested  = newOpenState ? 'OPEN' : 'CLOSED'
+  const commandArg = newOpenState ? 'OPEN'  : 'CLOSE'
 
+  for (const ctrl of controls) {
+    pending[ctrl.name] = { requested }
+    delete warning[ctrl.name]
+    try {
+      await setControl(ctrl.name, commandArg)
+      requestStatusSnapshot('control')
+    } catch (err) {
+      console.error(`[ControlPanel] CONTROL ${ctrl.name} failed:`, err)
+      delete pending[ctrl.name]
+      warning[ctrl.name] = { message: String(err), errorCode: null }
+    }
+  }
+}
+
+// ── Aux toggle ───────────────────────────────────────────────────────────────
+
+async function onAuxToggle(controlName, newEnergised) {
+  // Relay: energised=true → CLOSE command (CLOSED state); energised=false → OPEN
+  const commandArg = newEnergised ? 'CLOSE' : 'OPEN'
+  const expected   = newEnergised ? 'CLOSED' : 'OPEN'
+
+  pending[controlName] = { requested: expected }
+  delete warning[controlName]
   try {
-    valveStates.value[id] = newState  // optimistic update
-
-    await sendCommand('CONTROL', [controlKey, newState ? 'OPEN' : 'CLOSE'])
-
-    // Trigger fresh device STATUS reporting, but do not block UI on validation.
-    fetchStatus().catch((err) => {
-      console.error(`[ControlPanel] STATUS trigger after ${controlKey} failed:`, err)
-    })
+    await setControl(controlName, commandArg)
+    requestStatusSnapshot('control')
   } catch (err) {
-    console.error(`[ControlPanel] CONTROL ${controlKey} failed:`, err)
-    valveStates.value[id] = !newState  // revert on failure
+    console.error(`[ControlPanel] CONTROL ${controlName} failed:`, err)
+    delete pending[controlName]
+    warning[controlName] = { message: String(err), errorCode: null }
   }
 }
 </script>
@@ -375,12 +370,22 @@ async function onValveToggle(id, newState) {
           >
             <span class="aux-label">{{ ctrl.label }}</span>
             <span class="card-badge">{{ ctrl.defaultState }}</span>
-            <span class="state-indicator" :class="auxiliaryStates[ctrl.key] ? 'relay-closed' : 'relay-open'">
+            <span
+              class="state-indicator"
+              :class="
+                isAuxWarning(ctrl.key) ? 'relay-warning' :
+                isAuxPending(ctrl.key) ? 'relay-pending' :
+                getAuxDisplayed(ctrl.key) ? 'relay-closed' : 'relay-open'
+              "
+            >
               <span class="state-led" />
-              {{ auxiliaryStates[ctrl.key] ? 'CLOSED' : 'OPEN' }}
+              <span v-if="isAuxPending(ctrl.key)">PENDING…</span>
+              <span v-else-if="isAuxWarning(ctrl.key)">WARN</span>
+              <span v-else>{{ getAuxDisplayed(ctrl.key) ? 'CLOSED' : 'OPEN' }}</span>
             </span>
             <ToggleSwitch
-              :modelValue="auxiliaryStates[ctrl.key]"
+              :modelValue="getAuxDisplayed(ctrl.key)"
+              :disabled="isAuxPending(ctrl.key)"
               @update:modelValue="onAuxToggle(ctrl.key, $event)"
               class="aux-toggle"
             />
@@ -416,16 +421,25 @@ async function onValveToggle(id, newState) {
           :style="{ ...positionBeside(id, 'bottom', -10), marginLeft: '-50px' }"
           class="pid-overlay"
         >
-          <div class="valve-card" :class="{ open: valveStates[id], locked: !isValveEnabled(id) }">
+          <div
+            class="valve-card"
+            :class="{
+              open:    getDisplayedOpen(id),
+              locked:  !isValveEnabled(id),
+              pending: isControlPending(id),
+              warning: isControlWarning(id),
+            }"
+          >
             <div class="card-id">
               {{ id }}
               <span v-if="!isValveEnabled(id)" class="lock-badge">NO CTRL</span>
+              <span v-else-if="isControlWarning(id)" class="warn-badge">WARN</span>
             </div>
             <div class="valve-card-body">
               <div class="valve-toggle-col">
                 <ToggleSwitch
-                  :modelValue="valveStates[id]"
-                  :disabled="!isValveEnabled(id)"
+                  :modelValue="getDisplayedOpen(id)"
+                  :disabled="!isValveEnabled(id) || isControlPending(id)"
                   @update:modelValue="onValveToggle(id, $event)"
                 />
               </div>
@@ -436,9 +450,18 @@ async function onValveToggle(id, newState) {
                 </div>
                 <div class="card-row">
                   <span class="card-detail">State</span>
-                  <span class="state-indicator" :class="{ open: valveStates[id] }">
+                  <span
+                    class="state-indicator"
+                    :class="{
+                      open:          getDisplayedOpen(id) && !isControlPending(id) && !isControlWarning(id),
+                      'ctrl-pending': isControlPending(id),
+                      'ctrl-warning': isControlWarning(id),
+                    }"
+                  >
                     <span class="state-led" />
-                    {{ valveStates[id] ? 'OPEN' : 'CLOSED' }}
+                    <span v-if="isControlPending(id)">PENDING…</span>
+                    <span v-else-if="isControlWarning(id)">WARN</span>
+                    <span v-else>{{ getDisplayedOpen(id) ? 'OPEN' : 'CLOSED' }}</span>
                   </span>
                 </div>
               </div>
@@ -577,17 +600,41 @@ async function onValveToggle(id, newState) {
   pointer-events: none;
 }
 
-.lock-badge {
+/* ── Pending state — yellow border ── */
+
+.valve-card.pending {
+  border-color: #f39c12;
+  box-shadow: 0 0 5px rgba(243, 156, 18, 0.4);
+}
+
+/* ── Warning state — orange/red border ── */
+
+.valve-card.warning {
+  border-color: #e74c3c;
+  box-shadow: 0 0 5px rgba(231, 76, 60, 0.4);
+}
+
+.lock-badge,
+.warn-badge {
   font-size: 6px;
   font-weight: 600;
   letter-spacing: 0.2px;
-  color: var(--text-muted);
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
   border-radius: 2px;
   padding: 0px 2px;
   white-space: nowrap;
   line-height: 1.1;
+}
+
+.lock-badge {
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+}
+
+.warn-badge {
+  color: #e74c3c;
+  background: rgba(231, 76, 60, 0.12);
+  border: 1px solid #e74c3c;
 }
 
 /* ── Valve card ── */
@@ -657,6 +704,12 @@ async function onValveToggle(id, newState) {
 /* Valve state — open = green */
 .state-indicator.open { color: #2ecc71; }
 
+/* Pending = yellow */
+.state-indicator.ctrl-pending { color: #f39c12; }
+
+/* Warning = red */
+.state-indicator.ctrl-warning { color: #e74c3c; }
+
 .state-led {
   width: 5px;
   height: 5px;
@@ -671,6 +724,16 @@ async function onValveToggle(id, newState) {
   box-shadow: 0 0 4px rgba(46, 204, 113, 0.6);
 }
 
+.state-indicator.ctrl-pending .state-led {
+  background: #f39c12;
+  box-shadow: 0 0 4px rgba(243, 156, 18, 0.6);
+}
+
+.state-indicator.ctrl-warning .state-led {
+  background: #e74c3c;
+  box-shadow: 0 0 4px rgba(231, 76, 60, 0.5);
+}
+
 /* Relay state — closed = energised = green, open = de-energised = red */
 .state-indicator.relay-closed { color: #2ecc71; }
 .state-indicator.relay-closed .state-led {
@@ -680,6 +743,18 @@ async function onValveToggle(id, newState) {
 
 .state-indicator.relay-open { color: #e74c3c; }
 .state-indicator.relay-open .state-led {
+  background: #e74c3c;
+  box-shadow: 0 0 4px rgba(231, 76, 60, 0.5);
+}
+
+.state-indicator.relay-pending { color: #f39c12; }
+.state-indicator.relay-pending .state-led {
+  background: #f39c12;
+  box-shadow: 0 0 4px rgba(243, 156, 18, 0.6);
+}
+
+.state-indicator.relay-warning { color: #e74c3c; }
+.state-indicator.relay-warning .state-led {
   background: #e74c3c;
   box-shadow: 0 0 4px rgba(231, 76, 60, 0.5);
 }
@@ -907,6 +982,5 @@ async function onValveToggle(id, newState) {
   user-select: none;
   opacity: 0.85;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
-
 }
 </style>

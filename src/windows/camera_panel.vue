@@ -74,6 +74,7 @@ const cameras = ref();
 const arr = ref([]);
 
 const text = ref();
+const refreshing = ref(false);
 const videoRefs = {};
 const AUTH_HEADERS = { "Authorization": `Basic ${btoa("admin:propteambestteam")}` };
 
@@ -263,13 +264,21 @@ async function get_list() {
     })
 }
 
-function refresh_list() {
-    fetch(`${apiBaseUrl()}/v1/cameras/reconnect`, {
-        method: "POST",
-        headers: AUTH_HEADERS
-    }).then(_ => {
-        get_list();
-    });
+async function refresh_list() {
+    if (!server_ip.value || refreshing.value) return;
+    refreshing.value = true;
+    text.value = "Refreshing Cameras...";
+    try {
+        await fetch(`${apiBaseUrl()}/v1/cameras/reconnect`, {
+            method: "POST",
+            headers: AUTH_HEADERS
+        });
+        await get_list();
+    } catch (error) {
+        text.value = String(error);
+    } finally {
+        refreshing.value = false;
+    }
 }
 
 function cam_right(ip) {
@@ -310,7 +319,12 @@ function cam_down(ip) {
             <span class="panel-title">Camera View</span>
             <span class="status-text">{{ text }}</span>
             <Button label="Load"    size="small" @click="get_list" />
-            <Button label="Refresh" size="small" @click="refresh_list" :disabled="!arr.length" />
+            <Button
+                :label="refreshing ? 'Refreshing...' : 'Refresh'"
+                size="small"
+                @click="refresh_list"
+                :disabled="!server_ip || refreshing"
+            />
         </div>
 
         <div class="camera-grid">

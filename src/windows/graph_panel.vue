@@ -1,14 +1,16 @@
 <script setup>
 import { ref, inject, computed } from 'vue'
-import Chart from 'primevue/chart'
+import UPlotChart from '../components/uplot_chart.vue'
+import { TELEMETRY_WINDOW_SEC } from '../composables/useTelemetryStream.js'
 
 const sensorData    = inject('sensorData',    ref({}))
 const tares         = inject('tares',         ref({}))
 const setTare       = inject('setTare',       () => {})
 const testFrequency = inject('testFrequency', ref(190))
 const testActive    = inject('testActive',    ref(false))
+const telemetryStats = inject('telemetryStats', ref(null))
 
-const WINDOW_SEC = 30  // rolling window displayed on every chart (seconds)
+const WINDOW_SEC = TELEMETRY_WINDOW_SEC  // rolling window displayed on every chart (seconds)
 
 // ── Type metadata (defines display order) ───────────────────────────────────
 
@@ -41,52 +43,34 @@ function toggleType(key) {
   selectedTypes.value = s
 }
 
-// ── Chart options ────────────────────────────────────────────────────────────
-
-const chartOptions = {
-  animation: false,
-  responsive: true,
-  maintainAspectRatio: false,
-  plugins: {
-    legend: { display: false },
-    tooltip: {
-      mode: 'index',
-      intersect: false,
-      callbacks: { title: (items) => `t = ${items[0]?.label ?? ''}s` },
-    },
-  },
-  scales: {
-    x: {
-      ticks: { maxTicksLimit: 4, font: { size: 8 }, color: 'rgba(128,128,128,0.8)' },
-      grid:  { color: 'rgba(128,128,128,0.12)' },
-    },
-    y: {
-      ticks: { maxTicksLimit: 4, font: { size: 8 }, color: 'rgba(128,128,128,0.8)' },
-      grid:  { color: 'rgba(128,128,128,0.12)' },
-      // Ratchet: afterDataLimits runs on every chart.update() call.
-      // Chart.js has already computed scale.min/max from visible data;
-      // we store the running extremes on the chart instance and only
-      // allow bounds to expand, never shrink. This prevents the y-axis
-      // from oscillating as points enter/leave the rolling window.
-      afterDataLimits(scale) {
-        if (!isFinite(scale.min) || !isFinite(scale.max)) return
-        const r = scale.chart._yRatchet
-        if (!r) {
-          scale.chart._yRatchet = { min: scale.min, max: scale.max }
-        } else {
-          r.min = Math.min(r.min, scale.min)
-          r.max = Math.max(r.max, scale.max)
-          scale.min = r.min
-          scale.max = r.max
-        }
-      },
-    },
-  },
-  elements: {
-    point: { radius: 0 },
-    line:  { borderWidth: 1.5 },
-  },
+function fmtHz(v) {
+  return Number.isFinite(v) && v > 0 ? v.toFixed(1) : '--'
 }
+
+const telemetryRateLabel = computed(() => {
+  const stats = telemetryStats.value
+  if (!stats?.updatedAt) return 'display -- Hz / pts -- Hz'
+  return `display ${fmtHz(stats.displayBatchHz)} Hz / pts ${fmtHz(stats.displayPointHzAvg)} Hz`
+})
+
+const telemetryRateTitle = computed(() => {
+  const stats = telemetryStats.value
+  if (!stats?.updatedAt) return 'Waiting for telemetry display batches'
+  return [
+    `Display batches: ${fmtHz(stats.displayBatchHz)} Hz`,
+    `Plotted points per sensor: avg ${fmtHz(stats.displayPointHzAvg)} Hz, max ${fmtHz(stats.displayPointHzMax)} Hz`,
+    `Unique point timestamps per sensor: avg ${fmtHz(stats.displayTimestampHzAvg)} Hz, max ${fmtHz(stats.displayTimestampHzMax)} Hz`,
+    `Incoming points per sensor: avg ${fmtHz(stats.incomingPointHzAvg)} Hz, max ${fmtHz(stats.incomingPointHzMax)} Hz`,
+    `Incoming points per sensor per batch: ${stats.incomingPointsPerSensorBatchAvg.toFixed(2)}`,
+    `Raw stream (CSV, Rust-side): ${testActive.value ? 'active' : 'inactive'}`,
+    `Stats window: ${stats.statsWindowSec.toFixed(0)}s`,
+  ].join('\n')
+})
+
+const telemetryRateWarn = computed(() => {
+  const stats = telemetryStats.value
+  return Boolean(stats?.updatedAt && stats.displayPointHzAvg > 36)
+})
 
 // ── Sensor list — grouped by type with spacers for odd-count groups ──────────
 //
@@ -103,34 +87,23 @@ const slots = computed(() => {
     const typeKey = getTypeKey(name)
     if (!selectedTypes.value.has(typeKey)) continue
 
-    const h      = info.history
-    const maxT   = h.length > 0 ? h[h.length - 1].t : 0
-    const cutoff = maxT - WINDOW_SEC
-    const windowed = h.filter((p) => p.t >= cutoff)
+    const h = Array.isArray(info.history) ? info.history : []
+    const windowEnd = Number.isFinite(info.windowEnd)
+      ? info.windowEnd
+      : (h.length > 0 ? h[h.length - 1].t : 0)
+    const windowStart = Number.isFinite(info.windowStart)
+      ? info.windowStart
+      : windowEnd - WINDOW_SEC
+    const windowed = h.filter((p) => p.t >= windowStart && p.t <= windowEnd)
 
     const color  = TYPE_MAP[typeKey].color
     const offset = tares.value[name] ?? 0
-
-    // Keep the label array at a constant length equal to a full 30 s window.
-    // Without this, the array grows from 0 → ~600 entries during the first
-    // 30 s after connect, causing Chart.js to recalculate tick positions on
-    // every frame (visible axis oscillation). Padding with equally-spaced
-    // timestamps and null values fills from the left so real data enters
-    // from the right, and tick positions are stable from the first frame.
-    const spacing  = windowed.length > 1
-      ? (windowed[windowed.length - 1].t - windowed[0].t) / (windowed.length - 1)
-      : 0.05  // fallback: 20 Hz
-    const leadGap  = windowed.length > 0 ? Math.max(0, windowed[0].t - cutoff) : WINDOW_SEC
-    const padCount = spacing > 0 ? Math.round(leadGap / spacing) : 0
-
-    const labels = [
-      ...Array.from({ length: padCount }, (_, i) => (cutoff + (i + 1) * spacing).toFixed(1)),
-      ...windowed.map((p) => p.t.toFixed(1)),
-    ]
-    const values = [
-      ...Array(padCount).fill(null),
-      ...windowed.map((p) => p.v - offset),
-    ]
+    const x = []
+    const y = []
+    for (const p of windowed) {
+      x.push(p.t - windowEnd)
+      y.push(p.v - offset)
+    }
 
     groups[typeKey].push({
       name,
@@ -138,19 +111,9 @@ const slots = computed(() => {
       unit:     info.unit,
       rawValue: info.value,
       value:    info.value - offset,
-      data: {
-        labels,
-        datasets: [{
-          data:            values,
-          borderColor:     color,
-          backgroundColor: color + '18',
-          fill:            true,
-          borderWidth:     1.5,
-          pointRadius:     0,
-          tension:         0.1,
-          spanGaps:        false,
-        }],
-      },
+      color,
+      fill: color + '18',
+      plotData: [x, y],
     })
   }
 
@@ -205,6 +168,11 @@ function fmt(v) {
         <span class="freq-badge-unit"> Hz</span>
       </div>
 
+      <span
+        class="telemetry-rate"
+        :class="{ 'telemetry-rate--warn': telemetryRateWarn }"
+        :title="telemetryRateTitle"
+      >{{ telemetryRateLabel }}</span>
       <span class="window-label">{{ WINDOW_SEC }}s window</span>
     </div>
 
@@ -235,7 +203,7 @@ function fmt(v) {
             >T</button>
           </div>
           <div class="chart-body">
-            <Chart type="line" :data="s.data" :options="chartOptions" />
+            <UPlotChart :data="s.plotData" :color="s.color" :fill="s.fill" :window-sec="WINDOW_SEC" />
           </div>
         </div>
 
@@ -274,10 +242,22 @@ function fmt(v) {
 }
 
 .window-label {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.telemetry-rate {
   margin-left: auto;
   font-size: 0.68rem;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.telemetry-rate--warn {
+  color: #e67e22;
+  font-weight: 700;
 }
 
 /* ── Centred test-frequency badge ── */
@@ -450,7 +430,7 @@ function fmt(v) {
   overflow: hidden;
 }
 
-.chart-body :deep(.p-chart) {
+.chart-body :deep(.uplot-chart) {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -459,7 +439,5 @@ function fmt(v) {
 
 .chart-body :deep(canvas) {
   display: block;
-  width: 100% !important;
-  height: 100% !important;
 }
 </style>

@@ -2,12 +2,12 @@
 import { ref, inject, computed } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 
-const serverConfig = inject('serverConfig', ref(null))
-const sensorData   = inject('sensorData',   ref({}))
-const tares        = inject('tares',        ref({}))
-const kasaDevices  = inject('kasaDevices',  ref([]))
-const discover = inject('discover', () => {})
-const setKasaState = inject('setKasaState',  () => {})
+const devices     = inject('devices',     ref([]))
+const sensorData  = inject('sensorData',  ref({}))
+const tares       = inject('tares',       ref({}))
+const kasaDevices = inject('kasaDevices', ref([]))
+const discover    = inject('discover',    () => {})
+const setKasaState = inject('setKasaState', () => {})
 
 // ── Live sensor lookup ────────────────────────────────────────────────────────
 
@@ -42,6 +42,27 @@ function getLiveReading(sensorName) {
   return { value: str, unit: info.unit }
 }
 
+// ── Heartbeat helper ──────────────────────────────────────────────────────────
+
+function heartbeatClass(dev) {
+  if (!dev.connected)                         return 'hb-disconnected'
+  const hb = dev.heartbeat?.state ?? 'ok'
+  if (hb === 'ok')                            return 'hb-ok'
+  if (hb === 'missed')                        return 'hb-missed'
+  return 'hb-disconnected'
+}
+
+function heartbeatTitle(dev) {
+  if (!dev.connected) return 'Device disconnected'
+  const hb = dev.heartbeat
+  if (!hb || hb.state === 'ok') return 'Heartbeat OK'
+  if (hb.state === 'missed')
+    return `Heartbeat missed (${hb.consecutive_misses} consecutive)`
+  return 'Heartbeat: disconnected'
+}
+
+// ── Discovery ─────────────────────────────────────────────────────────────────
+
 const discovering = ref(false)
 
 async function onDiscover() {
@@ -53,6 +74,24 @@ async function onDiscover() {
   }
 }
 
+// ── Control/sensor accessors for the new devices[] shape ─────────────────────
+
+// Controls come from dev.controls[] (array with {id,name,type,default_state,reported_state,accepted_state,...})
+function getControls(dev) {
+  return (dev.controls ?? [])
+    .map(ctrl => ({
+      name:         ctrl.name,
+      type:         ctrl.type ?? '—',
+      defaultState: ctrl.default_state ?? '—',
+      liveState:    ctrl.reported_state ?? ctrl.accepted_state ?? '—',
+    }))
+    .sort((a, b) => {
+      const byType = (a.type ?? '').localeCompare(b.type ?? '')
+      return byType !== 0 ? byType : a.name.localeCompare(b.name)
+    })
+}
+
+// Category display metadata (keyed by sensor.type from the server)
 const CATEGORY_LABELS = {
   thermocouple:        'Thermocouple',
   pressure_transducer: 'Pressure Transducer',
@@ -61,7 +100,6 @@ const CATEGORY_LABELS = {
   resistance_sensor:   'Resistance Sensor',
 }
 
-// Defines display order for sensor categories
 const CATEGORY_ORDER = {
   pressure_transducer: 0,
   thermocouple:        1,
@@ -70,33 +108,19 @@ const CATEGORY_ORDER = {
   resistance_sensor:   4,
 }
 
-function getControls(deviceConfig) {
-  return Object.entries(deviceConfig.controls ?? {})
-    .map(([name, cfg]) => ({
-      name,
-      type:         cfg.type ?? '—',
-      defaultState: cfg.default_state ?? '—',
+// Sensors come from dev.sensors[] (array with {id,name,type,unit})
+function getSensors(dev) {
+  return (dev.sensors ?? [])
+    .map(s => ({
+      name:  s.name,
+      type:  CATEGORY_LABELS[s.sensor_type ?? s.type] ?? s.sensor_type ?? s.type ?? '—',
+      unit:  s.unit ?? '',
+      order: CATEGORY_ORDER[s.sensor_type ?? s.type] ?? 99,
     }))
     .sort((a, b) => {
-      const byType = (a.type ?? '').localeCompare(b.type ?? '')
-      return byType !== 0 ? byType : a.name.localeCompare(b.name)
+      const byCategory = a.order - b.order
+      return byCategory !== 0 ? byCategory : a.name.localeCompare(b.name)
     })
-}
-
-function getSensors(deviceConfig) {
-  const result = []
-  for (const [category, items] of Object.entries(deviceConfig.sensor_info ?? {})) {
-    if (typeof items !== 'object' || Array.isArray(items)) continue
-    const order = CATEGORY_ORDER[category] ?? 99
-    for (const name of Object.keys(items)) {
-      result.push({ name, type: CATEGORY_LABELS[category] ?? category, order })
-    }
-  }
-  result.sort((a, b) => {
-    const byCategory = a.order - b.order
-    return byCategory !== 0 ? byCategory : a.name.localeCompare(b.name)
-  })
-  return result
 }
 </script>
 
@@ -104,8 +128,8 @@ function getSensors(deviceConfig) {
   <div id="device-summary">
     <div class="summary-header">
       <span class="summary-title">Connected Devices</span>
-      <span v-if="serverConfig" class="device-count-badge">
-        {{ serverConfig.count }} device{{ serverConfig.count !== 1 ? 's' : '' }}
+      <span class="device-count-badge">
+        {{ devices.length }} device{{ devices.length !== 1 ? 's' : '' }}
       </span>
       <button class="discover-btn" :disabled="discovering" @click="onDiscover">
         <i class="pi" :class="discovering ? 'pi-spin pi-spinner' : 'pi-refresh'" />
@@ -113,133 +137,145 @@ function getSensors(deviceConfig) {
       </button>
     </div>
 
-    <div v-if="!serverConfig" class="no-connection">
+    <div v-if="devices.length === 0" class="no-connection">
       <i class="pi pi-server" style="font-size: 28px; margin-bottom: 10px;" />
-      <p>No server connected.</p>
-      <p class="hint">Configure a server IP in settings to see device information.</p>
+      <p>No devices connected.</p>
+      <p class="hint">Configure a server IP in settings, or click Discover to scan the network.</p>
     </div>
 
     <div v-else>
-    <div class="device-list">
-      <div
-        v-for="(config, deviceKey) in serverConfig.configs"
-        :key="deviceKey"
-        class="device-card"
-      >
-        <!-- Device banner -->
-        <div class="device-banner">
-          <span class="device-name">{{ config.device_name ?? deviceKey }}</span>
-          <span class="device-type-badge">{{ config.device_type ?? 'Device' }}</span>
-        </div>
-
-        <!-- Controls + Sensors side by side -->
-        <div class="device-body">
-
-          <!-- Controls table -->
-          <div class="device-section">
-            <div class="section-header">
-              Controls
-              <span class="count-badge">{{ getControls(config).length }}</span>
-            </div>
-            <p v-if="getControls(config).length === 0" class="empty-msg">No controls configured</p>
-            <table v-else class="data-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Type</th>
-                  <th>Default</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="ctrl in getControls(config)" :key="ctrl.name">
-                  <td class="name-cell">{{ ctrl.name }}</td>
-                  <td>{{ ctrl.type }}</td>
-                  <td>
-                    <span
-                      class="state-badge"
-                      :class="ctrl.defaultState === 'CLOSED' ? 'state-closed' : 'state-open'"
-                    >{{ ctrl.defaultState }}</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+      <div class="device-list">
+        <div
+          v-for="dev in devices"
+          :key="dev.name"
+          class="device-card"
+          :class="{ 'device-disconnected': !dev.connected }"
+        >
+          <!-- Device banner with heartbeat LED -->
+          <div class="device-banner">
+            <span class="hb-dot" :class="heartbeatClass(dev)" :title="heartbeatTitle(dev)" />
+            <span class="device-name">{{ dev.name }}</span>
+            <span class="device-type-badge">{{ dev.device_type ?? 'Device' }}</span>
+            <span class="device-addr">{{ dev.address }}</span>
           </div>
 
-          <!-- Sensors table -->
-          <div class="device-section">
-            <div class="section-header">
-              Sensors
-              <span class="count-badge">{{ getSensors(config).length }}</span>
-            </div>
-            <p v-if="getSensors(config).length === 0" class="empty-msg">No sensors configured</p>
-            <table v-else class="data-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Type</th>
-                  <th class="reading-col">Reading</th>
-                  <th class="unit-col">Unit</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="sensor in getSensors(config)" :key="sensor.name">
-                  <td class="name-cell">{{ sensor.name }}</td>
-                  <td>{{ sensor.type }}</td>
-                  <td class="reading-val" :class="{ 'reading-live': getLiveReading(sensor.name).value !== '—' }">
-                    {{ getLiveReading(sensor.name).value }}
-                  </td>
-                  <td class="unit-val">{{ getLiveReading(sensor.name).unit }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+          <!-- Controls + Sensors side by side -->
+          <div class="device-body">
 
+            <!-- Controls table -->
+            <div class="device-section">
+              <div class="section-header">
+                Controls
+                <span class="count-badge">{{ getControls(dev).length }}</span>
+              </div>
+              <p v-if="getControls(dev).length === 0" class="empty-msg">No controls configured</p>
+              <table v-else class="data-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Default</th>
+                    <th>State</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="ctrl in getControls(dev)" :key="ctrl.name">
+                    <td class="name-cell">{{ ctrl.name }}</td>
+                    <td>{{ ctrl.type }}</td>
+                    <td>
+                      <span
+                        class="state-badge"
+                        :class="ctrl.defaultState === 'CLOSED' ? 'state-closed' : 'state-open'"
+                      >{{ ctrl.defaultState }}</span>
+                    </td>
+                    <td>
+                      <span
+                        v-if="ctrl.liveState !== '—'"
+                        class="state-badge"
+                        :class="ctrl.liveState === 'OPEN' ? 'state-open' : 'state-closed'"
+                      >{{ ctrl.liveState }}</span>
+                      <span v-else class="text-muted">—</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Sensors table -->
+            <div class="device-section">
+              <div class="section-header">
+                Sensors
+                <span class="count-badge">{{ getSensors(dev).length }}</span>
+              </div>
+              <p v-if="getSensors(dev).length === 0" class="empty-msg">No sensors configured</p>
+              <table v-else class="data-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th class="reading-col">Reading</th>
+                    <th class="unit-col">Unit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="sensor in getSensors(dev)" :key="sensor.name">
+                    <td class="name-cell">{{ sensor.name }}</td>
+                    <td>{{ sensor.type }}</td>
+                    <td class="reading-val" :class="{ 'reading-live': getLiveReading(sensor.name).value !== '—' }">
+                      {{ getLiveReading(sensor.name).value }}
+                    </td>
+                    <td class="unit-val">{{ getLiveReading(sensor.name).unit || sensor.unit }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+          </div>
         </div>
       </div>
-    </div>
 
-    <!-- ── Kasa Smart Plugs ── -->
-    <div class="kasa-section">
-      <div class="kasa-header">
-        <span class="summary-title">Smart Plugs</span>
-        <span class="device-count-badge">{{ kasaDevices.length }}</span>
+      <!-- ── Kasa Smart Plugs ── -->
+      <div class="kasa-section">
+        <div class="kasa-header">
+          <span class="summary-title">Smart Plugs</span>
+          <span class="device-count-badge">{{ kasaDevices.length }}</span>
+        </div>
+        <p v-if="kasaDevices.length === 0" class="empty-msg kasa-empty">
+          No smart plugs found. Click Discover to scan the network.
+        </p>
+        <table v-else class="data-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Model</th>
+              <th>Host</th>
+              <th>State</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="dev in kasaDevices" :key="dev.host" :class="{ 'row-disconnected': !dev.connected }">
+              <td class="name-cell">{{ dev.alias || dev.host }}</td>
+              <td class="mono">{{ dev.model }}</td>
+              <td class="mono">{{ dev.host }}</td>
+              <td>
+                <span class="power-indicator" :class="dev.active ? 'power-on' : 'power-off'">
+                  <span class="power-led" />
+                  {{ dev.active ? 'ON' : 'OFF' }}
+                </span>
+              </td>
+              <td>
+                <ToggleSwitch
+                  :modelValue="dev.active"
+                  :disabled="!dev.connected"
+                  @update:modelValue="setKasaState(dev.host, $event)"
+                  class="kasa-toggle"
+                />
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
-      <p v-if="kasaDevices.length === 0" class="empty-msg kasa-empty">
-        No smart plugs found. Click Discover to scan the network.
-      </p>
-      <table v-else class="data-table">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Model</th>
-            <th>Host</th>
-            <th>State</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="dev in kasaDevices" :key="dev.host">
-            <td class="name-cell">{{ dev.alias || dev.host }}</td>
-            <td class="mono">{{ dev.model }}</td>
-            <td class="mono">{{ dev.host }}</td>
-            <td>
-              <span class="power-indicator" :class="dev.active ? 'power-on' : 'power-off'">
-                <span class="power-led" />
-                {{ dev.active ? 'ON' : 'OFF' }}
-              </span>
-            </td>
-            <td>
-              <ToggleSwitch
-                :modelValue="dev.active"
-                @update:modelValue="setKasaState(dev.host, $event)"
-                class="kasa-toggle"
-              />
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
     </div>
   </div>
 </template>
@@ -312,15 +348,44 @@ function getSensors(deviceConfig) {
   overflow: hidden;
 }
 
+.device-disconnected {
+  opacity: 0.55;
+}
+
 /* ── Device banner ── */
 
 .device-banner {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   padding: 9px 14px;
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border-color);
+}
+
+/* ── Heartbeat LED ── */
+
+.hb-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 0.3s, box-shadow 0.3s;
+}
+
+.hb-ok {
+  background: #2ecc71;
+  box-shadow: 0 0 5px rgba(46, 204, 113, 0.7);
+}
+
+.hb-missed {
+  background: #f39c12;
+  box-shadow: 0 0 5px rgba(243, 156, 18, 0.7);
+}
+
+.hb-disconnected {
+  background: #555;
+  box-shadow: none;
 }
 
 .device-name {
@@ -329,6 +394,7 @@ function getSensors(deviceConfig) {
   color: var(--text-primary);
   letter-spacing: 0.5px;
   font-family: monospace;
+  flex: 1;
 }
 
 .device-type-badge {
@@ -341,6 +407,12 @@ function getSensors(deviceConfig) {
   padding: 2px 7px;
   text-transform: uppercase;
   letter-spacing: 0.3px;
+}
+
+.device-addr {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: monospace;
 }
 
 /* ── Device body: sections side by side ── */
@@ -421,6 +493,10 @@ function getSensors(deviceConfig) {
   border-bottom: none;
 }
 
+.row-disconnected {
+  opacity: 0.5;
+}
+
 .name-cell {
   font-weight: 600;
   font-family: monospace;
@@ -430,6 +506,10 @@ function getSensors(deviceConfig) {
 .mono {
   font-family: monospace;
   color: var(--text-secondary);
+}
+
+.text-muted {
+  color: var(--text-muted);
 }
 
 /* ── Sensor reading columns ── */
@@ -461,7 +541,7 @@ function getSensors(deviceConfig) {
   white-space: nowrap;
 }
 
-/* ── Default state badges ── */
+/* ── Default/live state badges ── */
 
 .state-badge {
   font-size: 9px;
