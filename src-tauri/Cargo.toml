@@ -27,3 +27,7 @@ tokio-tungstenite = { version = "0.29.0", default-features = false, features = [
 futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
 tokio = { version = "1.52.3", features = ["rt", "macros", "time", "net", "sync"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Match the WebKitGTK binding used by Tauri/Wry. Keep it Linux-only so the
+# native WebKit media configuration below cannot affect Windows or macOS.
+webkit2gtk = { version = "=2.0.1", features = ["v2_38"] }
