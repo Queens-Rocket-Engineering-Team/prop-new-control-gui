@@ -456,11 +456,76 @@ async fn save_downloaded_camera_recording(filename: String, data: Vec<u8>) -> Re
     Ok(path.to_string_lossy().to_string())
 }
 
+#[cfg(target_os = "linux")]
+fn linux_media_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("linux-media")
+        .on_webview_ready(|webview| configure_linux_webview_media(&webview))
+        .build()
+}
+
+#[cfg(target_os = "linux")]
+fn configure_linux_webview_media<R: tauri::Runtime>(webview: &tauri::Webview<R>) {
+    use webkit2gtk::{glib::prelude::ObjectExt, WebViewExt};
+
+    let label = webview.label().to_owned();
+    let callback_label = label.clone();
+    let result = webview.with_webview(move |platform_webview| {
+        let native_webview = platform_webview.inner();
+        let Some(settings) = native_webview.settings() else {
+            eprintln!("[WebKit] No settings object is available for webview '{callback_label}'");
+            return;
+        };
+
+        // WebKitGTK ships several media features disabled by default. Set the
+        // properties dynamically so this remains safe if a distro's WebKit is
+        // older and does not expose one of the newer settings.
+        const MEDIA_SETTINGS: [(&str, bool); 8] = [
+            ("enable-media", true),
+            ("enable-media-capabilities", true),
+            ("enable-media-stream", true),
+            ("enable-mediasource", true),
+            ("enable-webaudio", true),
+            ("enable-webrtc", true),
+            ("media-playback-allows-inline", true),
+            ("media-playback-requires-user-gesture", false),
+        ];
+
+        let mut webrtc_available = false;
+        for (property, enabled) in MEDIA_SETTINGS {
+            if settings.find_property(property).is_some() {
+                settings.set_property(property, enabled);
+                if property == "enable-webrtc" {
+                    webrtc_available = true;
+                }
+            } else {
+                eprintln!(
+                    "[WebKit] Setting '{property}' is unavailable for webview '{callback_label}'"
+                );
+            }
+        }
+
+        if webrtc_available {
+            println!("[WebKit] Enabled WebRTC and media playback for webview '{callback_label}'");
+        } else {
+            eprintln!(
+                "[WebKit] WebRTC is unavailable for webview '{callback_label}'; media playback settings were applied where supported"
+            );
+        }
+    });
+
+    if let Err(error) = result {
+        eprintln!("[WebKit] Failed to configure webview '{label}': {error}");
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+
+    #[cfg(target_os = "linux")]
+    let builder = builder.plugin(linux_media_plugin());
+
+    builder
         .setup(|app| {
             // Maximize the main window
             let main_win = app.get_webview_window("main").expect("main window");
