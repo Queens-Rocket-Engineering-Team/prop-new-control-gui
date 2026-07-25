@@ -118,7 +118,7 @@ function mergeDisplayPoint(info, sourcePoint, plotT) {
  */
 export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_DOWNSAMPLE_ALGORITHM)) {
   // ── Non-reactive internal store ────────────────────────────────────────────────
-  // _store[sensorName] = { value: number, unit: string, history: {t,v,sourceT}[], lastSourceT: number, lastDisplayBucket: number }
+  // _store[sensorName] = { value: number, unit: string, sensorType: string, history: {t,v,sourceT}[], lastSourceT: number, lastDisplayBucket: number }
   const _store = {}
   let _latestDisplayT = null
   const _statsStore = {
@@ -265,7 +265,7 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
 
         let info = _store[name]
         if (!info) {
-          info = { value: 0, unit: reading.unit ?? '', history: [], lastSourceT: -Infinity, lastDisplayBucket: -Infinity }
+          info = { value: 0, unit: reading.unit ?? '', sensorType: reading.sensor_type ?? '', history: [], lastSourceT: -Infinity, lastDisplayBucket: -Infinity }
           _store[name] = info
         }
 
@@ -284,6 +284,9 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
           info.unit  = reading.unit ?? info.unit
           info.lastSourceT = latestPoint.t
         }
+        // Group key (QLCP sensor group) — only present when the server sends it;
+        // useSensorGroups falls back to the device configs from /ws/state.
+        if (reading.sensor_type) info.sensorType = reading.sensor_type
         mergeDisplayPoint(info, latestPoint, receivedAt)
 
         _latestDisplayT = _latestDisplayT == null
@@ -314,6 +317,7 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
         snap[name] = {
           value: info.value,
           unit: info.unit,
+          sensorType: info.sensorType,
           history: info.history.slice(),
           windowStart,
           windowEnd: _latestDisplayT,

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <link rel="stylesheet" href="./src/main.css">
+    <meta charset="UTF-8" />
+    <title>Graph panel harness</title>
+    <!-- Copies of App.vue's scoped layout rules (scoped styles don't apply here) -->
+    <style>
+      .container { margin: 0; display: flex; flex-direction: column; height: 100vh; }
+      #grid-container { display: grid; gap: 0; flex: 1; min-height: 0; }
+      .swap-container {
+        background-color: var(--bg-primary);
+        border: var(--border-color) 2px solid;
+        border-radius: 0 10px 10px 0;
+        padding: 10px;
+        text-align: left;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/graph_harness.js"></script>
+  </body>
+</html>

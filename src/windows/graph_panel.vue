@@ -1,8 +1,9 @@
 <script setup>
-import { ref, reactive, inject, computed, onUnmounted } from 'vue'
+import { ref, reactive, inject, computed, watch, onMounted, onUnmounted } from 'vue'
 import UPlotChart from '../components/uplot_chart.vue'
 import { TELEMETRY_WINDOW_SEC } from '../composables/useTelemetryStream.js'
 import { CAPS } from '../lib/platform.js'
+import { useSensorGroups } from '../composables/useSensorGroups.js'
 
 const sensorData    = inject('sensorData',    ref({}))
 const devices       = inject('devices',       ref([]))
@@ -21,36 +22,183 @@ const telemetryStats = inject('telemetryStats', ref(null))
 
 const WINDOW_SEC = TELEMETRY_WINDOW_SEC  // rolling window displayed on every chart (seconds)
 
-// ── Type metadata (defines display order) ───────────────────────────────────
+// ── Stream groups (ordered; group key comes from each device's QLCP config) ──
 
-const TYPES = [
-  { key: 'PT',    label: 'Pressure',    color: '#3498db' },
-  { key: 'TC',    label: 'Temperature', color: '#e74c3c' },
-  { key: 'LC',    label: 'Load Cell',   color: '#2ecc71' },
-  { key: 'OTHER', label: 'Other',       color: '#9b59b6' },
-]
-
-const TYPE_MAP   = Object.fromEntries(TYPES.map((t) => [t.key, t]))
-const TYPE_ORDER = Object.fromEntries(TYPES.map((t, i) => [t.key, i]))
-
-function getTypeKey(name) {
-  const u = name.toUpperCase()
-  if (u.startsWith('PT')) return 'PT'
-  if (u.startsWith('TC')) return 'TC'
-  if (u.startsWith('LC')) return 'LC'
-  return 'OTHER'
-}
+const { groups } = useSensorGroups(sensorData, devices)
 
 // ── Filter state ─────────────────────────────────────────────────────────────
+//
+// Stored as *hidden* sets so streams that appear later (a device connecting
+// mid-test) default to visible.  A group and an individual stream can each be
+// hidden independently: a stream shows only when neither is hidden.
 
-const selectedTypes = ref(new Set(['PT', 'TC', 'LC', 'OTHER']))
+const STORAGE_KEY = 'qret-graph-stream-filter'
 
-function toggleType(key) {
-  const s = new Set(selectedTypes.value)
-  if (s.has(key)) { if (s.size > 1) s.delete(key) }
-  else s.add(key)
-  selectedTypes.value = s
+function loadHidden() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}')
+    return {
+      groups:  new Set(Array.isArray(raw.hiddenGroups)  ? raw.hiddenGroups  : []),
+      streams: new Set(Array.isArray(raw.hiddenStreams) ? raw.hiddenStreams : []),
+    }
+  } catch {
+    return { groups: new Set(), streams: new Set() }
+  }
 }
+
+const _persisted    = loadHidden()
+const hiddenGroups  = ref(_persisted.groups)
+const hiddenStreams = ref(_persisted.streams)
+
+watch([hiddenGroups, hiddenStreams], () => {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    hiddenGroups:  [...hiddenGroups.value],
+    hiddenStreams: [...hiddenStreams.value],
+  }))
+})
+
+function isVisible(name, groupKey) {
+  return !hiddenGroups.value.has(groupKey) && !hiddenStreams.value.has(name)
+}
+
+// 'all' | 'some' | 'none' — drives the group checkbox glyph
+function groupState(group) {
+  if (hiddenGroups.value.has(group.key)) return 'none'
+  const shown = group.streams.filter((s) => !hiddenStreams.value.has(s)).length
+  if (shown === 0)                    return 'none'
+  if (shown === group.streams.length) return 'all'
+  return 'some'
+}
+
+/**
+ * Show/hide an explicit set of streams within a group.  `names` may be a subset
+ * of the group (a single row, or only the streams matching the search box), so
+ * the group-level flag is expanded to per-stream flags first and collapsed back
+ * again once every stream in the group ends up hidden.
+ */
+function setVisibility(groupKey, names, visible) {
+  const full     = groups.value.find((g) => g.key === groupKey)
+  const allNames = full ? full.streams : names
+  const g = new Set(hiddenGroups.value)
+  const s = new Set(hiddenStreams.value)
+
+  if (g.has(groupKey)) {
+    g.delete(groupKey)
+    for (const n of allNames) s.add(n)
+  }
+
+  for (const n of names) {
+    if (visible) s.delete(n)
+    else         s.add(n)
+  }
+
+  if (allNames.length > 0 && allNames.every((n) => s.has(n))) {
+    g.add(groupKey)
+    for (const n of allNames) s.delete(n)
+  }
+
+  hiddenGroups.value  = g
+  hiddenStreams.value = s
+}
+
+function toggleGroup(group) {
+  setVisibility(group.key, group.streams, groupState(group) !== 'all')
+}
+
+function toggleStream(name, group) {
+  setVisibility(group.key, [name], !isVisible(name, group.key))
+}
+
+function showAll() {
+  hiddenGroups.value  = new Set()
+  hiddenStreams.value = new Set()
+}
+
+function hideAll() {
+  hiddenGroups.value  = new Set(groups.value.map((g) => g.key))
+  hiddenStreams.value = new Set()
+}
+
+const totalStreamCount = computed(() =>
+  groups.value.reduce((n, g) => n + g.streams.length, 0)
+)
+
+const visibleStreamCount = computed(() =>
+  groups.value.reduce(
+    (n, g) => n + g.streams.filter((s) => isVisible(s, g.key)).length,
+    0
+  )
+)
+
+// ── Chart tiling (height + column count) ─────────────────────────────────────
+//
+// Charts keep a fixed pixel height and the grid scrolls, so adding streams makes
+// the list longer instead of squashing every plot.  Larger sizes deliberately
+// overflow the panel — that's what forces the scroll.
+
+const HEIGHT_KEY  = 'qret-graph-chart-height'
+const COLUMNS_KEY = 'qret-graph-columns'
+
+const CHART_HEIGHTS = [
+  { label: 'S',  px: 160 },
+  { label: 'M',  px: 260 },
+  { label: 'L',  px: 380 },
+  { label: 'XL', px: 560 },
+]
+
+const COLUMN_OPTIONS = [1, 2, 3, 4]
+
+const DEFAULT_CHART_HEIGHT = 260
+const DEFAULT_COLUMNS      = 2
+
+function loadChartHeight() {
+  const stored = Number(localStorage.getItem(HEIGHT_KEY))
+  return CHART_HEIGHTS.some((h) => h.px === stored) ? stored : DEFAULT_CHART_HEIGHT
+}
+
+function loadColumns() {
+  const stored = Number(localStorage.getItem(COLUMNS_KEY))
+  return COLUMN_OPTIONS.includes(stored) ? stored : DEFAULT_COLUMNS
+}
+
+const chartHeight = ref(loadChartHeight())
+const columns     = ref(loadColumns())
+
+watch(chartHeight, (px) => localStorage.setItem(HEIGHT_KEY, String(px)))
+watch(columns,     (n)  => localStorage.setItem(COLUMNS_KEY, String(n)))
+
+// ── Stream picker dropdown ───────────────────────────────────────────────────
+
+const pickerOpen = ref(false)
+const pickerRoot = ref(null)
+const query      = ref('')
+
+const filteredGroups = computed(() => {
+  const q = query.value.trim().toLowerCase()
+  if (!q) return groups.value
+  return groups.value
+    .map((g) => ({ ...g, streams: g.streams.filter((s) => s.toLowerCase().includes(q)) }))
+    .filter((g) => g.streams.length > 0)
+})
+
+function onDocumentPointerDown(e) {
+  if (!pickerOpen.value) return
+  if (pickerRoot.value && !pickerRoot.value.contains(e.target)) pickerOpen.value = false
+}
+
+function onDocumentKeydown(e) {
+  if (e.key === 'Escape') pickerOpen.value = false
+}
+
+onMounted(() => {
+  document.addEventListener('mousedown', onDocumentPointerDown)
+  document.addEventListener('keydown', onDocumentKeydown)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('mousedown', onDocumentPointerDown)
+  document.removeEventListener('keydown', onDocumentKeydown)
+})
 
 function fmtHz(v) {
   return Number.isFinite(v) && v > 0 ? v.toFixed(1) : '--'
@@ -81,64 +229,61 @@ const telemetryRateWarn = computed(() => {
   return Boolean(stats?.updatedAt && stats.displayPointHzAvg > 36)
 })
 
-// ── Sensor list — grouped by type with spacers for odd-count groups ──────────
+// ── Sensor list — grouped with spacers to keep groups on whole rows ──────────
 //
-// Grid is 2 columns.  Each type group occupies complete rows: if a group has
-// an odd number of sensors the last cell in that group is a blank spacer so
-// the next type always starts at the left column.
+// Each group occupies complete rows: if a group does not fill its last row the
+// remaining cells are blank spacers, so the next group always starts at the
+// left column.
 
 const slots = computed(() => {
-  // 1. Group sensors by type, filter to selectedTypes
-  const groups = {}
-  for (const typeEntry of TYPES) groups[typeEntry.key] = []
+  const result = []
 
-  for (const [name, info] of Object.entries(sensorData.value)) {
-    const typeKey = getTypeKey(name)
-    if (!selectedTypes.value.has(typeKey)) continue
+  for (const group of groups.value) {
+    const items = []
 
-    const h = Array.isArray(info.history) ? info.history : []
-    const windowEnd = Number.isFinite(info.windowEnd)
-      ? info.windowEnd
-      : (h.length > 0 ? h[h.length - 1].t : 0)
-    const windowStart = Number.isFinite(info.windowStart)
-      ? info.windowStart
-      : windowEnd - WINDOW_SEC
-    const windowed = h.filter((p) => p.t >= windowStart && p.t <= windowEnd)
+    for (const name of group.streams) {
+      if (!isVisible(name, group.key)) continue
+      const info = sensorData.value[name]
+      if (!info) continue
 
-    // Points arrive already tared from the server — never subtract an offset here.
-    const color = TYPE_MAP[typeKey].color
-    const x = []
-    const y = []
-    for (const p of windowed) {
-      x.push(p.t - windowEnd)
-      y.push(p.v)
+      const h = Array.isArray(info.history) ? info.history : []
+      const windowEnd = Number.isFinite(info.windowEnd)
+        ? info.windowEnd
+        : (h.length > 0 ? h[h.length - 1].t : 0)
+      const windowStart = Number.isFinite(info.windowStart)
+        ? info.windowStart
+        : windowEnd - WINDOW_SEC
+      const windowed = h.filter((p) => p.t >= windowStart && p.t <= windowEnd)
+
+      // Points arrive already tared from the server — never subtract an offset
+      // here. `tared` only says whether an offset exists, for the button state.
+      const x = []
+      const y = []
+      for (const p of windowed) {
+        x.push(p.t - windowEnd)
+        y.push(p.v)
+      }
+
+      items.push({
+        name,
+        groupKey:   group.key,
+        groupLabel: group.label,
+        unit:     info.unit,
+        value:    info.value,
+        tared:    (tares.value[name] ?? 0) !== 0,
+        color:    group.color,
+        fill:     group.color + '18',
+        plotData: [x, y],
+      })
     }
 
-    groups[typeKey].push({
-      name,
-      typeKey,
-      unit:  info.unit,
-      value: info.value,
-      tared: (tares.value[name] ?? 0) !== 0,
-      color,
-      fill: color + '18',
-      plotData: [x, y],
-    })
-  }
-
-  // 2. Sort within each group alphabetically
-  for (const items of Object.values(groups)) {
-    items.sort((a, b) => a.name.localeCompare(b.name))
-  }
-
-  // 3. Build slot list in type order; pad odd-count groups with a spacer
-  const result = []
-  for (const { key } of TYPES) {
-    const items = groups[key]
-    if (!items || items.length === 0) continue
+    if (items.length === 0) continue
     result.push(...items)
-    if (items.length % 2 === 1) {
-      result.push({ spacer: true, key: `spacer-${key}` })
+
+    const cols = columns.value
+    const pad  = (cols - (items.length % cols)) % cols
+    for (let i = 0; i < pad; i += 1) {
+      result.push({ spacer: true, key: `spacer-${group.key}-${i}` })
     }
   }
 
@@ -249,21 +394,104 @@ function tareTitle(s) {
 </script>
 
 <template>
-  <div class="graph-panel">
-    <!-- ── Type filter chips ── -->
+  <div
+    class="graph-panel"
+    :style="{ '--chart-height': chartHeight + 'px', '--chart-columns': columns }"
+  >
+    <!-- ── Stream picker ── -->
     <div class="graph-toolbar">
-      <span class="toolbar-label">Filter:</span>
-      <button
-        v-for="t in TYPES"
-        :key="t.key"
-        class="type-chip"
-        :class="{ active: selectedTypes.has(t.key) }"
-        :style="selectedTypes.has(t.key) ? { '--chip-color': t.color } : {}"
-        @click="toggleType(t.key)"
-      >
-        <span class="chip-dot" :style="{ background: t.color }" />
-        {{ t.label }}
-      </button>
+      <span class="toolbar-label">Streams:</span>
+
+      <div ref="pickerRoot" class="stream-picker">
+        <button
+          class="picker-trigger"
+          :class="{ open: pickerOpen }"
+          @click="pickerOpen = !pickerOpen"
+        >
+          <i class="pi pi-sliders-h" />
+          <span>{{ visibleStreamCount }} / {{ totalStreamCount }}</span>
+          <i class="pi" :class="pickerOpen ? 'pi-chevron-up' : 'pi-chevron-down'" />
+        </button>
+
+        <div v-if="pickerOpen" class="picker-panel">
+          <div class="picker-head">
+            <input
+              v-model="query"
+              class="picker-search"
+              type="text"
+              placeholder="Search streams…"
+            />
+            <button class="picker-action" @click="showAll">All</button>
+            <button class="picker-action" @click="hideAll">None</button>
+          </div>
+
+          <div class="picker-body">
+            <p v-if="filteredGroups.length === 0" class="picker-empty">
+              {{ totalStreamCount === 0 ? 'No streams yet.' : 'No streams match.' }}
+            </p>
+
+            <div v-for="g in filteredGroups" :key="g.key" class="picker-group">
+              <button class="picker-row picker-group-row" @click="toggleGroup(g)">
+                <span
+                  class="picker-check"
+                  :class="`check-${groupState(g)}`"
+                  :style="{ '--check-color': g.color }"
+                >
+                  <i
+                    v-if="groupState(g) !== 'none'"
+                    class="pi"
+                    :class="groupState(g) === 'all' ? 'pi-check' : 'pi-minus'"
+                  />
+                </span>
+                <span class="chip-dot" :style="{ background: g.color }" />
+                <span class="picker-group-label">{{ g.label }}</span>
+                <span class="picker-count">{{ g.streams.length }}</span>
+              </button>
+
+              <button
+                v-for="name in g.streams"
+                :key="name"
+                class="picker-row picker-stream-row"
+                @click="toggleStream(name, g)"
+              >
+                <span
+                  class="picker-check"
+                  :class="isVisible(name, g.key) ? 'check-all' : 'check-none'"
+                  :style="{ '--check-color': g.color }"
+                >
+                  <i v-if="isVisible(name, g.key)" class="pi pi-check" />
+                </span>
+                <span class="picker-stream-name">{{ name }}</span>
+                <span class="picker-unit">{{ sensorData[name]?.unit }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <span class="toolbar-label seg-label">Height:</span>
+      <div class="seg-group">
+        <button
+          v-for="h in CHART_HEIGHTS"
+          :key="h.px"
+          class="seg-btn"
+          :class="{ active: chartHeight === h.px }"
+          :title="`${h.px}px tall charts`"
+          @click="chartHeight = h.px"
+        >{{ h.label }}</button>
+      </div>
+
+      <span class="toolbar-label seg-label">Cols:</span>
+      <div class="seg-group">
+        <button
+          v-for="n in COLUMN_OPTIONS"
+          :key="n"
+          class="seg-btn"
+          :class="{ active: columns === n }"
+          :title="`${n} chart${n > 1 ? 's' : ''} per row`"
+          @click="columns = n"
+        >{{ n }}</button>
+      </div>
 
       <!-- ── Centred frequency badge ── -->
       <div class="freq-badge" :class="{ 'freq-badge--active': testActive }">
@@ -289,7 +517,12 @@ function tareTitle(s) {
 
     <!-- ── Empty state ── -->
     <div v-if="slots.length === 0" class="no-data">
-      No sensor data yet — connect to a server and start a test.
+      <template v-if="totalStreamCount === 0">
+        No sensor data yet — connect to a server and start a test.
+      </template>
+      <template v-else>
+        All {{ totalStreamCount }} streams hidden — pick some in the Streams menu.
+      </template>
     </div>
 
     <!-- ── 2-column grid ── -->
@@ -301,7 +534,7 @@ function tareTitle(s) {
 
         <!-- Chart card -->
         <div v-else class="chart-card">
-          <div class="chart-header" :style="{ borderLeftColor: TYPE_MAP[s.typeKey].color }">
+          <div class="chart-header" :style="{ borderLeftColor: s.color }" :title="s.groupLabel">
             <span class="chart-name">{{ s.name }}</span>
             <span class="chart-value">
               {{ fmt(s.value) }}<span class="chart-unit"> {{ s.unit }}</span>
@@ -344,6 +577,10 @@ function tareTitle(s) {
   display: flex;
   flex-direction: column;
   height: 100%;
+  /* Guard: if the parent ever resolves to an auto height, height:100% collapses
+     to auto and .charts-grid would grow past the window instead of scrolling.
+     24px = .swap-container's padding (10px x2) + border (2px x2) in App.vue. */
+  max-height: calc(100vh - 24px);
   overflow: hidden;
   box-sizing: border-box;
 }
@@ -418,26 +655,250 @@ function tareTitle(s) {
   color: #3498db;
 }
 
-.type-chip {
+/* ── Tiling controls (chart height, column count) ── */
+
+.seg-label {
+  margin-left: 6px;
+}
+
+.seg-group {
+  display: flex;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.seg-btn {
+  min-width: 22px;
+  padding: 3px 7px;
+  border: none;
+  border-right: 1px solid var(--border-color);
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  font-weight: 700;
+  font-family: inherit;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.seg-btn:last-child {
+  border-right: none;
+}
+
+.seg-btn:hover {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.seg-btn.active {
+  background: var(--btn-primary-bg, #3498db);
+  color: #fff;
+}
+
+/* ── Stream picker dropdown ── */
+
+.stream-picker {
+  position: relative;
+}
+
+.picker-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.picker-trigger:hover,
+.picker-trigger.open {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border-color: var(--border-accent);
+}
+
+.picker-trigger .pi {
+  font-size: 0.6rem;
+}
+
+.picker-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  width: 260px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.picker-head {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
-  border-radius: 10px;
+  padding: 6px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.picker-search {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.72rem;
+  font-family: inherit;
+  outline: none;
+}
+
+.picker-search:focus {
+  border-color: var(--border-accent);
+}
+
+.picker-action {
+  padding: 3px 7px;
+  border-radius: 3px;
   border: 1px solid var(--border-color);
   background: var(--bg-surface);
   color: var(--text-muted);
-  font-size: 0.72rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  font-size: 0.65rem;
+  font-weight: 700;
   font-family: inherit;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
 }
 
-.type-chip.active {
-  background: color-mix(in srgb, var(--chip-color) 15%, transparent);
-  border-color: var(--chip-color);
+.picker-action:hover {
+  background: var(--bg-primary);
   color: var(--text-primary);
+}
+
+.picker-body {
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 4px 0 6px;
+}
+
+.picker-empty {
+  margin: 0;
+  padding: 10px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-style: italic;
+  text-align: center;
+}
+
+.picker-group + .picker-group {
+  border-top: 1px solid var(--border-color);
+  margin-top: 3px;
+  padding-top: 3px;
+}
+
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 8px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.72rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.picker-row:hover {
+  background: var(--bg-surface);
+}
+
+.picker-group-row {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.picker-group-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker-count {
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 0 5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.picker-stream-row {
+  padding-left: 22px;
+}
+
+.picker-stream-name {
+  flex: 1;
+  min-width: 0;
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker-unit {
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Checkbox */
+
+.picker-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  flex-shrink: 0;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.picker-check .pi {
+  font-size: 8px;
+  color: #fff;
+}
+
+.picker-check.check-all,
+.picker-check.check-some {
+  background: var(--check-color);
+  border-color: var(--check-color);
 }
 
 .chip-dot {
@@ -463,12 +924,17 @@ function tareTitle(s) {
 
 .charts-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(var(--chart-columns, 2), 1fr);
+  /* Rows are sized by their content (header + the fixed-height chart body) and
+     never stretched or shrunk to fit the viewport — the grid scrolls instead. */
+  grid-auto-rows: max-content;
+  align-content: start;
+  align-items: start;
   gap: 8px;
   padding: 8px;
   overflow-y: auto;
-  flex: 1;
-  align-content: start;
+  flex: 1 1 auto;
+  min-height: 0;        /* let the grid scroll instead of growing past the panel */
   box-sizing: border-box;
 }
 
@@ -619,7 +1085,8 @@ function tareTitle(s) {
 /* ── Chart canvas ── */
 
 .chart-body {
-  height: 110px;
+  height: var(--chart-height, 260px);
+  min-height: var(--chart-height, 260px);   /* never squashed by flex/grid sizing */
   flex-shrink: 0;
   position: relative;
   overflow: hidden;
