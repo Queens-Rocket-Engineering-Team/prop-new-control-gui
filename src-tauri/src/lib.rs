@@ -153,7 +153,7 @@ struct CsvRecorder {
     kasa_columns:   Vec<String>,
     write_count:    u32,
     /// Batches accumulated before the header is written
-    pending:        Vec<(f64, HashMap<String, f64>, HashMap<String, u8>, HashMap<String, u8>, HashMap<String, u8>)>,
+    pending:        Vec<(f64, String, HashMap<String, f64>, HashMap<String, u8>, HashMap<String, u8>, HashMap<String, u8>)>,
     header_written: bool,
 }
 
@@ -174,7 +174,7 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
     let mut seen_valves: BTreeSet<String> = BTreeSet::new();
     let mut seen_aux: BTreeSet<String> = BTreeSet::new();
     let mut seen_kasa: BTreeSet<String> = BTreeSet::new();
-    for (_, batch, valve_states, auxiliary_states, kasa_states) in &recorder.pending {
+    for (_, _, batch, valve_states, auxiliary_states, kasa_states) in &recorder.pending {
         seen.extend(batch.keys().cloned());
         seen_valves.extend(valve_states.keys().cloned());
         seen_aux.extend(auxiliary_states.keys().cloned());
@@ -227,15 +227,15 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
     let header_tail = header_parts.join(",");
 
     let header = if header_tail.is_empty() {
-        "device_timestamp\n".to_string()
+        "device_timestamp,source\n".to_string()
     } else {
-        format!("device_timestamp,{}\n", header_tail)
+        format!("device_timestamp,source,{}\n", header_tail)
     };
     recorder.writer.write_all(header.as_bytes())?;
 
     // Write all buffered rows — use std::mem::take to avoid borrow conflicts
     let pending = std::mem::take(&mut recorder.pending);
-    for (ts, batch, valve_states, auxiliary_states, kasa_states) in &pending {
+    for (ts, source, batch, valve_states, auxiliary_states, kasa_states) in &pending {
         let sensor_vals: Vec<String> = columns.iter()
             .map(|c| batch.get(c).map(|v| format!("{:.4}", v)).unwrap_or_default())
             .collect();
@@ -268,9 +268,9 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
         let row_tail = row_parts.join(",");
 
         let row = if row_tail.is_empty() {
-            format!("{:.4}\n", ts)
+            format!("{:.4},{}\n", ts, source)
         } else {
-            format!("{:.4},{}\n", ts, row_tail)
+            format!("{:.4},{},{}\n", ts, source, row_tail)
         };
 
         recorder.writer.write_all(row.as_bytes())?;
@@ -337,6 +337,7 @@ fn start_recording(mode: String, datetime: String) -> Result<String, String> {
 /// rows are written immediately and flushed every 10 writes.
 pub(crate) fn record_batch(
     timestamp: f64,
+    source: String,
     readings: HashMap<String, f64>,
     valve_states: HashMap<String, u8>,
     auxiliary_states: HashMap<String, u8>,
@@ -349,7 +350,7 @@ pub(crate) fn record_batch(
     };
 
     if !recorder.header_written {
-        recorder.pending.push((timestamp, readings, valve_states, auxiliary_states, kasa_states));
+        recorder.pending.push((timestamp, source, readings, valve_states, auxiliary_states, kasa_states));
 
         if recorder.pending.len() >= HEADER_BATCHES {
             flush_pending(recorder).map_err(|e| e.to_string())?;
@@ -389,9 +390,9 @@ pub(crate) fn record_batch(
     }
     let row_tail = row_parts.join(",");
     let row = if row_tail.is_empty() {
-        format!("{:.4}\n", timestamp)
+        format!("{:.4},{}\n", timestamp, source)
     } else {
-        format!("{:.4},{}\n", timestamp, row_tail)
+        format!("{:.4},{},{}\n", timestamp, source, row_tail)
     };
     recorder.writer.write_all(row.as_bytes()).map_err(|e| e.to_string())?;
 
