@@ -314,15 +314,14 @@ function isAuxWarning(controlName) {
 
 async function onValveToggle(drawioId, newOpenState) {
   if (!isValveEnabled(drawioId)) return
-  const controls   = getMatchingControls(drawioId)
-  const requested  = newOpenState ? 'OPEN' : 'CLOSED'
-  const commandArg = newOpenState ? 'OPEN'  : 'CLOSE'
+  const controls  = getMatchingControls(drawioId)
+  const requested = newOpenState ? 'OPEN' : 'CLOSED'
 
   for (const ctrl of controls) {
     pending[ctrl.name] = { requested }
     delete warning[ctrl.name]
     try {
-      await setControl(ctrl.name, commandArg)
+      await setControl(ctrl.name, requested)
       requestStatusSnapshot('control')
     } catch (err) {
       console.error(`[ControlPanel] CONTROL ${ctrl.name} failed:`, err)
@@ -335,14 +334,13 @@ async function onValveToggle(drawioId, newOpenState) {
 // ── Aux toggle ───────────────────────────────────────────────────────────────
 
 async function onAuxToggle(controlName, newEnergised) {
-  // Relay: energised=true → CLOSE command (CLOSED state); energised=false → OPEN
-  const commandArg = newEnergised ? 'CLOSE' : 'OPEN'
-  const expected   = newEnergised ? 'CLOSED' : 'OPEN'
+  // Relay: energised=true → CLOSED state; energised=false → OPEN
+  const expected = newEnergised ? 'CLOSED' : 'OPEN'
 
   pending[controlName] = { requested: expected }
   delete warning[controlName]
   try {
-    await setControl(controlName, commandArg)
+    await setControl(controlName, expected)
     requestStatusSnapshot('control')
   } catch (err) {
     console.error(`[ControlPanel] CONTROL ${controlName} failed:`, err)
