@@ -76,12 +76,19 @@ async function onDiscover() {
 
 // ── Control/sensor accessors for the new devices[] shape ─────────────────────
 
+// A control with no type or type BOOL uses OPEN/CLOSED states; anything else
+// (FLOAT32, INT32, etc.) is a variable numeric control.
+function isBoolControl(ctrl) {
+  return !ctrl.type || ctrl.type === 'BOOL' || ctrl.type === '—'
+}
+
 // Controls come from dev.controls[] (array with {id,name,type,default_state,reported_state,accepted_state,...})
 function getControls(dev) {
   return (dev.controls ?? [])
     .map(ctrl => ({
       name:         ctrl.name,
       type:         ctrl.type ?? '—',
+      unit:         ctrl.unit ?? '',
       defaultState: ctrl.default_state ?? '—',
       liveState:    ctrl.reported_state ?? ctrl.accepted_state ?? '—',
     }))
@@ -184,17 +191,23 @@ function getSensors(dev) {
                     <td>{{ ctrl.type }}</td>
                     <td>
                       <span
+                        v-if="isBoolControl(ctrl)"
                         class="state-badge"
                         :class="ctrl.defaultState === 'CLOSED' ? 'state-closed' : 'state-open'"
                       >{{ ctrl.defaultState }}</span>
+                      <span v-else class="mono">{{ ctrl.defaultState }}<span v-if="ctrl.unit" class="unit-val">{{ ' ' + ctrl.unit }}</span></span>
                     </td>
                     <td>
                       <span
-                        v-if="ctrl.liveState !== '—'"
+                        v-if="ctrl.liveState === '—'"
+                        class="text-muted"
+                      >—</span>
+                      <span
+                        v-else-if="isBoolControl(ctrl)"
                         class="state-badge"
                         :class="ctrl.liveState === 'OPEN' ? 'state-open' : 'state-closed'"
                       >{{ ctrl.liveState }}</span>
-                      <span v-else class="text-muted">—</span>
+                      <span v-else class="mono">{{ ctrl.liveState }}<span v-if="ctrl.unit" class="unit-val">{{ ' ' + ctrl.unit }}</span></span>
                     </td>
                   </tr>
                 </tbody>

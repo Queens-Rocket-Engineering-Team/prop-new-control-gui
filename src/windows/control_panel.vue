@@ -139,6 +139,8 @@ function getMatchingControls(drawioId) {
   const results = []
   let bestLen = 0
   for (const [normKey, ctrl] of normalizedControlLookup.value) {
+    // Variable (numeric) controls render in their own side panel, not as P&ID valve cards.
+    if (isVariableType(ctrl.type)) continue
     if (normKey.startsWith(norm)) {
       if (normKey.length > bestLen) bestLen = normKey.length
       results.push({ normKey, ctrl })
@@ -205,13 +207,28 @@ function getLiveValue(drawioId) {
   return v.toFixed(2)
 }
 
-// ── Auxiliary controls (non-AV server controls) ───────────────────────────────
+// ── Variable (non-BOOL) control detection ───────────────────────────────────
+// Controls with type FLOAT32/INT32/etc. carry a numeric value instead of an
+// OPEN/CLOSED state. Treat a missing type as BOOL for backwards compatibility.
+function isVariableType(type) {
+  return !!type && type !== 'BOOL'
+}
+
+// Server state values may come back as either the type that was sent or a
+// string echo (e.g. requested 42.5, reported_state "42.5"). Compare loosely.
+function statesMatch(a, b) {
+  if (a === b) return true
+  const na = Number(a), nb = Number(b)
+  return !Number.isNaN(na) && !Number.isNaN(nb) && na === nb
+}
+
+// ── Auxiliary controls (non-AV, BOOL server controls) ────────────────────────
 
 const auxiliaryControls = computed(() => {
   const result = []
   for (const dev of devices.value) {
     for (const ctrl of (dev.controls ?? [])) {
-      if (!normalizeId(ctrl.name).startsWith('av')) {
+      if (!normalizeId(ctrl.name).startsWith('av') && !isVariableType(ctrl.type)) {
         result.push({
           key:          ctrl.name,
           label:        toControlKey(ctrl.name),
@@ -229,6 +246,70 @@ function getAuxDisplayed(controlName) {
   if (!ctrl) return false
   const state = ctrl.reported_state ?? ctrl.accepted_state
   return state === 'CLOSED'
+}
+
+// ── Variable controls (numeric — isolated from relays/valves) ────────────────
+// Rendered as their own side-panel section, similar to Smart Plugs: a small
+// value box plus an edit icon that opens a popover for numeric input.
+
+const variableControls = computed(() => {
+  const result = []
+  for (const dev of devices.value) {
+    for (const ctrl of (dev.controls ?? [])) {
+      if (isVariableType(ctrl.type)) {
+        result.push({
+          key:          ctrl.name,
+          label:        toControlKey(ctrl.name),
+          type:         ctrl.type,
+          unit:         ctrl.unit ?? '',
+          defaultState: ctrl.default_state ?? '—',
+        })
+      }
+    }
+  }
+  return result
+})
+
+function getVariableValue(controlName) {
+  const ctrl = controlLookup.value.get(controlName)
+  if (!ctrl) return '—'
+  const state = ctrl.reported_state ?? ctrl.accepted_state
+  return state ?? '—'
+}
+
+// ── Variable control editor popover ──────────────────────────────────────────
+
+const openVariableEditor = ref(null)   // control name currently being edited, or null
+const variableInput      = ref('')
+
+function toggleVariableEditor(controlName) {
+  if (openVariableEditor.value === controlName) {
+    openVariableEditor.value = null
+    return
+  }
+  variableInput.value      = String(getVariableValue(controlName) ?? '')
+  openVariableEditor.value = controlName
+}
+
+function cancelVariableEditor() {
+  openVariableEditor.value = null
+}
+
+async function submitVariableControl(controlName) {
+  const num = Number(variableInput.value)
+  if (variableInput.value === '' || Number.isNaN(num)) return
+
+  openVariableEditor.value = null
+  pending[controlName] = { requested: num }
+  delete warning[controlName]
+  try {
+    await setControl(controlName, num)
+    requestStatusSnapshot('control')
+  } catch (err) {
+    console.error(`[ControlPanel] CONTROL ${controlName} failed:`, err)
+    delete pending[controlName]
+    warning[controlName] = { message: String(err), errorCode: null }
+  }
 }
 
 // ── Pending / NACK tracking ───────────────────────────────────────────────────
@@ -252,7 +333,7 @@ watch([devices, commandsById], () => {
       if (!p) continue
 
       const serverState = ctrl.reported_state ?? ctrl.accepted_state
-      if (serverState === p.requested) {
+      if (statesMatch(serverState, p.requested)) {
         _clearControl(ctrl.name)
         continue
       }
@@ -357,7 +438,7 @@ async function onAuxToggle(controlName, newEnergised) {
 
         <!-- ── Auxiliary controls panel (fixed top-left) ── -->
         <div
-          v-if="auxiliaryControls.length > 0 || kasaDevices.length > 0"
+          v-if="auxiliaryControls.length > 0 || variableControls.length > 0 || kasaDevices.length > 0"
           class="pid-overlay aux-panel"
         >
           <div class="aux-header">Aux Controls</div>
@@ -389,9 +470,72 @@ async function onAuxToggle(controlName, newEnergised) {
             />
           </div>
 
+          <!-- Variable (numeric) controls -->
+          <template v-if="variableControls.length > 0">
+            <div class="aux-section-sep" v-if="auxiliaryControls.length > 0" />
+            <div class="aux-section-label">Variable Controls</div>
+            <div
+              v-for="ctrl in variableControls"
+              :key="ctrl.key"
+              class="aux-row variable-row"
+            >
+              <span class="aux-label">{{ ctrl.label }}</span>
+              <span class="card-badge">{{ ctrl.defaultState }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
+              <span
+                class="state-indicator"
+                :class="{
+                  'relay-warning': isAuxWarning(ctrl.key),
+                  'relay-pending': isAuxPending(ctrl.key),
+                }"
+              >
+                <span class="state-led" />
+                <span v-if="isAuxWarning(ctrl.key)">WARN</span>
+                <span v-else-if="isAuxPending(ctrl.key)">PENDING…</span>
+                <span v-else>{{ getVariableValue(ctrl.key) }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
+              </span>
+              <button
+                class="variable-edit-btn"
+                :disabled="isAuxPending(ctrl.key)"
+                @click="toggleVariableEditor(ctrl.key)"
+                title="Set value"
+              >
+                <i class="pi pi-pencil" />
+              </button>
+
+              <!-- Numeric input popover -->
+              <div v-if="openVariableEditor === ctrl.key" class="variable-popover">
+                <div class="variable-popover-caret" />
+                <div class="variable-popover-row">
+                  <div class="variable-input-wrap">
+                    <input
+                      v-model="variableInput"
+                      type="number"
+                      step="any"
+                      class="variable-input"
+                      :class="{ 'has-unit': ctrl.unit }"
+                      autofocus
+                      @keydown.enter="submitVariableControl(ctrl.key)"
+                      @keydown.esc="cancelVariableEditor"
+                    />
+                    <span v-if="ctrl.unit" class="variable-input-unit">{{ ctrl.unit }}</span>
+                  </div>
+                  <button
+                    class="variable-confirm-btn"
+                    :disabled="variableInput === '' || Number.isNaN(Number(variableInput))"
+                    title="Confirm"
+                    @click="submitVariableControl(ctrl.key)"
+                  ><i class="pi pi-check" /></button>
+                  <button class="variable-cancel-btn" title="Cancel" @click="cancelVariableEditor">
+                    <i class="pi pi-times" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </template>
+
           <!-- Kasa Smart Plugs -->
           <template v-if="kasaDevices.length > 0">
-            <div class="aux-section-sep" v-if="auxiliaryControls.length > 0" />
+            <div class="aux-section-sep" v-if="auxiliaryControls.length > 0 || variableControls.length > 0" />
             <div class="aux-section-label">Smart Plugs</div>
             <div
               v-for="dev in kasaDevices"
@@ -849,6 +993,170 @@ async function onAuxToggle(controlName, newEnergised) {
   text-transform: uppercase;
   color: var(--text-muted);
   padding: 3px 8px 1px;
+}
+
+/* ── Variable (numeric) controls ── */
+
+.variable-row {
+  position: relative;
+}
+
+.aux-row .card-badge {
+  width: 38px;
+  flex: 0 0 auto;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aux-row .state-indicator {
+  width: 54px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.variable-unit {
+  margin-left: 2px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.variable-edit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 8px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.variable-edit-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+
+.variable-edit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.variable-popover {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 8px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  padding: 7px 8px;
+}
+
+.variable-popover-caret {
+  position: absolute;
+  top: -5px;
+  right: 14px;
+  width: 8px;
+  height: 8px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  border-left: 1px solid var(--border-color);
+  transform: rotate(45deg);
+}
+
+.variable-popover-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.variable-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.variable-input {
+  width: 70px;
+  font-size: 10px;
+  font-family: monospace;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 3px;
+  color: var(--text-primary);
+  padding: 3px 5px;
+}
+
+.variable-input.has-unit {
+  padding-right: 20px;
+}
+
+.variable-input:focus {
+  outline: none;
+  border-color: var(--input-focus-border);
+}
+
+.variable-input-unit {
+  position: absolute;
+  right: 6px;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.variable-confirm-btn,
+.variable-cancel-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  font-size: 9px;
+  border-radius: 3px;
+  padding: 0;
+  cursor: pointer;
+  border: 1px solid var(--border-color);
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.variable-confirm-btn {
+  background: #2ecc71;
+  border-color: #2ecc71;
+  color: #fff;
+}
+
+.variable-confirm-btn:hover:not(:disabled) {
+  background: #27ae60;
+}
+
+.variable-confirm-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.variable-cancel-btn {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.variable-cancel-btn:hover {
+  background: var(--bg-surface);
+  color: var(--text-primary);
 }
 
 /* ── E-STOP button ── */
