@@ -14,6 +14,7 @@ import { noteDeviceRegistered, noteDevicesPresent } from "./composables/useSwitc
 import { useServerApi, PREVIEW_STREAM_HZ } from "./composables/useServerApi.js";
 import { useStateStream } from "./composables/useStateStream.js";
 import { useTelemetryStream, normalizeDownsampleAlgorithm } from "./composables/useTelemetryStream.js";
+import { useFlightTrack } from "./composables/useFlightTrack.js";
 import { useLogStream } from "./composables/useLogStream.js";
 import "primeicons/primeicons.css";
 
@@ -64,6 +65,14 @@ const downsampleAlgorithm = ref(
   normalizeDownsampleAlgorithm(localStorage.getItem('qret-downsample-algorithm')),
 );
 provide('downsampleAlgorithm', downsampleAlgorithm);
+
+// Flight map: selected site (the manifest entry's `file` string, '' = none)
+// and the directory holding manifest.json + the .mbtiles files.
+const mapSite = ref(localStorage.getItem('qret-map-site') || '');
+provide('mapSite', mapSite);
+
+const mapsDir = ref(localStorage.getItem('qret-maps-dir') || '');
+provide('mapsDir', mapsDir);
 
 const {
   stopStream,
@@ -336,6 +345,11 @@ async function maybePrimeStream() {
   primeDelayMs = Math.min(primeDelayMs * 2, PRIME_MAX_DELAY_MS);
   scheduleNextPrime();
 }
+
+// Unpruned GPS trail for the flight panel (sensorData history only spans the
+// rolling telemetry window; the trail must span the whole flight).
+const flightTrack = useFlightTrack(sensorData, { testActive });
+provide('flightTrack', flightTrack);
 
 // ── Control state bits → Rust (used by the raw-telemetry CSV recorder) ───────
 // The raw /ws/telemetry/raw stream is consumed entirely in Rust and only
@@ -819,6 +833,16 @@ watch(downsampleAlgorithm, (algorithm) => {
   _settingsChannel.postMessage({ type: 'downsampleAlgorithm', value: algorithm });
 });
 
+watch(mapSite, (site) => {
+  localStorage.setItem('qret-map-site', site);
+  _settingsChannel.postMessage({ type: 'mapSite', value: site });
+});
+
+watch(mapsDir, (dir) => {
+  localStorage.setItem('qret-maps-dir', dir);
+  _settingsChannel.postMessage({ type: 'mapsDir', value: dir });
+});
+
 _settingsChannel.onmessage = (e) => {
   if (e.data.type === 'pidConfig')     pidConfig.value     = e.data.value;
   if (e.data.type === 'testFrequency') testFrequency.value = e.data.value;
@@ -827,7 +851,44 @@ _settingsChannel.onmessage = (e) => {
   if (e.data.type === 'downsampleAlgorithm') {
     downsampleAlgorithm.value = normalizeDownsampleAlgorithm(e.data.value);
   }
+  if (e.data.type === 'mapSite')       mapSite.value       = e.data.value;
+  if (e.data.type === 'mapsDir')       mapsDir.value       = e.data.value;
   // darkMode messages are handled by settings_modal.vue's own channel instance
+};
+
+// Keep the Rust tile server pointed at the selected site. Invokes are
+// idempotent, so multiple windows racing through this watcher is harmless
+// (same rationale as the test-state sync below).
+watch([mapsDir, mapSite], async ([dir, site]) => {
+  try {
+    if (dir) await invoke('set_maps_dir', { newDir: dir });
+    await invoke('set_tile_source', { file: site }); // '' clears the source
+  } catch (err) {
+    console.error('[App] tile source setup failed:', err);
+  }
+}, { immediate: true });
+
+// ── Test state sync across windows via BroadcastChannel ──────────────────────
+// Each window runs its own App.vue instance with its own testActive/testStartTime
+// refs. startTest()/stopTest() perform the actual backend calls (idempotent, so
+// harmless if triggered from more than one window); this channel just keeps every
+// window's Start/Stop Test button and timer in sync with whichever window acted.
+
+const _testChannel = new BroadcastChannel('qret-test-state');
+let _receivingTestBroadcast = false;
+
+watch([testActive, testStartTime], ([active, startTime]) => {
+  if (_receivingTestBroadcast) return;
+  _testChannel.postMessage({ active, startTime });
+});
+
+_testChannel.onmessage = (e) => {
+  const { active, startTime } = e.data;
+  if (testActive.value === active && testStartTime.value === startTime) return;
+  _receivingTestBroadcast = true;
+  testActive.value    = active;
+  testStartTime.value = startTime;
+  _receivingTestBroadcast = false;
 };
 
 // ── Settings ─────────────────────────────────────────────────────────────────
@@ -887,8 +948,9 @@ onUnmounted(() => {
         @resize="onNavResize"
       ></nav-bar>
 
-      <!-- KeepAlive preserves CameraPanel's WebRTC streams across SPA navigation -->
-      <KeepAlive include="CameraPanel">
+      <!-- KeepAlive preserves CameraPanel's WebRTC streams and FlightPanel's
+           map (WebGL context + viewport) across SPA navigation -->
+      <KeepAlive include="CameraPanel,FlightPanel">
         <component :is="window_content" class="swap-container"></component>
       </KeepAlive>
     </div>
@@ -902,11 +964,15 @@ onUnmounted(() => {
       :test-active="testActive"
       :server-session-active-connected="testActive && stateStatus === 'connected'"
       :local-recording-active="localRecordingActive"
+      :map-site="mapSite"
+      :maps-dir="mapsDir"
       @close="settingsOpen = false"
       @update-ip="get_ip"
       @update-pid-config="pidConfig = $event"
       @update-test-frequency="testFrequency = $event"
       @update-downsample-algorithm="downsampleAlgorithm = $event"
+      @update-map-site="mapSite = $event"
+      @update-maps-dir="mapsDir = $event"
     ></settings-modal>
 
     <about-modal

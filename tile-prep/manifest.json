@@ -1,0 +1,21 @@
+{
+  "sites": [
+    {
+      "name": "TestSite",
+      "file": "output/TestSite.mbtiles",
+      "bbox": [
+        -79.95,
+        43.25,
+        -79.9,
+        43.29
+      ],
+      "center": [
+        43.269999999999996,
+        -79.92500000000001
+      ],
+      "minzoom": 12,
+      "maxzoom": 14,
+      "fetched_at": "2026-07-25T18:05:03+00:00"
+    }
+  ]
+}

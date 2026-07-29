@@ -3,6 +3,7 @@ import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { CAPS } from "../lib/platform.js";
 import { useKeyBindings } from "../composables/useKeyBindings.js";
 import KeybindsModal from "./keybinds_modal.vue";
+import { invoke } from "@tauri-apps/api/core";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
 import { DEFAULT_DOWNSAMPLE_ALGORITHM } from '../composables/useTelemetryStream.js';
@@ -16,6 +17,8 @@ const props = defineProps({
   testActive:    { type: Boolean, default: false },
   serverSessionActiveConnected: { type: Boolean, default: false },
   localRecordingActive: { type: Boolean, default: false },
+  mapSite:       { type: String,  default: '' },
+  mapsDir:       { type: String,  default: '' },
 });
 
 const emit = defineEmits([
@@ -24,6 +27,8 @@ const emit = defineEmits([
   "update-pid-config",
   "update-test-frequency",
   "update-downsample-algorithm",
+  "update-map-site",
+  "update-maps-dir",
 ]);
 
 const ipMode = ref("none");
@@ -31,6 +36,9 @@ const customIp = ref("");
 const localPidConfig = ref("rocket-launch");
 const localTestFreq = ref(190);
 const localDownsample = ref(DEFAULT_DOWNSAMPLE_ALGORITHM);
+const localMapSite = ref("");
+const localMapsDir = ref("");
+const mapSites = ref([]);
 const overlayRef = ref(null);
 const serverIpLocked = computed(
   () => props.serverSessionActiveConnected || props.localRecordingActive,
@@ -42,6 +50,19 @@ const canSelectServer = CAPS.serverSelection;
 // which re-rates the whole stand. Deliberately not the P&ID picker: that just
 // selects which diagram this client draws. See the template.
 const readOnly = !CAPS.commands;
+
+const _isTauri = '__TAURI_INTERNALS__' in window;
+
+async function refreshMapSites() {
+  if (!_isTauri) return;
+  try {
+    const manifest = await invoke("list_map_sites");
+    mapSites.value = manifest?.sites ?? [];
+  } catch (err) {
+    console.error("Failed to list map sites:", err);
+    mapSites.value = [];
+  }
+}
 
 // ── Dark mode — persisted in localStorage, synced across windows ──────────────
 // localStorage is shared across all Tauri windows (same WebView2 data dir),
@@ -94,9 +115,24 @@ watch(
       localPidConfig.value = props.pidConfig || "rocket-launch";
       localTestFreq.value  = props.testFrequency || 190;
       localDownsample.value = props.downsampleAlgorithm || DEFAULT_DOWNSAMPLE_ALGORITHM;
+      localMapSite.value   = props.mapSite || "";
+      localMapsDir.value   = props.mapsDir || "";
+      refreshMapSites();
     }
   }
 );
+
+watch(localMapSite, (site) => {
+  if (site !== props.mapSite) emit("update-map-site", site);
+});
+
+function applyMapsDir() {
+  const dir = localMapsDir.value.trim();
+  if (dir === props.mapsDir) return;
+  emit("update-maps-dir", dir);
+  // Re-list sites once App.vue has pushed the new dir to the backend.
+  setTimeout(refreshMapSites, 300);
+}
 
 watch(localPidConfig, (cfg) => {
   emit("update-pid-config", cfg);
@@ -268,6 +304,32 @@ const boundCount = computed(() => Object.keys(bindings.value).length);
           </label>
           <span v-if="serverIpLocked" class="freq-locked-label">
             locked while a server session or laptop recording is active
+          </span>
+        </div>
+
+        <div class="setting-group">
+          <span class="setting-group-label">Flight Map</span>
+          <input
+            type="text"
+            v-model="localMapsDir"
+            class="ip-text-input"
+            placeholder="Maps directory (contains manifest.json)"
+            @blur="applyMapsDir"
+            @keyup.enter="applyMapsDir"
+          />
+          <div class="option-row">
+            <RadioButton v-model="localMapSite" value="" inputId="site-none" />
+            <label for="site-none">None</label>
+          </div>
+          <div v-for="site in mapSites" :key="site.name" class="option-row">
+            <RadioButton v-model="localMapSite" :value="site.file" :inputId="'site-' + site.name" />
+            <label :for="'site-' + site.name">
+              {{ site.name }}
+              <span class="site-zoom-hint">z{{ site.minzoom }}–{{ site.maxzoom }}</span>
+            </label>
+          </div>
+          <span v-if="mapSites.length === 0" class="no-sites-hint">
+            No sites found — run tile-prep/fetch_tiles.py and set the maps directory above.
           </span>
         </div>
       </div>
@@ -556,6 +618,18 @@ label.option-row:hover {
 .binding-open-btn .pi {
   font-size: 0.72rem;
   color: var(--text-muted);
+}
+
+.site-zoom-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+.no-sites-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 .option-row :deep(.p-radiobutton) {

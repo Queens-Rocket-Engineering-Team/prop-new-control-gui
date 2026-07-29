@@ -15,6 +15,8 @@ use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::AsyncWriteExt;
 
+mod map_download;
+mod maps;
 mod telemetry_raw;
 
 static IP_ADDRESS: Mutex<String> = Mutex::new(String::new());
@@ -806,6 +808,9 @@ pub fn run() {
     let builder = builder.plugin(linux_media_plugin());
 
     builder
+        .register_asynchronous_uri_scheme_protocol("tiles", |_ctx, request, responder| {
+            maps::handle_tiles_protocol(request, responder)
+        })
         .setup(|app| {
             // Maximize the main window
             let main_win = app.get_webview_window("main").expect("main window");
@@ -856,6 +861,13 @@ pub fn run() {
             telemetry_raw::update_control_states,
             download_session_zip,
             open_sessions_dir,
+            maps::fetch_maps_dir,
+            maps::set_maps_dir,
+            maps::list_map_sites,
+            maps::set_tile_source,
+            maps::get_tile_meta,
+            map_download::download_map_tiles,
+            map_download::cancel_map_download,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
