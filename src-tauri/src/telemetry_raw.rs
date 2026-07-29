@@ -22,6 +22,8 @@ use tokio_tungstenite::tungstenite::Message;
 struct RawBatchMsg {
     #[serde(rename = "type")]
     msg_type: String,
+    #[serde(rename= "device_name")]
+    source: String,
     timestamp_s: f64,
     readings: Vec<RawReading>,
 }
@@ -137,5 +139,5 @@ fn handle_message(text: &str) {
     }
 
     let (valve_states, auxiliary_states, kasa_states) = control_states_snapshot();
-    let _ = crate::record_batch(msg.timestamp_s, readings, valve_states, auxiliary_states, kasa_states);
+    let _ = crate::record_batch(msg.timestamp_s, msg.source, readings, valve_states, auxiliary_states, kasa_states);
 }
