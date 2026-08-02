@@ -204,13 +204,16 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
         let sensor_vals: Vec<String> = columns.iter()
             .map(|c| batch.get(c).map(|v| format!("{:.4}", v)).unwrap_or_default())
             .collect();
+        // A control absent from the map has no device-confirmed state for this
+        // row (actuating, faulted, or never reported) — write an empty cell like
+        // the sensor columns do.  Defaulting to 0 would log it as CLOSED.
         let valve_vals: Vec<String> = valve_columns
             .iter()
-            .map(|c| valve_states.get(c).copied().unwrap_or(0).to_string())
+            .map(|c| valve_states.get(c).map(|v| v.to_string()).unwrap_or_default())
             .collect();
         let auxiliary_vals: Vec<String> = auxiliary_columns
             .iter()
-            .map(|c| auxiliary_states.get(c).copied().unwrap_or(0).to_string())
+            .map(|c| auxiliary_states.get(c).map(|v| v.to_string()).unwrap_or_default())
             .collect();
         let kasa_vals: Vec<String> = kasa_columns
             .iter()
@@ -340,13 +343,14 @@ pub(crate) fn record_batch(
     let sensor_values: Vec<String> = recorder.columns.iter()
         .map(|col| readings.get(col).map(|v| format!("{:.4}", v)).unwrap_or_default())
         .collect();
+    // Empty cell when the control has no device-confirmed state — see flush_pending().
     let valve_values: Vec<String> = recorder.valve_columns
         .iter()
-        .map(|col| valve_states.get(col).copied().unwrap_or(0).to_string())
+        .map(|col| valve_states.get(col).map(|v| v.to_string()).unwrap_or_default())
         .collect();
     let auxiliary_values: Vec<String> = recorder.auxiliary_columns
         .iter()
-        .map(|col| auxiliary_states.get(col).copied().unwrap_or(0).to_string())
+        .map(|col| auxiliary_states.get(col).map(|v| v.to_string()).unwrap_or_default())
         .collect();
     let kasa_values: Vec<String> = recorder.kasa_columns
         .iter()

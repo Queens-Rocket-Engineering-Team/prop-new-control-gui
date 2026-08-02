@@ -226,10 +226,12 @@ export function useStateStream(serverIp, { onDeviceRegistered } = {}) {
 
     for (const key of [
       'reported_state',
+      'reported_status',
       'reported_timestamp',
       'accepted_state',
       'accepted_timestamp',
       'pending_command_id',
+      'settled',
     ]) {
       if (_hasOwn(msg, key)) {
         ctrl[key] = msg[key]
@@ -406,6 +408,13 @@ export function useStateStream(serverIp, { onDeviceRegistered } = {}) {
         break
       }
       case 'control.accepted': {
+        _applyControlDelta(msg)
+        break
+      }
+      // Fired when a control's reported_status flips to 'error'. Carries the same
+      // control payload as control.updated — merged into the store the same way,
+      // so the error surfaces through ctrl.reported_status.
+      case 'control.error': {
         _applyControlDelta(msg)
         break
       }

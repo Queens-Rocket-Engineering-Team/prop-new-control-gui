@@ -359,12 +359,30 @@ provide('flightTrack', flightTrack);
 
 function _normalizeId(id) { return id.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() }
 
+// Only log states the device has actually confirmed. The server's
+// reported_status tells us which those are:
+//   'confirmed' — reported_state is the device's real current state → log it.
+//   'pending'   — reported_state is the target being actuated toward, not the
+//                 actual state → unknown, don't log.
+//   'error'     — device faulted; reported_state is a stale last-known-good
+//                 value → unknown, don't log.
+//   null        — no STATUS report ever received; accepted_state is only what
+//                 the server accepted, never device-confirmed → unknown.
+// Controls omitted here are written as an empty cell by the Rust recorder, not
+// as 0 — see flush_pending()/record_batch() in src-tauri/src/lib.rs.
+// A control with no reported_status field at all predates this server contract;
+// fall back to the old behaviour so an older server still records something.
+function isConfirmedState(ctrl) {
+  return ctrl.reported_status === undefined || ctrl.reported_status === 'confirmed';
+}
+
 function pushControlStates() {
   if (!CAPS.recording) return;   // no Rust-side CSV recorder to feed
   const valveStateBits     = {};
   const auxiliaryStateBits = {};
   for (const dev of devices.value) {
     for (const c of (dev.controls ?? [])) {
+      if (!isConfirmedState(c)) continue;
       const st = c.reported_state ?? c.accepted_state;
       if (!st) continue;
       if (_normalizeId(c.name).startsWith('av')) {

@@ -332,6 +332,24 @@ async function submitVariableControl(controlName) {
   }
 }
 
+// ── Server-reported control status ───────────────────────────────────────────
+// The server publishes two fields per control:
+//   settled         — false while a command is awaiting ACK *or* the device's
+//                     last STATUS report was 'pending' (still actuating).
+//   reported_status — 'confirmed' | 'pending' | 'error' | null (null = no STATUS
+//                     report ever received).
+// While status is 'pending', reported_state is the target being moved toward,
+// not the device's actual state; while it's 'error', reported_state is the last
+// known-good value and must not be shown as current truth.
+
+function isCtrlSettling(ctrl) {
+  return ctrl?.settled === false
+}
+
+function isCtrlErrored(ctrl) {
+  return ctrl?.reported_status === 'error'
+}
+
 // ── Pending / NACK tracking ───────────────────────────────────────────────────
 // 'pending[name]' = { requested: 'OPEN'|'CLOSED' }
 // 'warning[name]' = { message: string, errorCode: string|null }
@@ -352,8 +370,12 @@ watch([devices, commandsById], () => {
       const p = pending[ctrl.name]
       if (!p) continue
 
+      // Only clear once the server says the control has settled. While
+      // reported_status is 'pending', reported_state already echoes the value we
+      // requested (it's the target, not the actual state) — clearing on a match
+      // alone would drop the pending indicator mid-actuation.
       const serverState = ctrl.reported_state ?? ctrl.accepted_state
-      if (statesMatch(serverState, p.requested)) {
+      if (!isCtrlSettling(ctrl) && statesMatch(serverState, p.requested)) {
         _clearControl(ctrl.name)
         continue
       }
@@ -380,7 +402,27 @@ watch([serverIp, pidConfig], () => {
   for (const key of Object.keys(warning)) delete warning[key]
 })
 
+// Pending covers both the local optimistic window (command issued, server hasn't
+// echoed anything yet) and the server's own `settled === false`.
 function isControlPending(drawioId) {
+  const ctrls = getMatchingControls(drawioId)
+  for (const ctrl of ctrls) {
+    if (pending[ctrl.name]) return true
+    if (isCtrlSettling(ctrl)) return true
+    if (ctrl.pending_command_id) {
+      const cmd = commandsById.value.get(ctrl.pending_command_id)
+      if (cmd?.state === 'sent') return true
+    }
+  }
+  return false
+}
+
+// Whether to lock the operator out of re-commanding. Deliberately narrower than
+// isControlPending: `settled === false` is server-owned with no client-side
+// escape, so if a device drops mid-actuation it would latch the toggle disabled
+// forever. Only the locally-tracked in-flight command — which self-clears on
+// NACK/timeout — blocks input; `settled` drives the indicator alone.
+function isControlLocked(drawioId) {
   const ctrls = getMatchingControls(drawioId)
   for (const ctrl of ctrls) {
     if (pending[ctrl.name]) return true
@@ -396,7 +438,23 @@ function isControlWarning(drawioId) {
   return getMatchingControls(drawioId).some(ctrl => !!warning[ctrl.name])
 }
 
+function isControlError(drawioId) {
+  return getMatchingControls(drawioId).some(isCtrlErrored)
+}
+
 function isAuxPending(controlName) {
+  if (pending[controlName]) return true
+  const ctrl = controlLookup.value.get(controlName)
+  if (isCtrlSettling(ctrl)) return true
+  if (ctrl?.pending_command_id) {
+    const cmd = commandsById.value.get(ctrl.pending_command_id)
+    if (cmd?.state === 'sent') return true
+  }
+  return false
+}
+
+// See isControlLocked — input lockout deliberately ignores `settled`.
+function isAuxLocked(controlName) {
   if (pending[controlName]) return true
   const ctrl = controlLookup.value.get(controlName)
   if (ctrl?.pending_command_id) {
@@ -408,6 +466,10 @@ function isAuxPending(controlName) {
 
 function isAuxWarning(controlName) {
   return !!warning[controlName]
+}
+
+function isAuxError(controlName) {
+  return isCtrlErrored(controlLookup.value.get(controlName))
 }
 
 // ── Valve toggle ─────────────────────────────────────────────────────────────
@@ -751,19 +813,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             <span
               class="state-indicator"
               :class="
-                isAuxWarning(ctrl.key) ? 'relay-warning' :
                 isAuxPending(ctrl.key) ? 'relay-pending' :
+                isAuxError(ctrl.key)   ? 'relay-error' :
+                isAuxWarning(ctrl.key) ? 'relay-warning' :
                 getAuxDisplayed(ctrl.key) ? 'relay-closed' : 'relay-open'
               "
             >
               <span class="state-led" />
               <span v-if="isAuxPending(ctrl.key)">PENDING…</span>
+              <span v-else-if="isAuxError(ctrl.key)">ERROR</span>
               <span v-else-if="isAuxWarning(ctrl.key)">WARN</span>
               <span v-else>{{ getAuxDisplayed(ctrl.key) ? 'CLOSED' : 'OPEN' }}</span>
             </span>
             <ToggleSwitch
               :modelValue="getAuxDisplayed(ctrl.key)"
-              :disabled="isAuxPending(ctrl.key) || readOnly"
+              :disabled="isAuxLocked(ctrl.key) || readOnly"
               @update:modelValue="onAuxToggle(ctrl.key, $event)"
               class="aux-toggle"
             />
@@ -783,18 +847,20 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               <span
                 class="state-indicator"
                 :class="{
-                  'relay-warning': isAuxWarning(ctrl.key),
                   'relay-pending': isAuxPending(ctrl.key),
+                  'relay-error':   isAuxError(ctrl.key)   && !isAuxPending(ctrl.key),
+                  'relay-warning': isAuxWarning(ctrl.key) && !isAuxError(ctrl.key) && !isAuxPending(ctrl.key),
                 }"
               >
                 <span class="state-led" />
-                <span v-if="isAuxWarning(ctrl.key)">WARN</span>
-                <span v-else-if="isAuxPending(ctrl.key)">PENDING…</span>
+                <span v-if="isAuxPending(ctrl.key)">PENDING…</span>
+                <span v-else-if="isAuxError(ctrl.key)">ERROR</span>
+                <span v-else-if="isAuxWarning(ctrl.key)">WARN</span>
                 <span v-else>{{ getVariableValue(ctrl.key) }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
               </span>
               <button
                 class="variable-edit-btn"
-                :disabled="isAuxPending(ctrl.key) || readOnly"
+                :disabled="isAuxLocked(ctrl.key) || readOnly"
                 @click="toggleVariableEditor(ctrl.key)"
                 :title="readOnly ? 'Controls are issued from launch control' : 'Set value'"
               >
@@ -872,18 +938,20 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               locked:  !isValveEnabled(id),
               pending: isControlPending(id),
               warning: isControlWarning(id),
+              error:   isControlError(id),
             }"
           >
             <div class="card-id">
               {{ id }}
               <span v-if="!isValveEnabled(id)" class="lock-badge">NO CTRL</span>
+              <span v-else-if="isControlError(id)" class="err-badge">ERR</span>
               <span v-else-if="isControlWarning(id)" class="warn-badge">WARN</span>
             </div>
             <div class="valve-card-body">
               <div class="valve-toggle-col">
                 <ToggleSwitch
                   :modelValue="getDisplayedOpen(id)"
-                  :disabled="!isValveEnabled(id) || isControlPending(id) || readOnly"
+                  :disabled="!isValveEnabled(id) || isControlLocked(id) || readOnly"
                   @update:modelValue="onValveToggle(id, $event)"
                 />
               </div>
@@ -897,13 +965,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                   <span
                     class="state-indicator"
                     :class="{
-                      open:          getDisplayedOpen(id) && !isControlPending(id) && !isControlWarning(id),
+                      open:          getDisplayedOpen(id) && !isControlPending(id) && !isControlWarning(id) && !isControlError(id),
                       'ctrl-pending': isControlPending(id),
-                      'ctrl-warning': isControlWarning(id),
+                      'ctrl-error':   isControlError(id) && !isControlPending(id),
+                      'ctrl-warning': isControlWarning(id) && !isControlError(id),
                     }"
                   >
                     <span class="state-led" />
                     <span v-if="isControlPending(id)">PENDING…</span>
+                    <span v-else-if="isControlError(id)">ERROR</span>
                     <span v-else-if="isControlWarning(id)">WARN</span>
                     <span v-else>{{ getDisplayedOpen(id) ? 'OPEN' : 'CLOSED' }}</span>
                   </span>
@@ -1168,8 +1238,29 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   box-shadow: 0 0 5px rgba(231, 76, 60, 0.4);
 }
 
+/* ── Error state — device reported a fault applying this control.
+   Distinct from .warning (a transient, self-clearing NACK/timeout): this
+   persists until the server clears reported_status, so it pulses to read as
+   "needs attention" rather than "still working". ── */
+
+.valve-card.error {
+  border-color: #ff2d20;
+  box-shadow: 0 0 6px rgba(255, 45, 32, 0.55);
+  animation: error-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes error-pulse {
+  0%, 100% { box-shadow: 0 0 4px  rgba(255, 45, 32, 0.35); }
+  50%      { box-shadow: 0 0 9px  rgba(255, 45, 32, 0.75); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .valve-card.error { animation: none; }
+}
+
 .lock-badge,
-.warn-badge {
+.warn-badge,
+.err-badge {
   font-size: 6px;
   font-weight: 600;
   letter-spacing: 0.2px;
@@ -1189,6 +1280,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   color: #e74c3c;
   background: rgba(231, 76, 60, 0.12);
   border: 1px solid #e74c3c;
+}
+
+/* Solid fill (vs the outlined warn badge) so error reads louder at a glance. */
+.err-badge {
+  color: #fff;
+  background: #ff2d20;
+  border: 1px solid #ff2d20;
+  font-weight: 700;
 }
 
 /* ── Valve card ── */
@@ -1263,6 +1362,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 /* Warning = red */
 .state-indicator.ctrl-warning { color: #e74c3c; }
+.state-indicator.ctrl-error   { color: #ff2d20; font-weight: 700; }
 
 .state-led {
   width: 5px;
@@ -1288,6 +1388,18 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   box-shadow: 0 0 4px rgba(231, 76, 60, 0.5);
 }
 
+.state-indicator.ctrl-error .state-led,
+.state-indicator.relay-error .state-led {
+  background: #ff2d20;
+  box-shadow: 0 0 5px rgba(255, 45, 32, 0.8);
+  animation: error-pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .state-indicator.ctrl-error .state-led,
+  .state-indicator.relay-error .state-led { animation: none; }
+}
+
 /* Relay state — closed = energised = green, open = de-energised = red */
 .state-indicator.relay-closed { color: #2ecc71; }
 .state-indicator.relay-closed .state-led {
@@ -1306,6 +1418,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   background: #f39c12;
   box-shadow: 0 0 4px rgba(243, 156, 18, 0.6);
 }
+
+.state-indicator.relay-error { color: #ff2d20; font-weight: 700; }
 
 .state-indicator.relay-warning { color: #e74c3c; }
 .state-indicator.relay-warning .state-led {
