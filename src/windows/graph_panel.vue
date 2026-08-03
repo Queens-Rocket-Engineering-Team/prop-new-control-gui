@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, inject, computed, watch, onMounted, onUnmounted } from 'vue'
 import UPlotChart from '../components/uplot_chart.vue'
-import { TELEMETRY_WINDOW_SEC } from '../composables/useTelemetryStream.js'
+import { TELEMETRY_WINDOW_SEC, TELEMETRY_WINDOW_OPTIONS } from '../composables/useTelemetryStream.js'
 import { CAPS } from '../lib/platform.js'
 import { useSensorGroups } from '../composables/useSensorGroups.js'
 
@@ -20,7 +20,9 @@ const testActive    = inject('testActive',    ref(false))
 const localRecordingActive = inject('localRecordingActive', ref(false))
 const telemetryStats = inject('telemetryStats', ref(null))
 
-const WINDOW_SEC = TELEMETRY_WINDOW_SEC  // rolling window displayed on every chart (seconds)
+// Rolling window displayed on every chart (seconds). Owned by App.vue because it
+// also controls stream retention; written here by the toolbar picker.
+const windowSec = inject('telemetryWindowSec', ref(TELEMETRY_WINDOW_SEC))
 
 // ── Stream groups (ordered; group key comes from each device's QLCP config) ──
 
@@ -252,7 +254,7 @@ const slots = computed(() => {
         : (h.length > 0 ? h[h.length - 1].t : 0)
       const windowStart = Number.isFinite(info.windowStart)
         ? info.windowStart
-        : windowEnd - WINDOW_SEC
+        : windowEnd - windowSec.value
       const windowed = h.filter((p) => p.t >= windowStart && p.t <= windowEnd)
 
       // Points arrive already tared from the server — never subtract an offset
@@ -493,6 +495,18 @@ function tareTitle(s) {
         >{{ n }}</button>
       </div>
 
+      <span class="toolbar-label seg-label">Window:</span>
+      <div class="seg-group">
+        <button
+          v-for="sec in TELEMETRY_WINDOW_OPTIONS"
+          :key="sec"
+          class="seg-btn"
+          :class="{ active: windowSec === sec }"
+          :title="`Show the last ${sec}s (widening fills in over time)`"
+          @click="windowSec = sec"
+        >{{ sec }}s</button>
+      </div>
+
       <!-- ── Centred frequency badge ── -->
       <div class="freq-badge" :class="{ 'freq-badge--active': testActive }">
         <span class="freq-badge-value">{{ testFrequency }}</span>
@@ -504,7 +518,6 @@ function tareTitle(s) {
         :class="{ 'telemetry-rate--warn': telemetryRateWarn }"
         :title="telemetryRateTitle"
       >{{ telemetryRateLabel }}</span>
-      <span class="window-label">{{ WINDOW_SEC }}s window</span>
     </div>
 
     <!-- Tare result / failure — server-side tares affect every connected GUI,
@@ -563,7 +576,7 @@ function tareTitle(s) {
           </div>
 
           <div class="chart-body">
-            <UPlotChart :data="s.plotData" :color="s.color" :fill="s.fill" :window-sec="WINDOW_SEC" />
+            <UPlotChart :data="s.plotData" :color="s.color" :fill="s.fill" :window-sec="windowSec" />
           </div>
         </div>
 
@@ -603,12 +616,6 @@ function tareTitle(s) {
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
-}
-
-.window-label {
-  font-size: 0.68rem;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
 }
 
 .telemetry-rate {

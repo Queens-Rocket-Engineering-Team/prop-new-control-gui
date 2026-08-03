@@ -2,6 +2,13 @@ import { ref, computed, watch } from 'vue'
 import { useReconnectingSocket } from './useReconnectingSocket.js'
 
 export const TELEMETRY_WINDOW_SEC = 30
+
+// Selectable rolling-window lengths (seconds).  History retention follows the
+// chosen value, so widening the window fills in over time rather than
+// retroactively — points older than the previous window were already pruned.
+// The minimum stays above STATS_WINDOW_SEC so the rate stats keep a usable span.
+export const TELEMETRY_WINDOW_OPTIONS = [10, 30, 60, 120]
+
 export const TELEMETRY_DISPLAY_HZ = 30
 const DISPLAY_SAMPLE_INTERVAL_SEC = 1 / TELEMETRY_DISPLAY_HZ
 const STATS_WINDOW_SEC = 5
@@ -107,6 +114,8 @@ function mergeDisplayPoint(info, sourcePoint, plotT) {
  *
  * @param {import('vue').Ref<string>} serverIp
  * @param {import('vue').Ref<string>} [downsampleAlgorithm]
+ * @param {import('vue').Ref<number>} [windowSec] rolling window to retain and
+ *   publish, in seconds; defaults to TELEMETRY_WINDOW_SEC when omitted.
  * @returns {{
  *   sensorData:      import('vue').Ref<Record<string,object>>,
  *   telemetryStats:  import('vue').Ref<Record<string,number>>,
@@ -116,9 +125,13 @@ function mergeDisplayPoint(info, sourcePoint, plotT) {
  *   msSinceLastTelemetry: () => number,
  * }}
  */
-export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_DOWNSAMPLE_ALGORITHM)) {
+export function useTelemetryStream(
+  serverIp,
+  downsampleAlgorithm = ref(DEFAULT_DOWNSAMPLE_ALGORITHM),
+  windowSec = ref(TELEMETRY_WINDOW_SEC),
+) {
   // ── Non-reactive internal store ────────────────────────────────────────────────
-  // _store[sensorName] = { value: number, unit: string, sensorType: string, history: {t,v,sourceT}[], lastSourceT: number, lastDisplayBucket: number }
+  // _store[sensorName] = { value: number, unit: string, sensorType: string, history: {t,v,sourceT}[], lastDisplayBucket: number }
   const _store = {}
   let _latestDisplayT = null
   const _statsStore = {
@@ -265,7 +278,7 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
 
         let info = _store[name]
         if (!info) {
-          info = { value: 0, unit: reading.unit ?? '', sensorType: reading.sensor_type ?? '', history: [], lastSourceT: -Infinity, lastDisplayBucket: -Infinity }
+          info = { value: 0, unit: reading.unit ?? '', sensorType: reading.sensor_type ?? '', history: [], lastDisplayBucket: -Infinity }
           _store[name] = info
         }
 
@@ -278,12 +291,13 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
           statsPoints.push(receivedAt)
         }
 
+        // Latest point of the newest batch, taken unconditionally: batches arrive
+        // ordered over one socket and are sorted above, so a monotonic-timestamp
+        // guard here only risks latching the readout forever if a device clock
+        // resets or a single spiked `t` arrives.  The charts never guarded this.
         const latestPoint = points[points.length - 1]
-        if (latestPoint.t >= info.lastSourceT) {
-          info.value = latestPoint.v
-          info.unit  = reading.unit ?? info.unit
-          info.lastSourceT = latestPoint.t
-        }
+        info.value = latestPoint.v
+        info.unit  = reading.unit ?? info.unit
         // Group key (QLCP sensor group) — only present when the server sends it;
         // useSensorGroups falls back to the device configs from /ws/state.
         if (reading.sensor_type) info.sensorType = reading.sensor_type
@@ -306,7 +320,10 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
         return
       }
 
-      const windowStart = _latestDisplayT - TELEMETRY_WINDOW_SEC
+      const span = Number.isFinite(windowSec.value) && windowSec.value > 0
+        ? windowSec.value
+        : TELEMETRY_WINDOW_SEC
+      const windowStart = _latestDisplayT - span
       for (const info of Object.values(_store)) {
         pruneHistory(info.history, windowStart)
       }

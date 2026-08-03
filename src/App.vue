@@ -13,7 +13,7 @@ import {
 import { noteDeviceRegistered, noteDevicesPresent } from "./composables/useSwitchSync.js";
 import { useServerApi, PREVIEW_STREAM_HZ } from "./composables/useServerApi.js";
 import { useStateStream } from "./composables/useStateStream.js";
-import { useTelemetryStream, normalizeDownsampleAlgorithm } from "./composables/useTelemetryStream.js";
+import { useTelemetryStream, normalizeDownsampleAlgorithm, TELEMETRY_WINDOW_SEC, TELEMETRY_WINDOW_OPTIONS } from "./composables/useTelemetryStream.js";
 import { useFlightTrack } from "./composables/useFlightTrack.js";
 import { useLogStream } from "./composables/useLogStream.js";
 import "primeicons/primeicons.css";
@@ -120,6 +120,79 @@ function startStatusRefresh() {
   }, STATUS_REFRESH_MS);
 }
 
+// ── Stream re-arm on device rejoin ───────────────────────────────────────────
+// STREAM is a broadcast command with no per-device targeting, so a device that
+// rejoins is never told to stream again and its charts stay blank until
+// something re-issues it (which is why a page refresh "fixed" it — the IP watch
+// below re-broadcasts). The idle-preview bootstrap only fires once per
+// connection, so it does not cover a device that joins mid-session; this does.
+//
+// STOP first, then STREAM: a bare STREAM at the already-active rate is a no-op
+// server-side (confirmed on hardware — re-arming without the STOP did nothing),
+// which is why every path that does restore the stream (startTest, stopTest, IP
+// change) stops it first. The cost is a brief gap for every device, so this is
+// deliberately only triggered by a rejoin, not polled.
+//
+// QLCP supports targeted streams — swap this for a per-device command, with no
+// STOP and no gap, if the server ever exposes one.
+
+const STREAM_PREVIEW_HZ = 30;
+const STREAM_REARM_DEBOUNCE_MS = 500;
+let streamRearmTimer = null;
+let streamRearmInFlight = false;
+
+// Derived rather than tracked in its own ref: the recording lifecycle below
+// owns every other setStream() call, so reading the rate back off that same
+// state is what keeps a re-arm from resurrecting a rate the lifecycle has since
+// moved on from. A server session or a laptop backup runs at the test
+// frequency; an otherwise-connected server sits at the idle preview rate.
+// (Referenced only from callbacks that run long after setup, so the forward
+// references to the lifecycle state declared below are safe.)
+//
+// 0 for a client that cannot command: re-arming issues STOP+STREAM, a broadcast
+// that would re-rate the whole stand — exactly what the view-only build must
+// never do. Gating here rather than at each call site covers every consumer of
+// the rate, including the silence watchdog.
+function currentStreamHz() {
+  if (!canCommand || !server_ip.value) return 0;
+  if (testActive.value || localRecordingActive.value) return testFrequency.value;
+  return STREAM_PREVIEW_HZ;
+}
+
+function cancelStreamRearm() {
+  if (streamRearmTimer === null) return;
+  clearTimeout(streamRearmTimer);
+  streamRearmTimer = null;
+}
+
+async function rearmStream(reason) {
+  const hz = currentStreamHz();
+  // Skip while a start/stop transition is in flight — it is already issuing its
+  // own STREAM, and racing it would leave the devices at the wrong rate.
+  if (hz <= 0 || streamRearmInFlight || lifecycleBusy.value) return;
+
+  streamRearmInFlight = true;
+  console.log(`[App] STREAM re-arm (${reason}) → STOP + ${hz} Hz`);
+  try {
+    await stopStream();
+    await setStream(hz);
+  } catch (err) {
+    console.error(`[App] STREAM re-arm (${reason}) failed:`, err);
+  } finally {
+    streamRearmInFlight = false;
+  }
+}
+
+// Debounced so several devices rejoining together produce one re-arm.
+function scheduleStreamRearm(reason) {
+  if (currentStreamHz() <= 0) return;
+  cancelStreamRearm();
+  streamRearmTimer = setTimeout(() => {
+    streamRearmTimer = null;
+    rearmStream(reason);
+  }, STREAM_REARM_DEBOUNCE_MS);
+}
+
 // ── State stream (/ws/state → devices, kasa, commands) ──────────────────────
 
 // A device that just joined has never been told to stream, so however far
@@ -131,6 +204,11 @@ function onDeviceRegistered(deviceName) {
   // switches are wherever they were left. The control panel prompts the
   // operator to reconcile the two — see useSwitchSync.js.
   noteDeviceRegistered(deviceName);
+  // STREAM is a broadcast with no per-device targeting, so a device that joins
+  // after the rate was set is never told to stream. No-ops in the view-only
+  // build via currentStreamHz(), which reports 0 for a client that cannot
+  // command — priming above is that build's one narrow exception.
+  scheduleStreamRearm('device registered');
 }
 
 const {
@@ -159,6 +237,13 @@ provide('commandsById', commandsById);
 provide('session',      session);
 provide('sessionWarning', sessionWarning);
 provide('stateStreamStatus', stateStatus);
+
+// A device that rejoined while the state socket was down arrives in the resync
+// snapshot rather than as a `device.registered` delta, so re-arm on reconnect
+// too. No-ops before a server IP is set, where the derived rate is still 0.
+watch(stateStatus, (status, previous) => {
+  if (status === 'connected' && previous !== 'connected') scheduleStreamRearm('state resync');
+});
 
 // ── Tare offsets ─────────────────────────────────────────────────────────────
 // { [sensorName]: offset } — owned by the server, mirrored here from /ws/state.
@@ -230,8 +315,22 @@ watch(
 
 // ── Telemetry streams (display→charts; raw→CSV is ingested on the Rust side) ─
 
+// Rolling window shown on the charts. Owned here rather than in the graph panel
+// because it also drives how much history the stream retains — the panel writes
+// to it through the provided ref.
+const TELEMETRY_WINDOW_KEY = 'qret-telemetry-window-sec';
+
+function loadTelemetryWindow() {
+  const stored = Number(localStorage.getItem(TELEMETRY_WINDOW_KEY));
+  return TELEMETRY_WINDOW_OPTIONS.includes(stored) ? stored : TELEMETRY_WINDOW_SEC;
+}
+
+const telemetryWindowSec = ref(loadTelemetryWindow());
+provide('telemetryWindowSec', telemetryWindowSec);
+watch(telemetryWindowSec, (sec) => localStorage.setItem(TELEMETRY_WINDOW_KEY, String(sec)));
+
 const { sensorData, telemetryStats, streamAlgorithm, clearSensorData, msSinceLastTelemetry } =
-  useTelemetryStream(server_ip, downsampleAlgorithm);
+  useTelemetryStream(server_ip, downsampleAlgorithm, telemetryWindowSec);
 provide('sensorData', sensorData);
 provide('telemetryStats', telemetryStats);
 provide('streamAlgorithm', streamAlgorithm);
@@ -781,6 +880,8 @@ provide('readOnly', !canCommand);
 watch(server_ip, async (ip) => {
   stopStatusRefresh();
   stopStreamPriming();
+  // A re-arm queued for the previous server would fire against the new one.
+  cancelStreamRearm();
 
   clearSensorData();
   clearLogs();
@@ -947,6 +1048,7 @@ onMounted(() => {
 onUnmounted(() => {
   stopStatusRefresh();
   stopStreamPriming();
+  cancelStreamRearm();
   _ipChannel.close();
   _settingsChannel.close();
   _localRecorderChannel.close();

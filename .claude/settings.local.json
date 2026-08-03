@@ -37,7 +37,13 @@
       "Bash(git add *)",
       "Bash(GIT_EDITOR=true git rebase --continue)",
       "PowerShell(cargo check *)",
-      "PowerShell(npm run *)"
+      "PowerShell(npm run *)",
+      "Bash(git submodule *)",
+      "Bash(git log *)",
+      "Bash(npx vite *)",
+      "Bash(awk *)",
+      "Bash(git add *)",
+      "Bash(GIT_EDITOR=true git rebase --continue)"
     ]
   }
 }
