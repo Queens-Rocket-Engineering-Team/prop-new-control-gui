@@ -239,6 +239,52 @@ export function useTelemetryStream(
   // Wall-clock time of the last display batch off the socket. 0 = none yet.
   let _lastMessageAtMs = 0
 
+  // ── Coalesced snapshot publishing ──────────────────────────────────────────────
+  // Incoming batches are applied to the non-reactive store immediately (cheap),
+  // but the reactive snapshot — which triggers the full chart re-render cascade —
+  // is published at most once per animation frame. Messages arriving faster than
+  // the frame rate collapse into a single render, so the socket always drains at
+  // network speed and backlog can never build up in the message queue.
+  let _publishScheduled = false
+
+  function publishSnapshot() {
+    if (_latestDisplayT == null) {
+      publishTelemetryStats()
+      return
+    }
+
+    const span = Number.isFinite(windowSec.value) && windowSec.value > 0
+      ? windowSec.value
+      : TELEMETRY_WINDOW_SEC
+    const windowStart = _latestDisplayT - span
+    for (const info of Object.values(_store)) {
+      pruneHistory(info.history, windowStart)
+    }
+
+    const snap = {}
+    for (const [name, info] of Object.entries(_store)) {
+      snap[name] = {
+        value: info.value,
+        unit: info.unit,
+        sensorType: info.sensorType,
+        history: info.history.slice(),
+        windowStart,
+        windowEnd: _latestDisplayT,
+      }
+    }
+    sensorData.value = snap
+    publishTelemetryStats()
+  }
+
+  function schedulePublish() {
+    if (_publishScheduled) return
+    _publishScheduled = true
+    requestAnimationFrame(() => {
+      _publishScheduled = false
+      publishSnapshot()
+    })
+  }
+
   // ── Display stream → sensorData ────────────────────────────────────────────────
   // Each message: { type: 'telemetry.display_batch', readings: [{ sensor_name, unit, sensor_type, points: [{t,v}] }] }
   // The server may include multiple points per reading; charts keep only the latest
@@ -256,8 +302,8 @@ export function useTelemetryStream(
       _lastMessageAtMs = Date.now()
 
       let msg = null
-      try { msg = JSON.parse(event.data) } catch { publishTelemetryStats(); return }
-      if (msg?.type !== 'telemetry.display_batch') { publishTelemetryStats(); return }
+      try { msg = JSON.parse(event.data) } catch { schedulePublish(); return }
+      if (msg?.type !== 'telemetry.display_batch') { schedulePublish(); return }
 
       const reportedAlgorithm = typeof msg.algorithm === 'string' ? msg.algorithm : null
       if (streamAlgorithm.value !== reportedAlgorithm) streamAlgorithm.value = reportedAlgorithm
@@ -315,33 +361,7 @@ export function useTelemetryStream(
         })
       }
 
-      if (_latestDisplayT == null) {
-        publishTelemetryStats()
-        return
-      }
-
-      const span = Number.isFinite(windowSec.value) && windowSec.value > 0
-        ? windowSec.value
-        : TELEMETRY_WINDOW_SEC
-      const windowStart = _latestDisplayT - span
-      for (const info of Object.values(_store)) {
-        pruneHistory(info.history, windowStart)
-      }
-
-      // Publish a snapshot once per batch (bucket-rate, not per sample — cheap)
-      const snap = {}
-      for (const [name, info] of Object.entries(_store)) {
-        snap[name] = {
-          value: info.value,
-          unit: info.unit,
-          sensorType: info.sensorType,
-          history: info.history.slice(),
-          windowStart,
-          windowEnd: _latestDisplayT,
-        }
-      }
-      sensorData.value = snap
-      publishTelemetryStats()
+      schedulePublish()
     },
   })
 
