@@ -6,6 +6,7 @@ import { MapboxOverlay } from "@deck.gl/mapbox";
 import { PathLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import Button from "primevue/button";
 import Checkbox from "primevue/checkbox";
+import ToggleSwitch from "primevue/toggleswitch";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri, tileUrlTemplate } from "../lib/tileSource.js";
@@ -32,9 +33,23 @@ const sensorData = inject("sensorData", ref({}));
 
 const { online, recheck } = useOnlineStatus();
 
+// Dry-run switch: pretend the network is gone even when it isn't, so the
+// offline behaviour can be rehearsed at a desk instead of discovered at the
+// pad. Everything that depends on connectivity reads onlineActive, not online,
+// so the simulation is faithful — live imagery and place names disappear and
+// the network-only actions grey out, exactly as they will in the field.
+const liveImagery = ref(localStorage.getItem("qret-live-imagery") !== "false");
+const onlineActive = computed(() => online.value && liveImagery.value);
+
 const mapEl = ref(null);
 const follow = ref(true);
-const threeD = ref(false);
+// The flight is always drawn in 3D — there is no reason to throw away the
+// altimeter reading. DEFAULT_PITCH is what the camera starts at and what
+// "Reset View" returns to; MAX_PITCH is raised from MapLibre's default 60 so
+// the camera can get closer to side-on, which matters because a rocket climbs
+// several times further than it drifts.
+const DEFAULT_PITCH = 55;
+const MAX_PITCH = 85;
 const labelsOn = ref(localStorage.getItem("qret-map-labels") !== "false");
 
 // Downloaded sites from manifest.json: [{name, file, bbox, minzoom, maxzoom}].
@@ -137,7 +152,7 @@ const siteSummary = computed(() => {
 });
 
 const hasBasemap = computed(
-  () => !isTauri() || enabledSites.value.length > 0 || online.value,
+  () => enabledSites.value.length > 0 || (isTauri() ? onlineActive.value : liveImagery.value),
 );
 
 async function refreshSites() {
@@ -299,16 +314,6 @@ const MAP_FONT = ["NotoSans"];
 
 // ── Style assembly ───────────────────────────────────────────────────────────
 
-function positionFeature() {
-  const fix = currentFix.value;
-  if (!fix) return EMPTY_FC;
-  return {
-    type: "Feature",
-    properties: { bearing: bearing.value },
-    geometry: { type: "Point", coordinates: [fix.lon, fix.lat] },
-  };
-}
-
 function osmFeatureLayers() {
   const line = (id, filter, paint, layout = {}) => ({
     id, type: "line", source: "osm-features", filter, paint, layout,
@@ -376,15 +381,19 @@ function osmFeatureLayers() {
 // rebuilds everything (site toggles, download-mode swaps, label toggles).
 function makeStyle() {
   const sources = {
-    // lineMetrics enables line-gradient (color-by-altitude) later
+    // Ground track only. The current position and the elevated track are deck
+    // layers, since MapLibre can't lift geometry off the ground plane.
+    // lineMetrics enables line-gradient (color-by-altitude) later.
     trail: { type: "geojson", data: getTrailGeoJSON(), lineMetrics: true },
-    position: { type: "geojson", data: positionFeature() },
   };
   const layers = [
     { id: "bg", type: "background", paint: { "background-color": "#101418" } },
   ];
 
-  const showOnline = downloadMode.value || (online.value && isTauri()) || !isTauri();
+  // Download mode always gets imagery — you cannot pick an area to download
+  // over a blank screen — so the dry-run switch doesn't apply there.
+  const showOnline =
+    downloadMode.value || (isTauri() ? onlineActive.value : liveImagery.value);
   const offline = isTauri() && !props.tileMetaOverride ? enabledSites.value : [];
 
   // Base: online imagery (Esri in Tauri, OSM in the browser harness) under
@@ -526,28 +535,17 @@ function makeStyle() {
     );
   }
 
-  layers.push(
-    {
-      id: "trail-line",
-      type: "line",
-      source: "trail",
-      layout: { "line-cap": "round", "line-join": "round" },
-      paint: { "line-color": "#ff4d4d", "line-width": 3 },
-    },
-    {
-      id: "rocket",
-      type: "symbol",
-      source: "position",
-      layout: {
-        "icon-image": "rocket-arrow",
-        "icon-size": 0.9,
-        "icon-rotate": ["get", "bearing"],
-        "icon-rotation-alignment": "map", // bearing is geographic, rotate with the map
-        "icon-allow-overlap": true,
-        "icon-ignore-placement": true,
-      },
-    },
-  );
+  // Ground track: the flight's shadow on the map, drawn flat because MapLibre
+  // line layers can only sit on the ground plane. The flight itself is drawn
+  // at true altitude by the deck.gl overlay (see buildDeckLayers) — including
+  // the current-position marker, which is why there is no symbol layer here.
+  layers.push({
+    id: "trail-line",
+    type: "line",
+    source: "trail",
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": "#ff4d4d", "line-width": 3 },
+  });
 
   return {
     version: 8,
@@ -559,27 +557,6 @@ function makeStyle() {
     sources,
     layers,
   };
-}
-
-// Arrowhead marker drawn on a canvas: points up (north) at bearing 0.
-function makeRocketArrowImage() {
-  const size = 48;
-  const canvas = document.createElement("canvas");
-  canvas.width = canvas.height = size;
-  const c = canvas.getContext("2d");
-  c.translate(size / 2, size / 2);
-  c.beginPath();
-  c.moveTo(0, -18);
-  c.lineTo(12, 14);
-  c.lineTo(0, 7);
-  c.lineTo(-12, 14);
-  c.closePath();
-  c.fillStyle = "#ffd21f";
-  c.fill();
-  c.lineWidth = 3;
-  c.strokeStyle = "#1a1a1a";
-  c.stroke();
-  return c.getImageData(0, 0, size, size);
 }
 
 function startCenter() {
@@ -598,7 +575,9 @@ function maxMapZoom() {
   if (downloadMode.value) return 22;
   const zooms = enabledSites.value.map((s) => s.maxzoom ?? 0);
   const offlineMax = zooms.length ? Math.max(...zooms) : 0;
-  const base = online.value || !isTauri() ? 19 : offlineMax || 19;
+  // Simulating offline caps the zoom at what the downloaded tiles support,
+  // just as a real disconnection would.
+  const base = onlineActive.value || !isTauri() ? 19 : offlineMax || 19;
   return Math.max(base, offlineMax) + 3;
 }
 
@@ -614,7 +593,6 @@ function cameraPadding(base = 40) {
 
 function refreshOverlays() {
   map?.getSource("trail")?.setData(getTrailGeoJSON());
-  map?.getSource("position")?.setData(positionFeature());
 }
 
 // Single restyle path for site/label toggles, online changes, download-mode
@@ -645,12 +623,9 @@ onMounted(async () => {
     center: startCenter(),
     zoom: enabledSites.value.length || props.tileMetaOverride ? 11 : 2,
     maxZoom: maxMapZoom(),
+    pitch: DEFAULT_PITCH, // 3D from the first frame, not on demand
+    maxPitch: MAX_PITCH,
     attributionControl: isTauri() ? false : undefined,
-  });
-  // Re-adds the marker image lazily after every setStyle (style swaps drop
-  // previously added images).
-  map.on("styleimagemissing", (e) => {
-    if (e.id === "rocket-arrow") map.addImage("rocket-arrow", makeRocketArrowImage());
   });
   map.on("dragstart", () => { follow.value = false; });
 
@@ -667,6 +642,7 @@ onMounted(async () => {
   // MapboxOverlay renders nothing).
   overlay = new MapboxOverlay({ interleaved: true, layers: [] });
   map.addControl(overlay);
+  syncDeck(); // draw whatever track already exists
 
   resizeObserver = new ResizeObserver(() => map?.resize());
   resizeObserver.observe(mapEl.value);
@@ -697,13 +673,12 @@ onUnmounted(() => {
 
 watch(trailVersion, () => {
   map?.getSource("trail")?.setData(getTrailGeoJSON());
-  if (threeD.value) syncDeck();
+  syncDeck();
 });
 
 watch([currentFix, bearing], ([fix]) => {
   if (!map || !fix) return;
-  map.getSource("position")?.setData(positionFeature());
-  if (threeD.value) syncDeck();
+  syncDeck(); // moves the 3D position marker to the new fix
   if (!follow.value || downloadMode.value) return;
   // Recentering every fix would interrupt an in-progress wheel-zoom or
   // rotate animation (easeTo cancels them), locking the operator out of
@@ -763,8 +738,10 @@ function applyPendingFlyTo() {
 
 watch(mapFlyTo, applyPendingFlyTo);
 
-// Network came or went: add/remove the live imagery underlay.
-watch(online, () => {
+// Network came or went — or the dry-run switch was flipped: add/remove the
+// live imagery underlay and its place names.
+watch(onlineActive, () => {
+  localStorage.setItem("qret-live-imagery", String(liveImagery.value));
   if (!map || downloadMode.value || props.tileMetaOverride) return;
   applySiteRestyle();
 });
@@ -819,7 +796,6 @@ function stopPaneResize() {
 // ── 3D flight path (deck.gl) ─────────────────────────────────────────────────
 
 function buildDeckLayers() {
-  if (!threeD.value) return [];
   const fix = currentFix.value;
   const layers = [
     new PathLayer({
@@ -844,13 +820,19 @@ function buildDeckLayers() {
         getColor: [255, 255, 255, 110],
         widthMinPixels: 1,
       }),
+      // Current position, at true altitude. Cyan against the amber track so
+      // "where it is now" never reads as part of "where it has been", and
+      // white-ringed so it stays legible over both imagery and open water.
       new ScatterplotLayer({
         id: "rocket-3d",
         data: [0],
         getPosition: () => [fix.lon, fix.lat, alt],
-        getFillColor: [255, 210, 31, 255],
-        radiusMinPixels: 5,
-        radiusMaxPixels: 9,
+        getFillColor: [0, 224, 255, 255],
+        stroked: true,
+        lineWidthMinPixels: 2,
+        getLineColor: [255, 255, 255, 235],
+        radiusMinPixels: 7,
+        radiusMaxPixels: 11,
       }),
     );
   }
@@ -861,23 +843,23 @@ function syncDeck() {
   overlay?.setProps({ layers: buildDeckLayers() });
 }
 
-function toggle3D() {
-  threeD.value = !threeD.value;
-  suppressFollowUntil = performance.now() + 500; // let the pitch ease finish
-  if (threeD.value) {
-    map?.easeTo({ pitch: 60, duration: 400 });
-    syncDeck();
-  } else {
-    overlay?.setProps({ layers: [] });
-    map?.easeTo({ pitch: 0, duration: 400 });
-  }
+// Rotating and pitching the map is easy to do by accident and awkward to undo
+// by hand, so offer one click back to north-up at the default tilt. Keeps the
+// centre and zoom — this re-levels the camera, it doesn't move you.
+function resetView() {
+  if (!map) return;
+  suppressFollowUntil = performance.now() + 700; // let the ease finish uninterrupted
+  map.easeTo({ bearing: 0, pitch: DEFAULT_PITCH, duration: 500 });
 }
 
 // ── Map downloader ───────────────────────────────────────────────────────────
 
 function enterDownloadMode() {
   if (!map || downloadMode.value) return;
-  if (threeD.value) toggle3D();
+  // Flatten while picking an area: dragging a rectangle on a tilted map draws
+  // a trapezoid on screen, which makes the coverage genuinely hard to judge.
+  // The tilt comes back on exit.
+  map.easeTo({ pitch: 0, duration: 300 });
   follow.value = false;
   downloadMode.value = true;
   dlError.value = "";
@@ -903,6 +885,7 @@ function enterDownloadMode() {
 
 function exitDownloadMode({ restyle = true } = {}) {
   cleanupDrawHandlers();
+  map?.easeTo({ pitch: DEFAULT_PITCH, duration: 300 }); // back to the flight view
   downloadMode.value = false;
   drawing.value = false;
   bboxSel.value = null;
@@ -1337,12 +1320,13 @@ async function onDownloadProgress(event) {
         @click="reset()"
       />
       <Button
-        label="3D"
-        icon="pi pi-box"
+        label="Reset View"
+        icon="pi pi-compass"
         size="small"
-        :severity="threeD ? 'primary' : 'secondary'"
+        severity="secondary"
         :disabled="downloadMode"
-        @click="toggle3D"
+        title="Point the camera north again at the default tilt (keeps your position and zoom)"
+        @click="resetView"
       />
       <Button
         label="Labels"
@@ -1362,9 +1346,9 @@ async function onDownloadProgress(event) {
         icon="pi pi-download"
         size="small"
         severity="warn"
-        :disabled="!online || fetchingLabels"
-        :title="!online
-          ? 'Fetching place names needs an internet connection'
+        :disabled="!onlineActive || fetchingLabels"
+        :title="!online ? 'Fetching place names needs an internet connection'
+          : !liveImagery ? 'Simulating offline — turn live imagery back on to fetch'
           : `Download road/lake/park names for: ${sitesMissingFeatures.map((s) => s.name).join(', ')}`"
         @click="fetchMissingLabels"
       />
@@ -1373,8 +1357,9 @@ async function onDownloadProgress(event) {
         icon="pi pi-cloud-download"
         size="small"
         severity="secondary"
-        :disabled="!online || downloading || downloadMode"
+        :disabled="!onlineActive || downloading || downloadMode"
         :title="!online ? 'No internet connection — downloading tiles needs one'
+                : !liveImagery ? 'Simulating offline — turn live imagery back on to download'
                 : downloading ? 'A map download is already running'
                 : downloadMode ? 'Already in download mode' : 'Download satellite tiles for offline use'"
         @click="enterDownloadMode"
@@ -1382,12 +1367,18 @@ async function onDownloadProgress(event) {
       <span v-if="!online" class="wifi-off" title="No internet connection">
         <i class="pi pi-wifi"></i>
       </span>
-      <span v-if="siteSummary && !downloadMode" class="site-name">
-        {{ siteSummary }}
-        <span v-if="online" class="online-hint" title="Dashed borders mark downloaded offline coverage; imagery outside them is live from the internet">
-          + live imagery
-        </span>
-      </span>
+      <span v-if="siteSummary && !downloadMode" class="site-name">{{ siteSummary }}</span>
+      <label
+        v-if="online && !downloadMode"
+        class="live-toggle"
+        :class="{ simulating: !liveImagery }"
+        :title="liveImagery
+          ? 'Live imagery is filling in outside your downloaded areas. Switch off to rehearse how the map behaves with no connection.'
+          : 'Simulating no connection: only downloaded tiles are drawn and the network-only actions are disabled. Your connection is untouched.'"
+      >
+        <ToggleSwitch v-model="liveImagery" class="live-switch" />
+        <span>{{ liveImagery ? "+ live imagery" : "offline dry run" }}</span>
+      </label>
 
       <div class="stats" :class="{ 'no-fix': !currentFix }">
         <template v-if="currentFix">
@@ -1573,9 +1564,26 @@ async function onDownloadProgress(event) {
   font-size: 0.85rem;
 }
 
-.online-hint {
-  color: var(--text-muted);
+.live-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 0.78rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+/* Amber while simulating, so a dry run is never mistaken for the real thing. */
+.live-toggle.simulating {
+  color: #e67e22;
+  font-weight: 600;
+}
+
+.live-switch {
+  --p-toggleswitch-width: 30px;
+  --p-toggleswitch-height: 17px;
+  --p-toggleswitch-handle-size: 11px;
 }
 
 .wifi-off {
