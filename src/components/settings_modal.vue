@@ -7,18 +7,19 @@ import { invoke } from "@tauri-apps/api/core";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
 import { DEFAULT_DOWNSAMPLE_ALGORITHM } from '../composables/useTelemetryStream.js';
+import Checkbox from 'primevue/checkbox';
 
 const props = defineProps({
-  isOpen:        Boolean,
-  currentIp:     String,
-  pidConfig:     { type: String,  default: 'rocket-launch' },
-  testFrequency: { type: Number,  default: 190 },
+  isOpen:           Boolean,
+  currentIp:        String,
+  pidConfig:        { type: String,  default: 'rocket-launch' },
+  testFrequency:    { type: Number,  default: 190 },
   downsampleAlgorithm: { type: String, default: DEFAULT_DOWNSAMPLE_ALGORITHM },
-  testActive:    { type: Boolean, default: false },
+  testActive:       { type: Boolean, default: false },
   serverSessionActiveConnected: { type: Boolean, default: false },
-  localRecordingActive: { type: Boolean, default: false },
-  mapSite:       { type: String,  default: '' },
-  mapsDir:       { type: String,  default: '' },
+  localRecordingActive:         { type: Boolean, default: false },
+  mapSitesDisabled: { type: Array,   default: () => [] },
+  mapsDir:          { type: String,  default: '' },
 });
 
 const emit = defineEmits([
@@ -27,8 +28,10 @@ const emit = defineEmits([
   "update-pid-config",
   "update-test-frequency",
   "update-downsample-algorithm",
-  "update-map-site",
+  "update-map-sites-disabled",
   "update-maps-dir",
+  "fly-to-site",
+  "maps-changed",
 ]);
 
 const ipMode = ref("none");
@@ -36,13 +39,14 @@ const customIp = ref("");
 const localPidConfig = ref("rocket-launch");
 const localTestFreq = ref(190);
 const localDownsample = ref(DEFAULT_DOWNSAMPLE_ALGORITHM);
-const localMapSite = ref("");
 const localMapsDir = ref("");
 const mapSites = ref([]);
 const overlayRef = ref(null);
 const serverIpLocked = computed(
   () => props.serverSessionActiveConnected || props.localRecordingActive,
 );
+const pendingDelete = ref("");   // site.file awaiting delete confirmation
+const deleteError = ref("");
 
 // The web build is served by the host it talks to, so it has no server to pick.
 const canSelectServer = CAPS.serverSelection;
@@ -52,6 +56,16 @@ const canSelectServer = CAPS.serverSelection;
 const readOnly = !CAPS.commands;
 
 const _isTauri = '__TAURI_INTERNALS__' in window;
+
+async function resolveDefaultMapsDir() {
+  if (!_isTauri) return "";
+  try {
+    return await invoke("resolve_maps_dir");
+  } catch (err) {
+    console.error("Failed to resolve maps directory:", err);
+    return "";
+  }
+}
 
 async function refreshMapSites() {
   if (!_isTauri) return;
@@ -100,7 +114,7 @@ onUnmounted(() => _settingsChannel.close());
 
 watch(
   () => props.isOpen,
-  (open) => {
+  async (open) => {
     if (open) {
       nextTick(() => overlayRef.value?.focus());
       const ip = props.currentIp || "";
@@ -115,16 +129,50 @@ watch(
       localPidConfig.value = props.pidConfig || "rocket-launch";
       localTestFreq.value  = props.testFrequency || 190;
       localDownsample.value = props.downsampleAlgorithm || DEFAULT_DOWNSAMPLE_ALGORITHM;
-      localMapSite.value   = props.mapSite || "";
-      localMapsDir.value   = props.mapsDir || "";
+      pendingDelete.value  = "";
+      deleteError.value    = "";
+      // Show the directory actually in use: the configured one, or the
+      // platform default the backend falls back to when none is set.
+      localMapsDir.value   = props.mapsDir || (await resolveDefaultMapsDir());
       refreshMapSites();
     }
   }
 );
 
-watch(localMapSite, (site) => {
-  if (site !== props.mapSite) emit("update-map-site", site);
-});
+function siteShown(file) {
+  return !props.mapSitesDisabled.includes(file);
+}
+
+function toggleSite(file, shown) {
+  const disabled = props.mapSitesDisabled.filter((f) => f !== file);
+  if (!shown) disabled.push(file);
+  emit("update-map-sites-disabled", disabled);
+}
+
+// Jump the flight map to a site. App.vue also switches to the flight panel and
+// closes this modal, so the result is actually visible.
+function goToSite(site) {
+  emit("fly-to-site", { name: site.name, bbox: site.bbox });
+}
+
+// Deleting a downloaded site throws away a download that may have taken a long
+// time, so it takes two clicks: the row swaps to a confirm prompt first.
+async function confirmDelete(site) {
+  deleteError.value = "";
+  try {
+    await invoke("delete_map_site", { file: site.file });
+    pendingDelete.value = "";
+    // Drop any stale hidden-state for a file that no longer exists.
+    if (props.mapSitesDisabled.includes(site.file)) {
+      emit("update-map-sites-disabled", props.mapSitesDisabled.filter((f) => f !== site.file));
+    }
+    await refreshMapSites();
+    emit("maps-changed");
+  } catch (err) {
+    deleteError.value = String(err);
+    console.error("[Settings] delete_map_site failed:", err);
+  }
+}
 
 function applyMapsDir() {
   const dir = localMapsDir.value.trim();
@@ -308,28 +356,64 @@ const boundCount = computed(() => Object.keys(bindings.value).length);
         </div>
 
         <div class="setting-group">
-          <span class="setting-group-label">Flight Map</span>
+          <span class="setting-group-label"><i class="pi pi-folder" />Map Directory</span>
           <input
             type="text"
             v-model="localMapsDir"
             class="ip-text-input"
-            placeholder="Maps directory (contains manifest.json)"
             @blur="applyMapsDir"
             @keyup.enter="applyMapsDir"
           />
-          <div class="option-row">
-            <RadioButton v-model="localMapSite" value="" inputId="site-none" />
-            <label for="site-none">None</label>
-          </div>
-          <div v-for="site in mapSites" :key="site.name" class="option-row">
-            <RadioButton v-model="localMapSite" :value="site.file" :inputId="'site-' + site.name" />
-            <label :for="'site-' + site.name">
-              {{ site.name }}
-              <span class="site-zoom-hint">z{{ site.minzoom }}–{{ site.maxzoom }}</span>
-            </label>
-          </div>
+          <span class="no-sites-hint">Holds manifest.json and the downloaded .mbtiles files.</span>
+        </div>
+
+        <div class="setting-group">
+          <span class="setting-group-label"><i class="pi pi-map" />Flight Maps</span>
+
+          <template v-for="site in mapSites" :key="site.file">
+            <div v-if="pendingDelete === site.file" class="option-row site-row confirm-row">
+              <span class="confirm-text">Delete “{{ site.name }}”?</span>
+              <button class="site-btn destructive" title="Confirm delete" @click="confirmDelete(site)">
+                Delete
+              </button>
+              <button class="site-btn" title="Keep it" @click="pendingDelete = ''">Cancel</button>
+            </div>
+
+            <div v-else class="option-row site-row">
+              <Checkbox
+                :model-value="siteShown(site.file)"
+                :binary="true"
+                :inputId="'site-' + site.name"
+                @update:model-value="toggleSite(site.file, $event)"
+              />
+              <label :for="'site-' + site.name" class="site-label">
+                {{ site.name }}
+                <span class="site-zoom-hint">z{{ site.minzoom }}–{{ site.maxzoom }}</span>
+              </label>
+              <button
+                class="site-btn"
+                title="Zoom the flight map to this site"
+                :disabled="!site.bbox"
+                @click="goToSite(site)"
+              >
+                Go
+              </button>
+              <button
+                class="site-btn icon danger"
+                title="Delete this downloaded map"
+                @click="pendingDelete = site.file"
+              >
+                <i class="pi pi-trash" />
+              </button>
+            </div>
+          </template>
+
+          <span v-if="deleteError" class="delete-error">{{ deleteError }}</span>
+          <span v-if="mapSites.length > 0" class="no-sites-hint">
+            Checked sites are layered on the flight map; finer zoom draws on top.
+          </span>
           <span v-if="mapSites.length === 0" class="no-sites-hint">
-            No sites found — run tile-prep/fetch_tiles.py and set the maps directory above.
+            No sites downloaded yet — use Download Maps on the Flight panel.
           </span>
         </div>
       </div>
@@ -624,6 +708,89 @@ label.option-row:hover {
   font-size: 0.72rem;
   color: var(--text-muted);
   margin-left: 4px;
+}
+
+/* Site rows: name takes the slack, controls pin to the right edge. */
+.site-row {
+  gap: 6px;
+}
+
+.site-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-btn {
+  flex: none;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-family: inherit;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.site-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-surface);
+}
+
+.site-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.site-btn.icon {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 7px;
+}
+
+.site-btn.danger:hover:not(:disabled) {
+  color: #ff6b6b;
+  border-color: #ff6b6b;
+}
+
+/* The confirm step reads as destructive before it is hovered, not after. */
+.site-btn.destructive {
+  color: #fff;
+  background: #d9463f;
+  border-color: #d9463f;
+  font-weight: 600;
+}
+
+.site-btn.destructive:hover {
+  background: #c23a34;
+  border-color: #c23a34;
+  color: #fff;
+}
+
+.confirm-row {
+  gap: 6px;
+}
+
+.confirm-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.delete-error {
+  font-size: 0.78rem;
+  color: #ff6b6b;
 }
 
 .no-sites-hint {

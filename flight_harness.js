@@ -148,7 +148,7 @@ const Harness = {
     provide('flightTrack', flightTrack)
     provide('sensorData', sensorData)
     provide('devices', devices)
-    provide('mapSite', ref(''))
+    provide('mapSitesDisabled', ref([]))
     provide('mapsDir', ref(''))
     provide('testActive', testActive)
     provide('telemetryStats', ref(null))

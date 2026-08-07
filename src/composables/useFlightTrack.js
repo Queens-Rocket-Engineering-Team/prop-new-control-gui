@@ -17,6 +17,7 @@ const MAX_TRAIL_POINTS = 50_000 // safety valve: >3 h of 4 Hz fixes
 const TRAIL_CHOP = 1_000        // points dropped from the head when the cap is hit
 const BEARING_MIN_MOVE_M = 1.5  // ignore sub-GPS-noise moves so the marker doesn't spin at rest
 const EARTH_RADIUS_M = 6_371_000
+const VSPEED_TAU_S = 2          // EMA time constant for the vertical-speed readout
 
 function bearingDeg(a, b) {
   const φ1 = (a.lat * Math.PI) / 180
@@ -47,6 +48,38 @@ export function useFlightTrack(sensorData, { testActive } = {}) {
   const currentFix = ref(null) // { lat, lon, alt, sats, t }
   const bearing = ref(0)       // degrees clockwise from north
   const trailVersion = ref(0)
+  const vspeed = ref(null)     // m-per-second-ish (units of Alt per unit of t), EMA smoothed
+  const phase = ref(null)      // 'pad' | 'ascent' | 'drogue' | 'main' | 'landed'
+
+  let _maxAlt = -Infinity
+
+  // Rough flight-phase readout for the side-pane card. Thresholds are loose on
+  // purpose — this is an operator hint, not flight logic.
+  function classifyPhase(alt, vs) {
+    if (alt == null || vs == null) return phase.value
+    if (vs > 5) return 'ascent'
+    if (vs < -12) return 'drogue'
+    if (vs < -1.5) return 'main'
+    // Near-zero vertical speed: on the ground, either pre- or post-flight.
+    if (alt < 150) return _maxAlt > 500 ? 'landed' : 'pad'
+    return phase.value // coasting near apogee keeps the last phase
+  }
+
+  function updateDerived(alt, t, prevAlt, prevT) {
+    if (alt == null) return
+    _maxAlt = Math.max(_maxAlt, alt)
+    if (prevAlt == null || prevT == null || t <= prevT) {
+      phase.value = classifyPhase(alt, vspeed.value)
+      return
+    }
+    const dt = t - prevT
+    const raw = (alt - prevAlt) / dt
+    if (Number.isFinite(raw)) {
+      const a = Math.min(1, dt / VSPEED_TAU_S)
+      vspeed.value = vspeed.value == null ? raw : vspeed.value + a * (raw - vspeed.value)
+    }
+    phase.value = classifyPhase(alt, vspeed.value)
+  }
 
   function getTrailGeoJSON() {
     // Returns the live array for cheap map.setData() calls — callers must
@@ -61,8 +94,11 @@ export function useFlightTrack(sensorData, { testActive } = {}) {
   function reset() {
     _coords = []
     _lastFixT = -Infinity
+    _maxAlt = -Infinity
     currentFix.value = null
     bearing.value = 0
+    vspeed.value = null
+    phase.value = null
     trailVersion.value++
   }
 
@@ -78,7 +114,7 @@ export function useFlightTrack(sensorData, { testActive } = {}) {
 
     // Snapshots always contain every known sensor, so skip batches where the
     // GPS streams didn't actually produce a new point.
-    const t = latEntry.history.at(-1)?.sourceT ?? latEntry.windowEnd
+    const t = latEntry.lastSourceT ?? latEntry.windowEnd
     if (t <= _lastFixT) return
     _lastFixT = t
 
@@ -86,6 +122,7 @@ export function useFlightTrack(sensorData, { testActive } = {}) {
     const sats = Number.isFinite(Number(snap.Sats?.value)) ? Number(snap.Sats.value) : null
 
     const prev = currentFix.value
+    updateDerived(alt, t, prev?.alt, prev?.t)
     if (prev && prev.lat === lat && prev.lon === lon) {
       // Position unchanged: refresh the ancillary fields, keep the trail as is.
       currentFix.value = { ...prev, alt: alt ?? prev.alt, sats: sats ?? prev.sats, t }
@@ -108,5 +145,5 @@ export function useFlightTrack(sensorData, { testActive } = {}) {
     })
   }
 
-  return { currentFix, bearing, trailVersion, getTrailGeoJSON, reset }
+  return { currentFix, bearing, vspeed, phase, trailVersion, getTrailGeoJSON, reset }
 }

@@ -33,6 +33,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # `stream` for the session-zip download; `rustls-tls` for the in-app satellite
 # tile downloader (map_download.rs), which avoids an OpenSSL requirement on
 # Linux build hosts. 0.12 matches the version already locked transitively by tauri.
+# No "http2" feature on purpose: the Esri tile endpoint the downloader hits is
+# HTTP/1.1 only (verified — it rejects an h2 connection), so enabling it would
+# add the h2 dependency and buy nothing.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
 # RFC3339 timestamps for the map site manifest's fetched_at field.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

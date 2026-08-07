@@ -867,11 +867,13 @@ pub fn run() {
             open_sessions_dir,
             maps::fetch_maps_dir,
             maps::set_maps_dir,
+            maps::resolve_maps_dir,
             maps::list_map_sites,
-            maps::set_tile_source,
-            maps::get_tile_meta,
+            maps::get_site_features,
+            maps::delete_map_site,
             map_download::download_map_tiles,
             map_download::cancel_map_download,
+            map_download::download_map_features,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

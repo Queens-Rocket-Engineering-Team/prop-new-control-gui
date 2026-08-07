@@ -1,10 +1,11 @@
 <script setup>
-import { inject, ref, watch, nextTick, computed, reactive } from 'vue'
+import { inject, ref, watch, nextTick, computed, reactive, onUnmounted } from 'vue'
 
 // ── Log source ─────────────────────────────────────────────────────────────────
 const logLines  = inject('logLines',  ref([]))
 const wsStatus  = inject('wsStatus',  ref('disconnected'))
 const clearLogs = inject('clearLogs', () => {})
+const serverIp  = inject('serverIp',  ref(''))
 
 // Log levels emitted by the new /ws/logs format: [LEVEL] <data>
 const LEVELS = [
@@ -99,6 +100,120 @@ const statusClass = computed(() => {
   const s = wsStatus
   return (s && typeof s === 'object' && 'value' in s) ? s.value : s
 })
+
+// ── Server metrics tab ─────────────────────────────────────────────────────────
+// Pinned tab that polls /v1/metrics every second while active. recent_events
+// renders as a scrollable table; every other section is flattened into sorted
+// path→value tables.
+const METRICS_TAB_ID = '__metrics__'
+
+const metricsData      = ref(null)
+const metricsError     = ref(null)
+const metricsFetchedAt = ref(null)
+let metricsTimer = null
+
+const metricsHost = computed(() => {
+  const ip = serverIp.value
+  if (!ip) return null
+  return ip === 'localhost' ? '127.0.0.1' : ip
+})
+
+async function fetchMetrics() {
+  if (!metricsHost.value) {
+    metricsError.value = 'No server IP set'
+    return
+  }
+  try {
+    const res = await fetch(`http://${metricsHost.value}:8000/v1/metrics`)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    metricsData.value = await res.json()
+    metricsError.value = null
+    metricsFetchedAt.value = Date.now()
+  } catch (e) {
+    metricsError.value = String(e?.message ?? e)
+  }
+}
+
+function stopMetricsPolling() {
+  if (metricsTimer !== null) {
+    clearInterval(metricsTimer)
+    metricsTimer = null
+  }
+}
+
+function startMetricsPolling() {
+  stopMetricsPolling()
+  fetchMetrics()
+  metricsTimer = setInterval(fetchMetrics, 1000)
+}
+
+watch(activeId, (id) => {
+  if (id === METRICS_TAB_ID) startMetricsPolling()
+  else stopMetricsPolling()
+}, { immediate: true })
+onUnmounted(stopMetricsPolling)
+
+function flattenMetrics(obj, prefix, rows) {
+  for (const [key, value] of Object.entries(obj ?? {})) {
+    const path = prefix ? `${prefix}.${key}` : key
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      flattenMetrics(value, path, rows)
+    } else {
+      rows.push([path, value])
+    }
+  }
+}
+
+const metricsSections = computed(() => {
+  const data = metricsData.value
+  if (!data) return []
+  const sections = []
+  for (const [name, value] of Object.entries(data)) {
+    if (name === 'recent_events') continue
+    const rows = []
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      flattenMetrics(value, '', rows)
+    } else {
+      rows.push(['value', value])
+    }
+    rows.sort((a, b) => a[0].localeCompare(b[0]))
+    sections.push({ name, rows })
+  }
+  sections.sort((a, b) => a.name.localeCompare(b.name))
+  return sections
+})
+
+// Newest first — the server appends chronologically.
+const recentEvents = computed(() => {
+  const events = metricsData.value?.recent_events
+  if (!Array.isArray(events)) return []
+  return [...events].reverse()
+})
+
+function fmtEventTime(ms) {
+  if (!Number.isFinite(ms)) return '—'
+  const d = new Date(ms)
+  return `${d.toLocaleTimeString()}.${String(d.getMilliseconds()).padStart(3, '0')}`
+}
+
+function fmtMetricValue(path, v) {
+  if (typeof v === 'number') {
+    if (path.endsWith('_unix_ms')) return new Date(v).toLocaleString()
+    if (Number.isInteger(v)) return String(v)
+    return Math.abs(v) >= 1000 ? v.toFixed(1) : v.toPrecision(4)
+  }
+  if (Array.isArray(v)) return v.join(', ')
+  if (v == null) return '—'
+  return String(v)
+}
+
+const EVENT_FIXED_KEYS = new Set(['at_unix_ms', 'kind', 'severity', 'message'])
+function eventExtras(ev) {
+  return Object.entries(ev)
+    .filter(([k]) => !EVENT_FIXED_KEYS.has(k))
+    .map(([k, v]) => `${k}=${v}`)
+    .join(' ')
+}
 </script>
 
 <template>
@@ -138,10 +253,74 @@ const statusClass = computed(() => {
       </div>
 
       <button class="add-tab-btn" @click="addView" title="Add view">+</button>
+
+      <div
+        class="tab metrics-tab"
+        :class="{ 'tab-active': activeId === METRICS_TAB_ID }"
+        @click="activeId = METRICS_TAB_ID"
+      >
+        <span class="tab-name">Metrics</span>
+      </div>
     </div>
 
+    <!-- ── Server metrics view ── -->
+    <template v-if="activeId === METRICS_TAB_ID">
+      <div class="debug-toolbar">
+        <span class="ws-status" :class="metricsError ? 'error' : 'connected'">
+          <span class="ws-led" />
+          {{ metricsError ? metricsError : (metricsFetchedAt ? `updated ${fmtEventTime(metricsFetchedAt)}` : 'loading…') }}
+        </span>
+      </div>
+
+      <div class="metrics-body">
+        <div class="metrics-section">
+          <h3 class="metrics-heading">recent_events</h3>
+          <div class="events-scroll">
+            <table class="metrics-table">
+              <thead>
+                <tr><th>Time</th><th>Severity</th><th>Kind</th><th>Message</th><th>Details</th></tr>
+              </thead>
+              <tbody>
+                <tr v-if="recentEvents.length === 0">
+                  <td colspan="5" class="metrics-muted">No recent events</td>
+                </tr>
+                <tr
+                  v-for="(ev, i) in recentEvents"
+                  :key="`${ev.at_unix_ms}-${i}`"
+                  :class="`event-${ev.severity}`"
+                >
+                  <td class="metrics-mono">{{ fmtEventTime(ev.at_unix_ms) }}</td>
+                  <td>{{ ev.severity }}</td>
+                  <td class="metrics-mono">{{ ev.kind }}</td>
+                  <td>{{ ev.message }}</td>
+                  <td class="metrics-muted">{{ eventExtras(ev) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div v-for="section in metricsSections" :key="section.name" class="metrics-section">
+          <h3 class="metrics-heading">{{ section.name }}</h3>
+          <table class="metrics-table">
+            <thead>
+              <tr><th>Metric</th><th>Value</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in section.rows" :key="row[0]">
+                <td class="metrics-mono">{{ row[0] }}</td>
+                <td class="metrics-mono metrics-value">{{ fmtMetricValue(row[0], row[1]) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div v-if="!metricsData && !metricsError" class="metrics-muted">Waiting for first metrics fetch…</div>
+      </div>
+    </template>
+
     <!-- ── Filter toolbar ── -->
-    <div class="debug-toolbar">
+    <div v-if="activeId !== METRICS_TAB_ID" class="debug-toolbar">
       <span class="ws-status" :class="statusClass">
         <span class="ws-led" />
         {{ statusClass }}
@@ -161,7 +340,7 @@ const statusClass = computed(() => {
     </div>
 
     <!-- ── Log output ── -->
-    <div class="log-output" ref="logEl">
+    <div v-if="activeId !== METRICS_TAB_ID" class="log-output" ref="logEl">
       <div v-if="filteredLines.length === 0" class="log-empty">
         No log output yet…
       </div>
@@ -364,4 +543,78 @@ const statusClass = computed(() => {
 .log-line-warning  { color: #f39c12; }
 .log-line-error    { color: #e74c3c; font-weight: 600; }
 .log-line-critical { color: #e74c3c; font-weight: 700; background: rgba(231,76,60,0.08); }
+
+/* ── Server metrics tab ── */
+.metrics-tab {
+  margin-left: auto;
+  border-left: 1px solid var(--border-color, #30363d);
+}
+
+.metrics-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 10px 12px;
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: #30363d transparent;
+}
+
+.metrics-section { margin-bottom: 16px; }
+
+.metrics-heading {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #58a6ff;
+  margin: 0 0 4px 0;
+}
+
+.metrics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.metrics-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-muted, #8b949e);
+  padding: 3px 10px 3px 4px;
+  border-bottom: 1px solid var(--border-color, #30363d);
+  position: sticky;
+  top: 0;
+  background: var(--bg-primary, #0d1117);
+  white-space: nowrap;
+}
+
+.metrics-table td {
+  padding: 2px 10px 2px 4px;
+  border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+  vertical-align: top;
+  word-break: break-word;
+}
+.metrics-table tbody tr:hover { background: var(--bg-secondary, #161b22); }
+
+.metrics-mono  { font-family: inherit; white-space: nowrap; }
+.metrics-value { text-align: right; white-space: nowrap; }
+.metrics-table td.metrics-value { width: 1%; }
+.metrics-muted { color: var(--text-muted, #8b949e); font-style: italic; }
+
+/* recent_events: bounded, independently scrollable table */
+.events-scroll {
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color, #30363d);
+  border-radius: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: #30363d transparent;
+}
+.events-scroll .metrics-table td { white-space: normal; }
+.events-scroll .metrics-table td.metrics-mono { white-space: nowrap; }
+
+.event-warning  td { color: #f39c12; }
+.event-error    td { color: #e74c3c; }
+.event-critical td { color: #e74c3c; font-weight: 700; }
 </style>

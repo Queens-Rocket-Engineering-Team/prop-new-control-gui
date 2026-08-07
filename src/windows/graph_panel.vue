@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, inject, computed, watch, onMounted, onUnmounted } from 'vue'
 import UPlotChart from '../components/uplot_chart.vue'
-import { TELEMETRY_WINDOW_SEC, TELEMETRY_WINDOW_OPTIONS } from '../composables/useTelemetryStream.js'
+import { TELEMETRY_WINDOW_SEC, TELEMETRY_WINDOW_OPTIONS, TELEMETRY_DISPLAY_HZ } from '../composables/useTelemetryStream.js'
 import { CAPS } from '../lib/platform.js'
 import { useSensorGroups } from '../composables/useSensorGroups.js'
 
@@ -62,6 +62,24 @@ watch([hiddenGroups, hiddenStreams], () => {
 function isVisible(name, groupKey) {
   return !hiddenGroups.value.has(groupKey) && !hiddenStreams.value.has(name)
 }
+
+// Tell the telemetry store which streams have no chart right now so it skips
+// history retention (and frees memory) for them. Reset on unmount so closing
+// the panel falls back to the safe default of retaining everything.
+const setUnchartedStreams = inject('setUnchartedStreams', () => {})
+
+const unchartedNames = computed(() => {
+  const names = []
+  for (const g of groups.value) {
+    for (const name of g.streams) {
+      if (!isVisible(name, g.key)) names.push(name)
+    }
+  }
+  return names
+})
+
+watch(unchartedNames, (names) => setUnchartedStreams(names), { immediate: true })
+onUnmounted(() => setUnchartedStreams(null))
 
 // 'all' | 'some' | 'none' — drives the group checkbox glyph
 function groupState(group) {
@@ -202,33 +220,57 @@ onUnmounted(() => {
   document.removeEventListener('keydown', onDocumentKeydown)
 })
 
+// ── Telemetry rate readout ───────────────────────────────────────────────────
+//
+// Both headline numbers are per sensor, so they can be read against each other
+// as one pipeline: what arrives for a stream, and how much of it gets drawn.
+// (The previous readout paired displayBatchHz — a whole-socket message rate —
+// with a per-sensor point rate. Those measure different things over different
+// denominators, so the ratio between them meant nothing.)
+//
+//   DATA — points arriving per sensor on the display stream
+//   PLOT — points per sensor that survive the display-bucket downsample and
+//          reach the charts; capped at TELEMETRY_DISPLAY_HZ by design
+//
+// The configured test frequency lives in the tooltip rather than the toolbar:
+// it is a setting, not a measurement, and it describes the full-rate raw stream
+// recorded to CSV in Rust — which is not what these numbers measure.
+
 function fmtHz(v) {
-  return Number.isFinite(v) && v > 0 ? v.toFixed(1) : '--'
+  if (!Number.isFinite(v) || v <= 0) return '--'
+  return v >= 100 ? v.toFixed(0) : v.toFixed(1)
 }
 
-const telemetryRateLabel = computed(() => {
+const telemetryRates = computed(() => {
   const stats = telemetryStats.value
-  if (!stats?.updatedAt) return 'display -- Hz / pts -- Hz'
-  return `display ${fmtHz(stats.displayBatchHz)} Hz / pts ${fmtHz(stats.displayPointHzAvg)} Hz`
+  if (!stats?.updatedAt) return null
+  return { incoming: stats.incomingPointHzAvg, plotted: stats.displayPointHzAvg }
 })
+
+// Connected but nothing arriving — the state actually worth flagging mid-test.
+// Plotted sitting below incoming is normal (that is the downsample working), so
+// it is not a warning.
+const telemetryStalled = computed(() =>
+  Boolean(telemetryRates.value && telemetryRates.value.incoming <= 0)
+)
 
 const telemetryRateTitle = computed(() => {
   const stats = telemetryStats.value
-  if (!stats?.updatedAt) return 'Waiting for telemetry display batches'
+  if (!stats?.updatedAt) return 'Waiting for telemetry'
   return [
-    `Display batches: ${fmtHz(stats.displayBatchHz)} Hz`,
-    `Plotted points per sensor: avg ${fmtHz(stats.displayPointHzAvg)} Hz, max ${fmtHz(stats.displayPointHzMax)} Hz`,
-    `Unique point timestamps per sensor: avg ${fmtHz(stats.displayTimestampHzAvg)} Hz, max ${fmtHz(stats.displayTimestampHzMax)} Hz`,
-    `Incoming points per sensor: avg ${fmtHz(stats.incomingPointHzAvg)} Hz, max ${fmtHz(stats.incomingPointHzMax)} Hz`,
-    `Incoming points per sensor per batch: ${stats.incomingPointsPerSensorBatchAvg.toFixed(2)}`,
-    `Raw stream (CSV, Rust-side): ${localRecordingActive.value ? 'armed' : 'inactive'}`,
-    `Stats window: ${stats.statsWindowSec.toFixed(0)}s`,
+    `DATA  ${fmtHz(stats.incomingPointHzAvg)} Hz per sensor arriving (peak ${fmtHz(stats.incomingPointHzMax)} Hz)`,
+    `PLOT  ${fmtHz(stats.displayPointHzAvg)} Hz per sensor drawn (peak ${fmtHz(stats.displayPointHzMax)} Hz)`,
+    `Charts keep at most one point per 1/${TELEMETRY_DISPLAY_HZ} s, so PLOT never exceeds ${TELEMETRY_DISPLAY_HZ} Hz.`,
+    '',
+    `Distinct source timestamps: ${fmtHz(stats.displayTimestampHzAvg)} Hz per sensor`,
+    `Socket batches: ${fmtHz(stats.displayBatchHz)} Hz, ${stats.incomingPointsPerSensorBatchAvg.toFixed(1)} points per sensor each`,
+    `Streams plotted: ${stats.sensors}`,
+    `Averaged over the last ${stats.statsWindowSec.toFixed(0)}s`,
+    '',
+    `Test rate: ${testFrequency.value} Hz configured${testActive.value ? '' : ' (no test running)'}`,
+    `The full-rate raw stream is recorded to CSV in Rust and is not measured here `
+      + `(currently ${localRecordingActive.value ? 'armed' : 'inactive'}).`,
   ].join('\n')
-})
-
-const telemetryRateWarn = computed(() => {
-  const stats = telemetryStats.value
-  return Boolean(stats?.updatedAt && stats.displayPointHzAvg > 36)
 })
 
 // ── Sensor list — grouped with spacers to keep groups on whole rows ──────────
@@ -248,22 +290,26 @@ const slots = computed(() => {
       const info = sensorData.value[name]
       if (!info) continue
 
-      const h = Array.isArray(info.history) ? info.history : []
+      // History arrives as sorted parallel arrays shared with the telemetry
+      // store — read-only here; window and rebase in a single pass.
+      const ts = Array.isArray(info.ts) ? info.ts : []
+      const vs = Array.isArray(info.vs) ? info.vs : []
       const windowEnd = Number.isFinite(info.windowEnd)
         ? info.windowEnd
-        : (h.length > 0 ? h[h.length - 1].t : 0)
+        : (ts.length > 0 ? ts[ts.length - 1] : 0)
       const windowStart = Number.isFinite(info.windowStart)
         ? info.windowStart
         : windowEnd - windowSec.value
-      const windowed = h.filter((p) => p.t >= windowStart && p.t <= windowEnd)
 
       // Points arrive already tared from the server — never subtract an offset
       // here. `tared` only says whether an offset exists, for the button state.
       const x = []
       const y = []
-      for (const p of windowed) {
-        x.push(p.t - windowEnd)
-        y.push(p.v)
+      for (let i = 0; i < ts.length; i += 1) {
+        const t = ts[i]
+        if (t < windowStart || t > windowEnd) continue
+        x.push(t - windowEnd)
+        y.push(vs[i])
       }
 
       items.push({
@@ -507,17 +553,25 @@ function tareTitle(s) {
         >{{ sec }}s</button>
       </div>
 
-      <!-- ── Centred frequency badge ── -->
-      <div class="freq-badge" :class="{ 'freq-badge--active': testActive }">
-        <span class="freq-badge-value">{{ testFrequency }}</span>
-        <span class="freq-badge-unit"> Hz</span>
-      </div>
-
-      <span
-        class="telemetry-rate"
-        :class="{ 'telemetry-rate--warn': telemetryRateWarn }"
+      <!-- ── Telemetry rate readout (arriving → drawn, both per sensor) ── -->
+      <div
+        class="rate-readout"
+        :class="{ 'rate-readout--stalled': telemetryStalled }"
         :title="telemetryRateTitle"
-      >{{ telemetryRateLabel }}</span>
+      >
+        <span class="rate-item">
+          <span class="rate-key">DATA</span>
+          <span class="rate-value">{{ fmtHz(telemetryRates?.incoming) }}</span>
+          <span class="rate-unit">Hz</span>
+        </span>
+        <i class="pi pi-arrow-right rate-sep" />
+        <span class="rate-item">
+          <span class="rate-key">PLOT</span>
+          <span class="rate-value">{{ fmtHz(telemetryRates?.plotted) }}</span>
+          <span class="rate-unit">Hz</span>
+        </span>
+        <span class="rate-scope">/sensor</span>
+      </div>
     </div>
 
     <!-- Tare result / failure — server-side tares affect every connected GUI,
@@ -618,48 +672,59 @@ function tareTitle(s) {
   letter-spacing: 0.05em;
 }
 
-.telemetry-rate {
+/* ── Telemetry rate readout ── */
+
+.rate-readout {
   margin-left: auto;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
   font-size: 0.68rem;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  cursor: help;
 }
 
-.telemetry-rate--warn {
-  color: #e67e22;
-  font-weight: 700;
-}
-
-/* ── Centred test-frequency badge ── */
-
-.freq-badge {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+.rate-item {
   display: flex;
   align-items: baseline;
-  gap: 1px;
-  pointer-events: none;
-  white-space: nowrap;
+  gap: 3px;
 }
 
-.freq-badge-value {
-  font-size: 0.72rem;
+.rate-key {
+  font-size: 0.58rem;
   font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-muted);
-  letter-spacing: 0.02em;
+  letter-spacing: 0.07em;
 }
 
-.freq-badge-unit {
-  font-size: 0.65rem;
-  color: var(--text-muted);
+/* --text-primary, not --text-secondary: the theme inverts the muted/secondary
+   ordering between modes (secondary #555→#888, muted #777→#ccc), so anchoring
+   the number to secondary would leave it dimmer than its own label in dark
+   mode. Primary is the most prominent in both. */
+.rate-value {
+  font-weight: 700;
+  color: var(--text-primary);
 }
 
-.freq-badge--active .freq-badge-value,
-.freq-badge--active .freq-badge-unit {
-  color: #3498db;
+.rate-unit,
+.rate-scope {
+  font-size: 0.58rem;
+}
+
+.rate-scope {
+  opacity: 0.7;
+}
+
+.rate-sep {
+  font-size: 0.5rem;
+  opacity: 0.45;
+  align-self: center;
+}
+
+.rate-readout--stalled .rate-key,
+.rate-readout--stalled .rate-value {
+  color: #e67e22;
 }
 
 /* ── Tiling controls (chart height, column count) ── */
