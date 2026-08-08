@@ -70,7 +70,8 @@ export function useServerApi(serverIp) {
   /**
    * Send a CONTROL command to a named actuator.
    * @param {string} controlName  - server-side control name (e.g. "AVDump")
-   * @param {'OPEN'|'CLOSED'} controlState
+   * @param {'OPEN'|'CLOSED'|number} controlState - OPEN/CLOSED for BOOL controls,
+   *   or a numeric value for variable (FLOAT32/INT32/etc.) controls
    */
   function setControl(controlName, controlState) {
     return _post('/v1/command', { command: 'CONTROL', control_name: controlName, control_state: controlState })
