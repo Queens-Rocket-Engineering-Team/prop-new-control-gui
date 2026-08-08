@@ -45,12 +45,24 @@ export const CAPS = {
     return mode() === "desktop"
   },
 
-  // The single write the pad is allowed. /v1/discover is a fire-and-forget UDP
-  // multicast that the server already broadcasts every 30 s on its own, so the
-  // button adds no new class of traffic — it only lets someone who just powered
-  // a device on skip the wait instead of radioing launch control.
+  // /v1/discover is a fire-and-forget UDP multicast that the server already
+  // broadcasts every 30 s on its own, so the button adds no new class of
+  // traffic — it only lets someone who just powered a device on skip the wait
+  // instead of radioing launch control.
   get espDiscovery() {
     return true
+  },
+
+  // Lets a view-only client start a *preview* stream when the whole stand is
+  // silent, so devices that connect before launch control is up still show
+  // data instead of sitting there looking broken. Web-only: the desktop app
+  // owns the stream rate outright and uses setStream directly.
+  //
+  // Deliberately narrow — see primeStream() in useServerApi.js, which fixes the
+  // rate so a pad client cannot set the stand's frequency, and the priming
+  // guard in App.vue, which only fires while nothing is streaming anywhere.
+  get streamPriming() {
+    return mode() === "web"
   },
 
   /** CSV recording of the raw telemetry stream (Rust-side). */

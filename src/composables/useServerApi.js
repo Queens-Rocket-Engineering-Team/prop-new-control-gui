@@ -10,6 +10,12 @@ export class ReadOnlyError extends Error {
 }
 
 /**
+ * Resting stream rate: what runs outside a test so charts are populated.
+ * A test replaces it with the configured test frequency.
+ */
+export const PREVIEW_STREAM_HZ = 30
+
+/**
  * Composable for communicating with the FastAPI server over HTTP.
  *
  * This is the single choke point for command authority. The view-only build
@@ -117,6 +123,27 @@ export function useServerApi(serverIp) {
   async function setStream(frequencyHz) {
     _requireCommands('STREAM')
     return _post('/v1/command', { command: 'STREAM', frequency_hz: Number(frequencyHz) })
+  }
+
+  /**
+   * Start a preview stream at the fixed resting rate.
+   *
+   * The one stream command a view-only client may send, so devices that connect
+   * before launch control is up still produce data instead of appearing dead.
+   *
+   * It takes no frequency *by design*. The server forwards STREAM_START to every
+   * registered device unconditionally (esp_connection_runtime.start_streaming),
+   * so a STREAM at a rate different from the active one would re-rate the whole
+   * stand — dropping a 190 Hz test to 30 Hz. Hard-coding the rate here makes
+   * that structurally impossible rather than a thing callers must remember.
+   *
+   * It also never sends STOP. Changing an *active* rate requires STOP+STREAM,
+   * which carries a deliberate data gap; the caller's job is to only prime while
+   * the stand is silent, and this function cannot interrupt a running stream.
+   */
+  async function primeStream() {
+    if (!CAPS.streamPriming) throw new ReadOnlyError('Stream priming')
+    return _post('/v1/command', { command: 'STREAM', frequency_hz: PREVIEW_STREAM_HZ })
   }
 
   /**
@@ -300,6 +327,7 @@ export function useServerApi(serverIp) {
     getSingle,
     stopStream,
     setStream,
+    primeStream,
     setControl,
     requestStatus,
     // Discovery + control

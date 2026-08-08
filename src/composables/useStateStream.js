@@ -16,6 +16,10 @@ const COMMAND_CAP = 200   // keep at most this many commands in memory
  * sensor is tared — never subtracted from a reading.
  *
  * @param {import('vue').Ref<string>} serverIp
+ * @param {{ onDeviceRegistered?: (deviceName: string) => void }} [opts]
+ *   onDeviceRegistered fires on every `device.registered` delta — including a
+ *   device rejoining that was never marked disconnected, which produces no
+ *   `connected` transition for callers to watch.
  * @returns {{
  *   devices:         import('vue').Ref<object[]>,
  *   kasaDevices:     import('vue').Ref<object[]>,
@@ -26,7 +30,7 @@ const COMMAND_CAP = 200   // keep at most this many commands in memory
  *   getStateSnapshot: () => Promise<object>,
  * }}
  */
-export function useStateStream(serverIp) {
+export function useStateStream(serverIp, { onDeviceRegistered } = {}) {
   // ── Non-reactive internal maps (hot path — no Vue reactivity overhead) ────────
   const _byName     = new Map()   // device_name  → device object (mutated in-place)
   const _kasaByHost = new Map()   // host         → kasa object
@@ -207,6 +211,11 @@ export function useStateStream(serverIp) {
       case 'device.registered': {
         _byName.set(msg.device.name, msg.device)
         _publishDevices()
+        // A device that just joined has not been told to stream. Signalled here
+        // rather than via a `connected` transition because an unclean drop
+        // leaves the old entry marked connected, so a rejoin changes nothing
+        // callers could watch.
+        onDeviceRegistered?.(msg.device.name)
         break
       }
       case 'device.disconnected': {

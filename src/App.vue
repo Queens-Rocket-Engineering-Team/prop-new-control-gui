@@ -7,7 +7,7 @@ import {
   stopRecording,
   updateControlStates,
 } from "./lib/desktop.js";
-import { useServerApi } from "./composables/useServerApi.js";
+import { useServerApi, PREVIEW_STREAM_HZ } from "./composables/useServerApi.js";
 import { useStateStream } from "./composables/useStateStream.js";
 import { useTelemetryStream } from "./composables/useTelemetryStream.js";
 import { useLogStream } from "./composables/useLogStream.js";
@@ -54,7 +54,7 @@ provide('pidConfig', pidConfig);
 const testFrequency = ref(parseInt(localStorage.getItem('qret-test-frequency') ?? '', 10) || 190);
 provide('testFrequency', testFrequency);
 
-const { stopStream, setStream, setControl, requestStatus, discoverDevices, discoverKasaDevices, controlKasaDevice, sendEstop, setTare: apiSetTare, clearTare: apiClearTare, startAudio, stopAudio, listAudioFiles, audioFileUrl } = useServerApi(server_ip);
+const { stopStream, setStream, primeStream, setControl, requestStatus, discoverDevices, discoverKasaDevices, controlKasaDevice, sendEstop, setTare: apiSetTare, clearTare: apiClearTare, startAudio, stopAudio, listAudioFiles, audioFileUrl } = useServerApi(server_ip);
 
 function requestStatusSnapshot(reason = 'manual') {
   if (!canCommand) return Promise.resolve();
@@ -85,7 +85,17 @@ function startStatusRefresh() {
 
 // ── State stream (/ws/state → devices, kasa, commands) ──────────────────────
 
-const { devices, kasaDevices, commandsById, tares, status: stateStatus } = useStateStream(server_ip);
+// A device that just joined has never been told to stream, so however far
+// priming has backed off, it backed off against a stand that no longer looks
+// like this one. Retry promptly instead of sitting out the widened gap.
+function onDeviceRegistered() {
+  resetPrimingBudget();          // no-ops outside the view-only build
+}
+
+const { devices, kasaDevices, commandsById, tares, status: stateStatus } = useStateStream(
+  server_ip,
+  { onDeviceRegistered },
+);
 provide('devices',      devices);
 provide('kasaDevices',  kasaDevices);
 provide('commandsById', commandsById);
@@ -125,9 +135,119 @@ provide('testStartTime', testStartTime);
 
 // ── Telemetry streams (display→charts; raw→CSV is ingested on the Rust side) ─
 
-const { sensorData, telemetryStats, clearSensorData } = useTelemetryStream(server_ip);
+const { sensorData, telemetryStats, clearSensorData, msSinceLastTelemetry } = useTelemetryStream(server_ip);
 provide('sensorData', sensorData);
 provide('telemetryStats', telemetryStats);
+
+// ── View-only stream priming ─────────────────────────────────────────────────
+// The view-only build cannot command the stand, but it also cannot show
+// anything if nothing is streaming — the normal state before launch control's
+// ground station is up. Devices appear in the list and produce no data, which
+// reads as a fault rather than as "nobody has started the stream yet".
+//
+// So the pad gets one narrow exception: a *bare* STREAM at the preview rate,
+// only while the whole stand is silent. Each guard is load-bearing.
+//
+//   • Never STOP. Changing an already-active rate needs STOP+STREAM, which
+//     carries a deliberate data gap (see the re-arm notes above). Priming
+//     cannot interrupt a running stream because it never sends STOP.
+//   • Never a caller-chosen rate. primeStream() hard-codes the preview rate, so
+//     a pad client cannot set the stand's frequency even by mistake.
+//   • Only while nothing is flowing *anywhere*. The server forwards
+//     STREAM_START to every registered device unconditionally, so a STREAM at a
+//     rate different from the active one would re-rate the whole stand and drop
+//     a 190 Hz test to 30. Telemetry arriving at all proves someone else owns
+//     the rate, and the pad then stays quiet. This is why the check is global
+//     rather than per-device: a broadcast STREAM could not fix one silent
+//     device without re-rating every other one.
+//
+// Liveness comes from msSinceLastTelemetry(), which is stamped when a batch
+// lands on the socket. Do not substitute anything derived from sensorData or
+// telemetryStats: those are published inside requestAnimationFrame, which
+// Chrome throttles to zero in a hidden or backgrounded tab. A tablet with the
+// GUI open behind another app would read its own stalled render as "the stand
+// is silent" and re-rate a running test. This was observed, not theorised.
+
+// Priming never gives up: a silent stand is the normal state before launch
+// control is up, and the engineer who opens the page an hour later deserves the
+// same attempt as the one who opened it at boot. What it does instead is widen
+// the gap between tries, because a stand that has stayed silent through several
+// attempts is almost always one nobody has started yet rather than one a fourth
+// STREAM would wake. Backing off keeps that case from becoming a POST every
+// 5 s for hours across every tablet at the pad.
+//
+// The delay resets to the floor on anything that makes the earlier silence
+// stale: telemetry arriving, or a device joining.
+const PRIME_SILENCE_MS   = 5_000;    // silence threshold, and the first retry gap
+const PRIME_MAX_DELAY_MS = 60_000;   // ceiling on the widened gap
+
+let primeDelayMs = PRIME_SILENCE_MS;
+let primeTimer   = null;
+
+function scheduleNextPrime() {
+  // Jitter so several tablets opening together don't all fire on the same tick.
+  primeTimer = setTimeout(maybePrimeStream, primeDelayMs + Math.random() * 1_000);
+}
+
+// The stand no longer looks the way it did when the gap was widened, so start
+// over at the floor. Re-arms an in-flight timer too — otherwise a 60 s wait
+// already ticking would swallow the very retry this reset exists to trigger.
+function resetPrimingBudget() {
+  primeDelayMs = PRIME_SILENCE_MS;
+  if (primeTimer !== null) {
+    clearTimeout(primeTimer);
+    scheduleNextPrime();
+  }
+}
+
+function stopStreamPriming() {
+  if (primeTimer === null) return;
+  clearTimeout(primeTimer);
+  primeTimer = null;
+}
+
+function startStreamPriming() {
+  stopStreamPriming();
+  if (!CAPS.streamPriming || !server_ip.value) return;
+  primeDelayMs = PRIME_SILENCE_MS;
+  scheduleNextPrime();
+}
+
+async function maybePrimeStream() {
+  primeTimer = null;
+  // Torn down while this tick was pending — do not reschedule.
+  if (!CAPS.streamPriming || !server_ip.value) return;
+
+  // Something is already streaming — leave the rate alone. Telemetry arriving
+  // also means any widening so far describes a stand that no longer exists.
+  if (msSinceLastTelemetry() < PRIME_SILENCE_MS) {
+    resetPrimingBudget();
+    scheduleNextPrime();
+    return;
+  }
+
+  // Nothing that could stream is connected; a STREAM would just fail with 400.
+  // Not a failed attempt — it never left the tab, so the gap stays put.
+  const hasLiveSensors = devices.value.some(
+    (dev) => dev.connected !== false && (dev.sensors ?? []).length > 0
+  );
+  if (!hasLiveSensors) {
+    scheduleNextPrime();
+    return;
+  }
+
+  try {
+    await primeStream();
+    console.log(`[App] primed preview stream at ${PREVIEW_STREAM_HZ} Hz`);
+  } catch (err) {
+    console.error('[App] stream priming failed:', err);
+  }
+
+  // Whether the POST succeeded says nothing about whether the stand woke up —
+  // only telemetry does, and that resets this. So widen after every real try.
+  primeDelayMs = Math.min(primeDelayMs * 2, PRIME_MAX_DELAY_MS);
+  scheduleNextPrime();
+}
 
 // ── Control state bits → Rust (used by the raw-telemetry CSV recorder) ───────
 // The raw /ws/telemetry/raw stream is consumed entirely in Rust and only
@@ -275,7 +395,7 @@ async function stopTest() {
   }
   // Restart preview stream after test ends
   if (server_ip.value) {
-    try { await setStream(30); } catch { /* ignore */ }
+    try { await setStream(PREVIEW_STREAM_HZ); } catch { /* ignore */ }
   }
 }
 
@@ -293,14 +413,19 @@ provide('readOnly', !canCommand);
 
 watch(server_ip, async (ip) => {
   stopStatusRefresh();
+  stopStreamPriming();
 
   clearSensorData();
   clearLogs();
 
   // The view-only build stops here: it neither owns the stream rate nor may
   // change it. Everything below issues broadcast commands that would affect
-  // every client of this server, including a test in progress.
-  if (!canCommand) return;
+  // every client of this server, including a test in progress. The one thing it
+  // may do is prime a preview stream on a stand that is wholly silent.
+  if (!canCommand) {
+    if (ip) startStreamPriming();
+    return;
+  }
 
   // Stop any active test when IP changes
   if (testActive.value) {
@@ -314,7 +439,7 @@ watch(server_ip, async (ip) => {
 
   // Start 30 Hz preview stream so data is visible before a test begins.
   // The /ws/state snapshot will arrive automatically when the socket connects.
-  try { await setStream(30); } catch (err) {
+  try { await setStream(PREVIEW_STREAM_HZ); } catch (err) {
     console.error('[App] preview STREAM failed:', err);
   }
   requestStatusSnapshot('connect');
@@ -411,6 +536,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopStatusRefresh();
+  stopStreamPriming();
   _ipChannel.close();
   _settingsChannel.close();
   _testChannel.close();
