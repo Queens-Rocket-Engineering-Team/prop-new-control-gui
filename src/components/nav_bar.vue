@@ -2,7 +2,7 @@
 import { ref, watch, inject, onMounted, onUnmounted } from "vue";
 import Button from "primevue/button";
 import ServerBar from "./server_bar.vue";
-import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { CAPS, availablePanels } from "../lib/platform.js";
 import logoUrl from "../../app-icon.svg";
 
 import CameraPanel from "../windows/camera_panel.vue";
@@ -11,6 +11,21 @@ import ControlPanel from "../windows/control_panel.vue";
 import DebugPanel from "../windows/debug_panel.vue";
 import FlightPanel from "../windows/flight_panel.vue";
 import DeviceSummaryPanel from "../windows/device_summary.vue";
+
+// Which panels this build exposes, in nav order. Driven by platform.js so
+// re-enabling a panel for the pad is a one-line change there.
+const PANELS = {
+  control: { label: "Control",     component: ControlPanel },
+  graph:   { label: "Data",        component: GraphPanel },
+  camera:  { label: "Camera View", component: CameraPanel },
+  devices: { label: "Devices",     component: DeviceSummaryPanel },
+  debug:   { label: "Debug",       component: DebugPanel },
+  flight:  { label: "Flight",      component: FlightPanel },
+};
+
+const navPanels = availablePanels().map((key) => ({ key, ...PANELS[key] }));
+
+const canCommand = CAPS.commands;
 
 const emit = defineEmits(["navigate", "open-settings", "open-about", "resize"]);
 
@@ -67,9 +82,19 @@ onUnmounted(() => {
 
 let _extraWindowCount = 0;
 
-function addWindow() {
+// Desktop spawns a real native window; the browser opens a tab. Either way the
+// BroadcastChannel sync in App.vue keeps server IP, settings and test state
+// consistent between them, so both behave the same from here on.
+async function addWindow() {
   _extraWindowCount++;
+
+  if (!CAPS.nativeWindows) {
+    window.open(window.location.href, '_blank');
+    return;
+  }
+
   const label = `extra-${_extraWindowCount}`;
+  const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
   const win = new WebviewWindow(label, {
     url:   '/',
     title: `prop-control-gui — Window ${_extraWindowCount + 1}`,
@@ -142,17 +167,20 @@ function formatElapsed(ms) {
 
     <div id="collapse" v-show="!isCollapsed">
       <div id="nav-upper">
-        <Button @click="emit('navigate', ControlPanel)" label="Control" />
-        <Button @click="emit('navigate', GraphPanel)"   label="Data" />
-        <Button @click="emit('navigate', CameraPanel)"  label="Camera View" />
-        <Button @click="emit('navigate', DeviceSummaryPanel)" label="Devices" />
-        <Button @click="emit('navigate', DebugPanel)"   label="Debug" />
-        <Button @click="emit('navigate', FlightPanel)"  label="Flight" />
+        <Button
+          v-for="panel in navPanels"
+          :key="panel.key"
+          :label="panel.label"
+          @click="emit('navigate', panel.component)"
+        />
       </div>
 
       <div id="nav-lower">
         <ServerBar :server-ip="serverIp" />
+        <!-- Starting a test broadcasts STREAM to the whole stand and drives the
+             local CSV recorder; neither is available to the view-only build. -->
         <button
+          v-if="canCommand"
           class="test-btn"
           :class="testActive ? 'test-btn--active' : 'test-btn--idle'"
           @click="testActive ? stopTest() : startTest()"
@@ -164,6 +192,10 @@ function formatElapsed(ms) {
             {{ formatElapsed(elapsed) }}
           </span>
         </button>
+        <div v-else class="view-only-badge" title="Commands are issued from launch control">
+          <i class="pi pi-eye" />
+          <span>View only</span>
+        </div>
       </div>
     </div>
 
@@ -329,6 +361,26 @@ function formatElapsed(ms) {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.08em;
   opacity: 0.9;
+}
+
+/* Replaces the Start/Stop Test button in the view-only build, so the space
+   reads as deliberately empty rather than as a missing control. */
+.view-only-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.view-only-badge .pi {
+  font-size: 0.85rem;
 }
 
 /* Drag handle */

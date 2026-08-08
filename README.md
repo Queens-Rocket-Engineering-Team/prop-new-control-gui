@@ -1,6 +1,86 @@
-# Tauri + Vue 3
+# prop-control-gui
 
-This template should help get you started developing with Tauri + Vue 3 in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+Vue 3 + Vite frontend for the QRET propulsion test stand, built from one
+codebase into two shapes.
+
+| Target | Command | Output | Where it runs |
+|---|---|---|---|
+| **desktop** | `npm run tauri dev` / `npm run build` | `dist/` (bundled by Tauri) | Launch control. Full command authority. |
+| **web** | `npm run dev:web` / `npm run build:web` | `dist-web/` (served by nginx) | Tablets at the pad. **View only.** |
+
+## The view-only web build
+
+Engineers at the pad need to see pressures and control states without radioing
+launch control for every reading. The web build gives them that, and nothing
+else: all commanding stays at launch control.
+
+`src/lib/platform.js` owns the distinction. Every capability is derived from
+`mode()` there rather than checked ad hoc, so what the pad can do is answerable
+by reading one file. `src/lib/desktop.js` is the only module permitted to import
+`@tauri-apps/api` — it wraps every Rust command with a web-mode fallback, which
+also keeps Tauri code (which throws on load outside a webview) out of the web
+bundle.
+
+**Command authority is gated in two places, and both matter.**
+`useServerApi.js` is the choke point that rejects mutating calls. But the
+guards in `App.vue` are what actually protect a live test: stream setup, the
+re-arm watchdog and the 5 s status poll all run off App.vue's own lifecycle
+rather than any button, and QLCP `STREAM`/`STOP` are *broadcast*. Without those
+guards a tablet would re-arm the stream rate for the whole stand just by being
+open, and `STOP`+`STREAM` carries a deliberate telemetry gap.
+
+The one permitted write is `POST /v1/discover`, so someone who just powered a
+device on can pull it in without a radio call. It is safe because the server
+already broadcasts that exact multicast every 30 s on its own — the button only
+skips the wait. Kasa discovery is deliberately *not* included: it is a
+broadcast-and-wait scan that occupies the server's event loop for seconds.
+
+### Verifying it stays read-only
+
+Serve `dist-web/` against a server (or a request-logging stub) and watch the
+network traffic. Across a whole session, including a device disconnect and
+rejoin, the only non-GET request may be `POST /v1/discover`, and only in direct
+response to the discover button. Anything else is a regression.
+
+### Known gaps
+
+- **Tares** live in Rust and are applied to displayed values, so the web build
+  shows *raw* readings while launch control shows tared ones. The two can
+  disagree for the same sensor over the radio. Fixing it properly means moving
+  tares into server state on `/ws/state`.
+- **The pad cannot tell a test is running.** `testActive` is synced only via
+  `BroadcastChannel` (same browser, same origin), so the discover button cannot
+  be disabled during a hot fire.
+- **Camera and Flight panels are hidden** in the web build — multiple WebRTC
+  streams would hammer both the tablet and the wifi link, and the offline
+  basemap has no browser equivalent (`tileSource.js` falls back to online OSM
+  tiles, which are unavailable at a launch site).
+- **Touch ergonomics**: the nav resize handle is mouse-only, and nothing is
+  responsive below desktop widths.
+
+## Deployment
+
+`Dockerfile.web` builds the web target into an nginx image listening on **8080**
+(8000, 8189, 8558, 8889, 9997 and 64738 are taken by the server stack). It
+serves static files only — the browser talks to the API and mediamtx directly,
+so the server needs no changes to host it.
+
+`PROP_SERVER_IP` optionally pins the API target. Leaving it unset is the normal
+case: the SPA then falls back to whichever host served the page, which is
+correct when the container runs alongside the server.
+
+In `prop-teststand/compose.prod.yml` the `gui` service is behind a profile, so
+it is off unless explicitly enabled:
+
+```sh
+COMPOSE_PROFILES=gui docker compose -f compose.prod.yml up -d
+# or set COMPOSE_PROFILES=gui in .env
+```
+
+`.github/workflows/release.yml` publishes both shapes on a GitHub Release:
+desktop installers attached to the release, and a multi-arch image pushed to
+`ghcr.io/<repo>-web` tagged with the release tag and `latest`. Pin `GUI_TAG` on
+the server so what pad tablets load is a deliberate choice.
 
 ## Recommended IDE Setup
 

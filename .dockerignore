@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-web/
+dist-ssr/
+
+# The Rust side is irrelevant to the web build and target/ is enormous.
+src-tauri/
+
+.git/
+.github/
+.vscode/
+.idea/
+
+*.log
+*.local
+data/

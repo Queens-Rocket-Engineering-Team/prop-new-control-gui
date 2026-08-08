@@ -3,6 +3,7 @@ import { ref, inject, computed, reactive, watch } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 import PidDiagram from '../components/PidDiagram.vue'
 import { useServerApi } from '../composables/useServerApi.js'
+import { CAPS } from '../lib/platform.js'
 
 const serverIp     = inject('serverIp',     ref(''))
 const devices      = inject('devices',      ref([]))
@@ -14,6 +15,11 @@ const setKasaState = inject('setKasaState', () => {})
 const requestStatusSnapshot = inject('requestStatusSnapshot', () => Promise.resolve())
 
 const { setControl, sendEstop } = useServerApi(serverIp)
+
+// The view-only build renders live state but cannot act on it. Controls are
+// disabled rather than hidden so the pad still sees what exists and what it is
+// doing — a control that looks live and silently fails is worse than a dead one.
+const readOnly = !CAPS.commands
 
 // ── Emergency stop ───────────────────────────────────────────────────────────
 
@@ -423,6 +429,13 @@ async function onAuxToggle(controlName, newEnergised) {
 
 <template>
   <div id="control-panel">
+    <!-- Occupies the slot the E-STOP button uses on desktop, so the absence of
+         that button reads as intentional rather than as a failed render. -->
+    <div v-if="readOnly" class="view-only-banner">
+      <i class="pi pi-eye" />
+      <span>VIEW ONLY — controls are issued from launch control</span>
+    </div>
+
     <PidDiagram :svg-url="svgUrl" @cells-parsed="onCellsParsed">
       <template #default="{ positionOf, positionBeside }">
 
@@ -454,7 +467,7 @@ async function onAuxToggle(controlName, newEnergised) {
             </span>
             <ToggleSwitch
               :modelValue="getAuxDisplayed(ctrl.key)"
-              :disabled="isAuxPending(ctrl.key)"
+              :disabled="isAuxPending(ctrl.key) || readOnly"
               @update:modelValue="onAuxToggle(ctrl.key, $event)"
               class="aux-toggle"
             />
@@ -485,9 +498,9 @@ async function onAuxToggle(controlName, newEnergised) {
               </span>
               <button
                 class="variable-edit-btn"
-                :disabled="isAuxPending(ctrl.key)"
+                :disabled="isAuxPending(ctrl.key) || readOnly"
                 @click="toggleVariableEditor(ctrl.key)"
-                title="Set value"
+                :title="readOnly ? 'Controls are issued from launch control' : 'Set value'"
               >
                 <i class="pi pi-pencil" />
               </button>
@@ -539,6 +552,7 @@ async function onAuxToggle(controlName, newEnergised) {
               </span>
               <ToggleSwitch
                 :modelValue="dev.active"
+                :disabled="readOnly"
                 @update:modelValue="setKasaState(dev.host, $event)"
                 class="aux-toggle"
               />
@@ -571,7 +585,7 @@ async function onAuxToggle(controlName, newEnergised) {
               <div class="valve-toggle-col">
                 <ToggleSwitch
                   :modelValue="getDisplayedOpen(id)"
-                  :disabled="!isValveEnabled(id) || isControlPending(id)"
+                  :disabled="!isValveEnabled(id) || isControlPending(id) || readOnly"
                   @update:modelValue="onValveToggle(id, $event)"
                 />
               </div>
@@ -654,7 +668,7 @@ async function onAuxToggle(controlName, newEnergised) {
     </PidDiagram>
 
     <!-- ── E-STOP button (fixed top-right) ── -->
-    <button class="estop-btn" @click="showEstopConfirm = true">E-STOP</button>
+    <button v-if="!readOnly" class="estop-btn" @click="showEstopConfirm = true">E-STOP</button>
 
     <!-- ── E-STOP confirmation dialog ── -->
     <Teleport to="body">
@@ -1147,6 +1161,27 @@ async function onAuxToggle(controlName, newEnergised) {
 .variable-cancel-btn:hover {
   background: var(--bg-surface);
   color: var(--text-primary);
+}
+
+/* ── View-only banner (web build; sits where E-STOP does on desktop) ── */
+
+.view-only-banner {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  user-select: none;
 }
 
 /* ── E-STOP button ── */

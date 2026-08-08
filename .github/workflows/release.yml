@@ -1,0 +1,117 @@
+name: Release
+
+# Publishes both shapes of the GUI from one tag:
+#   • desktop installers, attached to the GitHub Release
+#   • a container image of the view-only web build, pushed to GHCR
+#
+# A server then pulls a specific tag of the image, so the GUI a pad tablet loads
+# is a deliberate, pinned choice rather than whatever happens to be on main.
+
+on:
+    release:
+        types: [published]
+
+jobs:
+    desktop:
+        name: Desktop installers (${{ matrix.platform }})
+        runs-on: ${{ matrix.platform }}
+        permissions:
+            contents: write # Required for attaching installers to the release
+
+        strategy:
+            fail-fast: false # One platform failing should not hide the others
+            matrix:
+                platform: [windows-latest, macos-latest, ubuntu-22.04]
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+              with:
+                  persist-credentials: false
+
+            - name: Install Linux build dependencies
+              if: matrix.platform == 'ubuntu-22.04'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y \
+                    libwebkit2gtk-4.1-dev \
+                    libappindicator3-dev \
+                    librsvg2-dev \
+                    patchelf \
+                    build-essential \
+                    curl \
+                    wget \
+                    file \
+                    libssl-dev \
+                    libgtk-3-dev
+
+            - name: Set up Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache Rust build
+              uses: swatinem/rust-cache@v2
+              with:
+                  workspaces: ./src-tauri -> target
+
+            - name: Set up Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: npm
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Build and attach installers
+              uses: tauri-apps/tauri-action@v0
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              with:
+                  releaseId: ${{ github.event.release.id }}
+
+    web:
+        name: View-only web image
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            packages: write # Required for pushing to GHCR
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+              with:
+                  persist-credentials: false
+
+            - name: Log in to GitHub Container Registry
+              uses: docker/login-action@v3
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Set up QEMU
+              uses: docker/setup-qemu-action@v3
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v3
+
+            - name: Extract Docker metadata
+              id: meta
+              uses: docker/metadata-action@v5
+              with:
+                  images: ghcr.io/${{ github.repository }}-web
+                  tags: |
+                      type=raw,value=latest
+                      type=raw,value=${{ github.ref_name }}
+
+            - name: Build and push image
+              uses: docker/build-push-action@v5
+              with:
+                  context: .
+                  file: ./Dockerfile.web
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: ${{ steps.meta.outputs.tags }}
+                  labels: ${{ steps.meta.outputs.labels }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max

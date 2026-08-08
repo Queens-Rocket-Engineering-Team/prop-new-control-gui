@@ -1,6 +1,12 @@
 <script setup>
 import { computed, onMounted, onUnmounted, provide, ref, shallowRef, watch } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { CAPS } from "./lib/platform.js";
+import {
+  fetchServerIp,
+  startRecording,
+  stopRecording,
+  updateControlStates,
+} from "./lib/desktop.js";
 import { useServerApi } from "./composables/useServerApi.js";
 import { useStateStream } from "./composables/useStateStream.js";
 import { useTelemetryStream } from "./composables/useTelemetryStream.js";
@@ -24,6 +30,14 @@ function setActive(component) {
   requestStatusSnapshot('window-switch');
 }
 
+// ── Command authority ────────────────────────────────────────────────────────
+// The web build served to the pad is view-only. Guarding here as well as in
+// useServerApi is what actually matters: everything below runs off App.vue's
+// own lifecycle rather than any button, so without these guards a tablet at the
+// pad would broadcast STOP/STREAM to the whole stand just by being open.
+// The one exception is device discovery — see CAPS.espDiscovery.
+const canCommand = CAPS.commands;
+
 const navbarWidth = ref(180);
 function onNavResize(w) {
   navbarWidth.value = w;
@@ -43,6 +57,7 @@ provide('testFrequency', testFrequency);
 const { stopStream, setStream, setControl, requestStatus, discoverDevices, discoverKasaDevices, controlKasaDevice, sendEstop, setTare: apiSetTare, clearTare: apiClearTare, startAudio, stopAudio, listAudioFiles, audioFileUrl } = useServerApi(server_ip);
 
 function requestStatusSnapshot(reason = 'manual') {
+  if (!canCommand) return Promise.resolve();
   if (!server_ip.value) return Promise.resolve();
   return requestStatus().catch((err) =>
     console.error(`[App] STATUS request failed (${reason}):`, err)
@@ -61,6 +76,7 @@ function stopStatusRefresh() {
 
 function startStatusRefresh() {
   stopStatusRefresh();
+  if (!canCommand) return;
   if (!server_ip.value) return;
   statusRefreshTimer = setInterval(() => {
     requestStatusSnapshot('interval');
@@ -122,6 +138,7 @@ provide('telemetryStats', telemetryStats);
 function _normalizeId(id) { return id.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() }
 
 function pushControlStates() {
+  if (!CAPS.recording) return;   // no Rust-side CSV recorder to feed
   const valveStateBits     = {};
   const auxiliaryStateBits = {};
   for (const dev of devices.value) {
@@ -152,7 +169,7 @@ function pushControlStates() {
     kasaStateBits[key] = device?.active ? 1 : 0;
   }
 
-  invoke('update_control_states', {
+  updateControlStates({
     valveStates:      valveStateBits,
     auxiliaryStates:  auxiliaryStateBits,
     kasaStates:       kasaStateBits,
@@ -181,13 +198,27 @@ provide('wsStatus', wsStatus);
 // ── Kasa smart plugs ──────────────────────────────────────────────────────────
 // kasaDevices is now owned by useStateStream; kasa.* deltas keep it current.
 
+// ESP discovery is a fire-and-forget UDP multicast the server already sends
+// every 30 s, so the view-only build keeps it — an engineer at the pad who just
+// powered a device on can pull it in without radioing launch control.
+//
+// Kasa discovery is deliberately excluded there: it is a broadcast-and-wait
+// scan that occupies the server's event loop for seconds, and Kasa plugs are
+// launch-control-side power management the pad has no reason to scan for.
 async function discover() {
-  await Promise.allSettled([
-    discoverKasaDevices()
-      .catch((err) => console.error('[App] discoverKasa failed:', err)),
+  const tasks = [
     discoverDevices()
       .catch((err) => console.error('[App] discoverDevices failed:', err)),
-  ])
+  ];
+
+  if (canCommand) {
+    tasks.push(
+      discoverKasaDevices()
+        .catch((err) => console.error('[App] discoverKasa failed:', err)),
+    );
+  }
+
+  await Promise.allSettled(tasks);
 }
 provide('discover', discover);
 
@@ -218,14 +249,12 @@ function formatDatetime() {
 }
 
 async function startTest() {
+  if (!canCommand) return;
   if (testActive.value) return;
   try {
     await stopStream();
     await setStream(testFrequency.value);
-    await invoke('start_recording', {
-      mode:     pidConfig.value,
-      datetime: formatDatetime(),
-    });
+    await startRecording(pidConfig.value, formatDatetime());
     testActive.value    = true;
     testStartTime.value = Date.now();
   } catch (err) {
@@ -234,12 +263,13 @@ async function startTest() {
 }
 
 async function stopTest() {
+  if (!canCommand) return;
   if (!testActive.value) return;
   testActive.value    = false;
   testStartTime.value = null;
   try {
     await stopStream();
-    await invoke('stop_recording');
+    await stopRecording();
   } catch (err) {
     console.error('[App] stopTest failed:', err);
   }
@@ -252,6 +282,10 @@ async function stopTest() {
 provide('startTest', startTest);
 provide('stopTest',  stopTest);
 
+// Panels bind this to :disabled so a control that cannot act also cannot be
+// pressed — a live-looking button that silently fails is worse than a dead one.
+provide('readOnly', !canCommand);
+
 // ── Config fetch on connect ──────────────────────────────────────────────────
 // The /ws/state socket auto-resyncss on connect, so no manual config fetching is
 // needed — the snapshot brings devices, kasa, commands and tares. We just manage
@@ -260,6 +294,14 @@ provide('stopTest',  stopTest);
 watch(server_ip, async (ip) => {
   stopStatusRefresh();
 
+  clearSensorData();
+  clearLogs();
+
+  // The view-only build stops here: it neither owns the stream rate nor may
+  // change it. Everything below issues broadcast commands that would affect
+  // every client of this server, including a test in progress.
+  if (!canCommand) return;
+
   // Stop any active test when IP changes
   if (testActive.value) {
     await stopTest();
@@ -267,9 +309,6 @@ watch(server_ip, async (ip) => {
     // Stop any preview stream running on the old IP
     try { await stopStream(); } catch { /* ignore */ }
   }
-
-  clearSensorData();
-  clearLogs();
 
   if (!ip) return;
 
@@ -365,7 +404,7 @@ onMounted(async () => {
 onMounted(() => {
   // Tares need no bootstrap: the /ws/state snapshot that arrives on connect
   // carries the full map, and tare.updated/tare.cleared deltas keep it current.
-  invoke("fetch_server_ip")
+  fetchServerIp()
     .then((ip) => { if (ip) server_ip.value = ip; })
     .catch(() => {});
 });

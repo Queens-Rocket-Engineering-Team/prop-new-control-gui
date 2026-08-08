@@ -1,5 +1,10 @@
 <script setup>
 import { ref, inject } from 'vue'
+import { CAPS } from '../lib/platform.js'
+
+// Recording the Mumble channel is a server-side action, so the view-only build
+// can browse existing files but not start or stop a recording.
+const canRecord = CAPS.commands
 
 const startAudio    = inject('startAudio',    () => Promise.resolve())
 const stopAudio     = inject('stopAudio',     () => Promise.resolve())
@@ -55,7 +60,7 @@ async function loadFiles() {
     <button
       class="audio-btn"
       :class="{ 'audio-btn--recording': recording }"
-      :disabled="busy"
+      :disabled="busy || !canRecord"
       @click="toggleRecording"
       title="Mumble audio recording"
     >

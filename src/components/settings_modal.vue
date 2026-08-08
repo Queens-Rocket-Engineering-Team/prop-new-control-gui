@@ -1,6 +1,11 @@
 <script setup>
 import { ref, watch, nextTick, onMounted, onUnmounted } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { CAPS } from "../lib/platform.js";
+import {
+  fetchCameraRecordingDir,
+  setCameraRecordingDir,
+  submitIp,
+} from "../lib/desktop.js";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
 
@@ -20,6 +25,13 @@ const cameraRecordingDir = ref("");
 const localPidConfig = ref("rocket-launch");
 const localTestFreq = ref(190);
 const overlayRef = ref(null);
+
+// Choosing a directory to record into only means something where there is a
+// disk to write to; the web build hides that section rather than showing a
+// control that does nothing.
+const showDesktopSettings = CAPS.fileSave;
+// Test configuration drives commands the view-only build cannot issue.
+const readOnly = !CAPS.commands;
 
 // ── Dark mode — persisted in localStorage, synced across windows ──────────────
 // localStorage is shared across all Tauri windows (same WebView2 data dir),
@@ -73,7 +85,7 @@ watch(
       localTestFreq.value  = props.testFrequency || 190;
 
       try {
-        const dir = await invoke("fetch_camera_recording_dir");
+        const dir = await fetchCameraRecordingDir();
         cameraRecordingDir.value = dir || "";
       } catch (err) {
         console.error("Failed to fetch camera recording directory:", err);
@@ -98,13 +110,13 @@ function isValidIp(ip) {
 
 function applyIp() {
   if (ipMode.value === "none") {
-    invoke("submit_ip", { newIp: "" });
+    submitIp("");
     emit("update-ip", "");
     return;
   }
   const ip = ipMode.value === "localhost" ? "localhost" : customIp.value.trim();
   if (ipMode.value === "custom" && (!ip || !isValidIp(ip))) return;
-  invoke("submit_ip", { newIp: ip });
+  submitIp(ip);
   emit("update-ip", ip);
 }
 
@@ -120,7 +132,7 @@ watch(customIp, () => {
 
 function applyCameraRecordingDir() {
   const dir = cameraRecordingDir.value.trim();
-  invoke("set_camera_recording_dir", { newDir: dir });
+  setCameraRecordingDir(dir);
 }
 </script>
 
@@ -150,7 +162,7 @@ function applyCameraRecordingDir() {
             <i class="pi pi-moon" :style="{color: darkMode ? '#f39c12' : 'var(--text-secondary)'}"></i>
           </div>
         </div>
-        <div class="setting-group">
+        <div class="setting-group" v-if="!readOnly">
           <span class="setting-group-label"><i class="pi pi-sliders-h" />Test Configuration</span>
           <label class="option-row" for="cfg-hot-fire">
             <RadioButton v-model="localPidConfig" value="hot-fire" inputId="cfg-hot-fire" />
@@ -161,7 +173,7 @@ function applyCameraRecordingDir() {
             <span>Rocket Launch</span>
           </label>
         </div>
-        <div class="setting-group">
+        <div class="setting-group" v-if="!readOnly">
           <span class="setting-group-label"><i class="pi pi-wave-pulse" />Test Stream Frequency</span>
           <div class="option-row freq-row">
             <input
@@ -196,7 +208,7 @@ function applyCameraRecordingDir() {
           </label>
         </div>
 
-        <div class="setting-group">
+        <div class="setting-group" v-if="showDesktopSettings">
           <span class="setting-group-label"><i class="pi pi-video" />Camera Recording Directory</span>
           <input
             type="text"

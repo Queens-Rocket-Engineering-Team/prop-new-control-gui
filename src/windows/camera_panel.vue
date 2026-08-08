@@ -1,5 +1,5 @@
 <script setup>
-import { invoke } from "@tauri-apps/api/core";
+import { saveDownloadedCameraRecording } from "../lib/desktop.js";
 import {
     inject,
     nextTick,
@@ -856,7 +856,7 @@ async function downloadRecording(recording) {
     const filename = recording.filename || "recording.mp4";
     const buffer = await response.arrayBuffer();
     const bytes = Array.from(new Uint8Array(buffer));
-    return invoke("save_downloaded_camera_recording", { filename, data: bytes });
+    return saveDownloadedCameraRecording(filename, bytes);
 }
 
 async function startRecording(item) {
