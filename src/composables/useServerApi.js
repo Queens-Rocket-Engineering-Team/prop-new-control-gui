@@ -19,6 +19,22 @@ export function useServerApi(serverIp) {
     return baseUrl.value
   }
 
+  /**
+   * Build an Error for a failed response, carrying the HTTP status and the
+   * parsed FastAPI `detail` so callers can react to specific failures — e.g.
+   * the 409 the tare endpoint returns when a sensor name is ambiguous across
+   * two connected devices.
+   */
+  async function _httpError(res) {
+    const text = await res.text().catch(() => res.statusText)
+    let detail
+    try { detail = JSON.parse(text)?.detail } catch { /* not JSON */ }
+    const err = new Error(`${res.status}: ${text}`)
+    err.status = res.status
+    err.detail = detail
+    return err
+  }
+
   async function _post(path, body = undefined, { tolerateCodes = [] } = {}) {
     const url = `${_requireUrl()}${path}`
     const init = { method: 'POST' }
@@ -28,19 +44,23 @@ export function useServerApi(serverIp) {
     }
     const res = await fetch(url, init)
     if (!res.ok && !tolerateCodes.includes(res.status)) {
-      const text = await res.text().catch(() => res.statusText)
-      throw new Error(`${res.status}: ${text}`)
+      throw await _httpError(res)
     }
     return res.json().catch(() => ({}))
   }
 
   async function _get(path) {
     const res = await fetch(`${_requireUrl()}${path}`)
-    if (!res.ok) {
-      const text = await res.text().catch(() => res.statusText)
-      throw new Error(`${res.status}: ${text}`)
-    }
+    if (!res.ok) throw await _httpError(res)
     return res.json()
+  }
+
+  async function _delete(path, { tolerateCodes = [] } = {}) {
+    const res = await fetch(`${_requireUrl()}${path}`, { method: 'DELETE' })
+    if (!res.ok && !tolerateCodes.includes(res.status)) {
+      throw await _httpError(res)
+    }
+    return res.json().catch(() => ({}))
   }
 
   // ── ESP Device Commands — POST /v1/command ────────────────────────────────────
@@ -132,6 +152,52 @@ export function useServerApi(serverIp) {
     return _post(`/v1/kasa?${params}`)
   }
 
+  // ── Tares ─────────────────────────────────────────────────────────────────────
+  //
+  // Tare offsets live on the server, which applies them before fanning telemetry
+  // out — so every connected GUI sees the same tared values and no client ever
+  // subtracts an offset itself. Changes arrive back on /ws/state as tare.updated
+  // / tare.cleared deltas; these calls only need to fire and forget.
+
+  /**
+   * POST /v1/tares — capture (or set) a tare offset for a sensor.
+   * With no options the server averages its most recent raw samples itself.
+   * @param {string} sensorName
+   * @param {object} [opts]
+   * @param {string} [opts.deviceName] - required only when two connected devices
+   *                                     report this sensor name (409 otherwise)
+   * @param {number} [opts.samples]    - raw samples to average, 1–256 (default 16)
+   * @param {number} [opts.offset]     - set this exact offset, skipping capture
+   * @returns {Promise<{sensor_name:string, offset:number, sampled_device:string,
+   *                    sample_count:number, applies_to:string[]}>}
+   */
+  function setTare(sensorName, { deviceName, samples, offset } = {}) {
+    return _post('/v1/tares', {
+      sensor_name: sensorName,
+      ...(deviceName !== undefined && { device_name: deviceName }),
+      ...(samples    !== undefined && { samples }),
+      ...(offset     !== undefined && { offset }),
+    })
+  }
+
+  /**
+   * GET /v1/tares — current offsets, keyed by sensor name.
+   * @returns {Promise<Record<string, number>>}
+   */
+  function getTares() {
+    return _get('/v1/tares')
+  }
+
+  /**
+   * DELETE /v1/tares — remove a sensor's offset. Idempotent.
+   * The name is a query parameter (not a path segment) because sensor names are
+   * arbitrary device-CONFIG JSON keys and may contain slashes or spaces.
+   * @param {string} sensorName
+   */
+  function clearTare(sensorName) {
+    return _delete(`/v1/tares?sensor_name=${encodeURIComponent(sensorName)}`)
+  }
+
   // ── Audio (Mumble) ────────────────────────────────────────────────────────────
 
   /**
@@ -183,6 +249,10 @@ export function useServerApi(serverIp) {
     fetchKasaDevices,
     discoverKasaDevices,
     controlKasaDevice,
+    // Tares
+    setTare,
+    getTares,
+    clearTare,
     // Audio
     startAudio,
     stopAudio,

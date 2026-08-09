@@ -9,7 +9,6 @@ const devices      = inject('devices',      ref([]))
 const commandsById = inject('commandsById', ref(new Map()))
 const pidConfig    = inject('pidConfig',    ref('rocket-launch'))
 const sensorData   = inject('sensorData',   ref({}))
-const tares        = inject('tares',        ref({}))
 const kasaDevices  = inject('kasaDevices',  ref([]))
 const setKasaState = inject('setKasaState', () => {})
 const requestStatusSnapshot = inject('requestStatusSnapshot', () => Promise.resolve())
@@ -187,21 +186,12 @@ const normalizedSensorMap = computed(() => {
   return map
 })
 
-const normalizedTaresMap = computed(() => {
-  const map = {}
-  for (const [name, offset] of Object.entries(tares.value)) {
-    map[normalizeId(name)] = offset
-  }
-  return map
-})
-
+// Values arrive already tared from the server — never subtract an offset here.
 function getLiveValue(drawioId) {
-  const norm   = normalizeId(drawioId)
-  const info   = normalizedSensorMap.value[norm]
+  const info = normalizedSensorMap.value[normalizeId(drawioId)]
   if (!info) return '—'
-  const offset = normalizedTaresMap.value[norm] ?? 0
-  const v      = info.value - offset
-  const abs    = Math.abs(v)
+  const v   = info.value
+  const abs = Math.abs(v)
   if (abs >= 1000) return v.toFixed(0)
   if (abs >= 10)   return v.toFixed(1)
   return v.toFixed(2)

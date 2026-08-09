@@ -129,13 +129,15 @@ fn handle_message(text: &str) {
         return;
     }
 
+    // `value` arrives already tared — the server owns tare offsets and applies
+    // them before fan-out — so it is recorded as-is. Subtracting here again
+    // would double-tare every reading.
     let mut readings = HashMap::with_capacity(msg.readings.len());
     for reading in msg.readings {
-        let tare = crate::tare_for(&reading.sensor_name);
         if !reading.unit.is_empty() {
             crate::set_sensor_unit(&reading.sensor_name, &reading.unit);
         }
-        readings.insert(reading.sensor_name, reading.value - tare);
+        readings.insert(reading.sensor_name, reading.value);
     }
 
     let (valve_states, auxiliary_states, kasa_states) = control_states_snapshot();
