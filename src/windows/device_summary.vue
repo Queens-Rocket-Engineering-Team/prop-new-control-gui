@@ -4,7 +4,6 @@ import ToggleSwitch from 'primevue/toggleswitch'
 
 const devices     = inject('devices',     ref([]))
 const sensorData  = inject('sensorData',  ref({}))
-const tares       = inject('tares',       ref({}))
 const kasaDevices = inject('kasaDevices', ref([]))
 const discover    = inject('discover',    () => {})
 const setKasaState = inject('setKasaState', () => {})
@@ -23,22 +22,13 @@ const normalizedSensorMap = computed(() => {
   return map
 })
 
-const normalizedTaresMap = computed(() => {
-  const map = {}
-  for (const [name, offset] of Object.entries(tares.value)) {
-    map[normalizeId(name)] = offset
-  }
-  return map
-})
-
+// Readings arrive already tared from the server — never subtract an offset here.
 function getLiveReading(sensorName) {
-  const norm   = normalizeId(sensorName)
-  const info   = normalizedSensorMap.value[norm]
+  const info = normalizedSensorMap.value[normalizeId(sensorName)]
   if (!info) return { value: '—', unit: '' }
-  const offset = normalizedTaresMap.value[norm] ?? 0
-  const v      = info.value - offset
-  const abs    = Math.abs(v)
-  const str    = abs >= 1000 ? v.toFixed(0) : abs >= 10 ? v.toFixed(1) : v.toFixed(2)
+  const v   = info.value
+  const abs = Math.abs(v)
+  const str = abs >= 1000 ? v.toFixed(0) : abs >= 10 ? v.toFixed(1) : v.toFixed(2)
   return { value: str, unit: info.unit }
 }
 

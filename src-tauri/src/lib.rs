@@ -1,17 +1,14 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::string::String;
 use std::sync::{LazyLock, Mutex};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 mod telemetry_raw;
 
 static IP_ADDRESS: Mutex<String> = Mutex::new(String::new());
-static TARES: LazyLock<Mutex<HashMap<String, f64>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-const TARES_UPDATED_EVENT: &str = "tares-updated";
 
 /// Latest known unit for each sensor name, as reported on the raw telemetry
 /// stream. Used to annotate CSV column headers, e.g. "PT101 [PSI]".
@@ -22,11 +19,6 @@ static SENSOR_UNITS: LazyLock<Mutex<HashMap<String, String>>> =
 /// websocket client to build its connection URL.
 pub(crate) fn server_ip() -> String {
     IP_ADDRESS.lock().unwrap().clone()
-}
-
-/// Current tare offset for a sensor, or 0.0 if none has been set.
-pub(crate) fn tare_for(name: &str) -> f64 {
-    TARES.lock().unwrap().get(name).copied().unwrap_or(0.0)
 }
 
 /// Record the latest reported unit for a sensor.
@@ -57,82 +49,6 @@ async fn submit_ip(new_ip: String) {
     let mut ip = IP_ADDRESS.lock().unwrap();
     println!("New IP Submitted: {}", new_ip);
     *ip = new_ip;
-}
-
-fn normalize_sensor_name(name: &str) -> String {
-    name.chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_lowercase())
-        .collect()
-}
-
-fn emit_tares_updated(app: &tauri::AppHandle, tares: &HashMap<String, f64>) -> Result<(), String> {
-    for (_, window) in app.webview_windows() {
-        let _ = window.emit(TARES_UPDATED_EVENT, tares);
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn get_tares() -> Result<HashMap<String, f64>, String> {
-    let guard = TARES.lock().map_err(|e| e.to_string())?;
-    Ok(guard.clone())
-}
-
-#[tauri::command]
-fn set_tare(
-    app: tauri::AppHandle,
-    name: String,
-    value: f64,
-) -> Result<HashMap<String, f64>, String> {
-    if !value.is_finite() {
-        return Err("Tare value must be finite".to_string());
-    }
-
-    let sensor_name = name.trim().to_string();
-    if sensor_name.is_empty() {
-        return Err("Sensor name is required".to_string());
-    }
-
-    let snapshot = {
-        let mut guard = TARES.lock().map_err(|e| e.to_string())?;
-        guard.insert(sensor_name, value);
-        guard.clone()
-    };
-
-    emit_tares_updated(&app, &snapshot)?;
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn prune_tares_for_live_sensors(
-    app: tauri::AppHandle,
-    live_sensor_names: Vec<String>,
-) -> Result<HashMap<String, f64>, String> {
-    let live_names: HashSet<String> = live_sensor_names
-        .iter()
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
-        .collect();
-    let live_keys: HashSet<String> = live_names
-        .iter()
-        .map(|name| normalize_sensor_name(name))
-        .filter(|name| !name.is_empty())
-        .collect();
-
-    let (snapshot, changed) = {
-        let mut guard = TARES.lock().map_err(|e| e.to_string())?;
-        let before_len = guard.len();
-        guard.retain(|name, _| {
-            live_names.contains(name) || live_keys.contains(&normalize_sensor_name(name))
-        });
-        (guard.clone(), guard.len() != before_len)
-    };
-
-    if changed {
-        emit_tares_updated(&app, &snapshot)?;
-    }
-    Ok(snapshot)
 }
 
 // ── CSV recorder ─────────────────────────────────────────────────────────────
@@ -331,7 +247,9 @@ fn start_recording(mode: String, datetime: String) -> Result<String, String> {
 }
 
 /// Append one row of sensor readings, sourced from the raw telemetry
-/// websocket stream (see `telemetry_raw`).
+/// websocket stream (see `telemetry_raw`). Readings are recorded exactly as the
+/// server sends them — the server owns tare offsets and applies them before
+/// fan-out, so these values are already tared and match what operators see.
 /// For the first HEADER_BATCHES calls, data is buffered so that the full set of
 /// sensor names can be determined before the header is written.  After that,
 /// rows are written immediately and flushed every 10 writes.
@@ -570,9 +488,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             fetch_server_ip,
             submit_ip,
-            get_tares,
-            set_tare,
-            prune_tares_for_live_sensors,
             start_recording,
             stop_recording,
             telemetry_raw::update_control_states,
