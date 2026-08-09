@@ -22,7 +22,7 @@ const error        = ref(null)
 const pidCells = ref({})             // { [id]: { x, y, w, h } }
 const viewBox  = ref({ width: 1466, height: 952 })  // updated from SVG
 
-const { positionOf, positionBeside } = usePidOverlay(containerRef, pidCells, viewBox)
+const { positionOf, positionBeside, leaderLines } = usePidOverlay(containerRef, pidCells, viewBox)
 
 // ─── mxfile parsing ────────────────────────────────────────────────────────
 // drawio embeds the diagram data as mxfile XML in the SVG's `content`
@@ -83,6 +83,19 @@ function parsePidCells(svgText) {
 
     const isEdge = (mxCellChild?.getAttribute('edge') ?? el.getAttribute('edge')) === '1'
 
+    // drawio rotates shapes in place around their own center, so a cell's
+    // on-screen width/height are swapped from its declared geometry at
+    // +/-90deg (and equivalent) rotations. Overlay math needs this to
+    // position labels flush against the correct (rotated) edge.
+    const style = mxCellChild?.getAttribute('style') ?? el.getAttribute('style') ?? ''
+    const rotMatch = style.match(/rotation=(-?\d+(?:\.\d+)?)/)
+    const rotation = rotMatch ? ((parseFloat(rotMatch[1]) % 180) + 180) % 180 : 0
+
+    // Hoses, waypoints and zigzags are pipe *runs* drawn as vertices rather
+    // than edges. They read as plain lines, so an overlay may cover them —
+    // unlike a valve or instrument, whose glyph carries meaning.
+    const isPiping = /shape=(waypoint|zigzag|link)\b|shape=mxgraph\.pid\.piping\./.test(style)
+
     raw[id] = {
       x: parseFloat(geo.getAttribute('x')      ?? '0'),
       y: parseFloat(geo.getAttribute('y')      ?? '0'),
@@ -90,8 +103,44 @@ function parsePidCells(svgText) {
       h: parseFloat(geo.getAttribute('height') ?? '0'),
       parent,
       isEdge,
+      rotation,
+      isPiping,
     }
   }
+
+  // ── Pass 1.5: recover the model → viewBox translation ───────────────────
+  // drawio crops its SVG export to the drawing's content bounds, so every
+  // mxGeometry coordinate is uniformly translated relative to the rendered
+  // viewBox (e.g. -60,+132 for the rocket P&ID, -60,-17 for hot-fire).
+  // Each rendered cell group carries an invisible hitbox <rect> whose x/y is
+  // that cell's unrotated top-left *in viewBox space*, so comparing those to
+  // mxGeometry recovers the offset — using attributes only, no layout needed.
+  function modelToViewBox() {
+    const dxs = []
+    const dys = []
+
+    for (const g of svgDoc.querySelectorAll('g[data-cell-id]')) {
+      const cell = raw[g.getAttribute('data-cell-id')]
+      if (!cell || cell.isEdge || !cell.w || !cell.h) continue
+      // Child cells carry parent-relative geometry; only compare root-level ones.
+      if (cell.parent !== '1' && cell.parent !== '0') continue
+
+      for (const rect of g.querySelectorAll('rect[fill="none"][stroke="none"]')) {
+        const w = parseFloat(rect.getAttribute('width'))
+        const h = parseFloat(rect.getAttribute('height'))
+        if (Math.abs(w - cell.w) > 1.5 || Math.abs(h - cell.h) > 1.5) continue
+        dxs.push(parseFloat(rect.getAttribute('x')) - cell.x)
+        dys.push(parseFloat(rect.getAttribute('y')) - cell.y)
+        break
+      }
+    }
+
+    // Median shrugs off any shape whose hitbox happens to match by coincidence.
+    const median = (a) => (a.length ? a.slice().sort((p, q) => p - q)[a.length >> 1] : 0)
+    return { tx: median(dxs), ty: median(dys), n: dxs.length }
+  }
+
+  const { tx, ty, n: tn } = modelToViewBox()
 
   // ── Pass 2: resolve absolute position by walking the parent chain ───────
   const absCache = {}
@@ -115,10 +164,23 @@ function parsePidCells(svgText) {
     if (cell.w === 0 || cell.h === 0) continue
 
     const abs = resolveAbs(id)
-    cells[id] = { x: abs.x, y: abs.y, w: cell.w, h: cell.h }
+    // A ~90deg rotation swaps the on-screen width/height; the center (x/y
+    // here refer to the top-left of the unrotated box) stays put since
+    // drawio rotates around the shape's own center.
+    const swapped = Math.abs(cell.rotation - 90) < 1
+    const w = swapped ? cell.h : cell.w
+    const h = swapped ? cell.w : cell.h
+    cells[id] = {
+      x: abs.x + (cell.w - w) / 2 + tx,
+      y: abs.y + (cell.h - h) / 2 + ty,
+      w,
+      h,
+      isPiping: cell.isPiping,
+    }
   }
 
-  console.debug('[PidDiagram] parsed cells:', Object.keys(cells))
+  console.debug(`[PidDiagram] parsed ${Object.keys(cells).length} cells; ` +
+                `model→viewBox offset (${tx}, ${ty}) from ${tn} samples`)
   pidCells.value = cells
   emit('cells-parsed', cells)
 }
@@ -177,6 +239,16 @@ onMounted(loadSvg)
     <div v-if="loading" class="pid-status">Loading diagram…</div>
     <div v-else-if="error" class="pid-status pid-error">{{ error }}</div>
     <div v-else class="svg-layer" v-html="svgContent" />
+
+    <!-- Ties a displaced card back to the symbol it annotates. -->
+    <svg v-if="leaderLines.length" class="leader-layer">
+      <line
+        v-for="(l, i) in leaderLines"
+        :key="i"
+        :x1="l.x1" :y1="l.y1" :x2="l.x2" :y2="l.y2"
+      />
+      <circle v-for="(l, i) in leaderLines" :key="`d${i}`" :cx="l.x1" :cy="l.y1" r="1.5" />
+    </svg>
 
     <div class="overlay-layer">
       <slot :position-of="positionOf" :position-beside="positionBeside" />
@@ -266,6 +338,29 @@ onMounted(loadSvg)
 .svg-layer :deep(svg ellipse[fill]:not([fill="none"]):not([style*="fill: none"]):not([style*="fill:none"])),
 .svg-layer :deep(svg rect[fill]:not([fill="none"]):not([fill="#ffffff"]):not([style*="fill: none"]):not([style*="fill:none"])) {
   fill: var(--text-primary) !important;
+}
+
+.leader-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+/* Hairline and faint — enough to trace a card back to its symbol without
+   competing with the P&ID itself. */
+.leader-layer line {
+  stroke: var(--text-muted, #888);
+  stroke-width: 0.75;
+  stroke-dasharray: 2 4;
+  opacity: 0.3;
+}
+
+.leader-layer circle {
+  fill: var(--text-muted, #888);
+  opacity: 0.35;
 }
 
 .overlay-layer {

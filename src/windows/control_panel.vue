@@ -46,10 +46,31 @@ async function confirmEstop() {
 
 const SVG_URLS = {
   'hot-fire':      '/P&IDs/Hot-Fire-P&ID-26-05-2026.svg',
-  'rocket-launch': '/P&IDs/Rocket-P&ID-01-03-2026.svg',
+  'rocket-launch': '/P&IDs/Rocket-P&ID-06-08-2026-V2.svg',
 }
 
 const svgUrl = computed(() => SVG_URLS[pidConfig.value] ?? SVG_URLS['rocket-launch'])
+
+// Preferred face for cards whose default placement reads badly on a specific
+// P&ID. This only sets the starting side — the overlay layout still relocates
+// a card if that face turns out to be blocked, so a stale hint can't hide a
+// readout. Keyed by P&ID because the same tag sits differently on each drawing.
+const SIDE_HINTS = {
+  'rocket-launch': {
+    'AV-102': 'top',   // directly above its valve
+    'AV-201': 'top',   // the clear band between the two pipe runs
+    'PT-102': 'bottom',
+  },
+}
+
+function sideFor(id, fallback) {
+  return SIDE_HINTS[pidConfig.value]?.[id] ?? fallback
+}
+
+/** Hinted cards are placed first, so neighbours route around them. */
+function isPinned(id) {
+  return SIDE_HINTS[pidConfig.value]?.[id] ? true : null
+}
 
 // ── Dynamic element lists (populated from parsed SVG cells) ──────────────────
 
@@ -837,7 +858,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <div
           v-for="id in valves"
           :key="id"
-          :style="{ ...positionBeside(id, 'bottom', -10), marginLeft: '-50px' }"
+          :style="positionBeside(id, sideFor(id, 'bottom'), 8)"
+          :data-pid-cell="id"
+          :data-pid-pinned="isPinned(id)"
           class="pid-overlay"
         >
           <div
@@ -892,7 +915,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <div
           v-for="sensor in sensors"
           :key="sensor.id"
-          :style="{ ...positionBeside(sensor.id, 'bottom', -15), marginLeft: '-50px' }"
+          :style="positionBeside(sensor.id, sideFor(sensor.id, 'bottom'), 8)"
+          :data-pid-cell="sensor.id"
+          :data-pid-pinned="isPinned(sensor.id)"
           class="pid-overlay"
         >
           <div class="sensor-card" :class="{ locked: !isSensorEnabled(sensor.id) }">
@@ -911,7 +936,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <div
           v-for="id in mvs"
           :key="id"
-          :style="{ ...positionBeside(id, 'bottom', -10), marginLeft: '-60px' }"
+          :style="positionBeside(id, sideFor(id, 'bottom'), 8)"
+          :data-pid-cell="id"
           class="pid-overlay"
         >
           <div class="info-card">{{ id }}</div>
@@ -921,7 +947,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <div
           v-for="id in tanks"
           :key="id"
-          :style="{ ...positionBeside(id, 'right', -55)}"
+          :style="positionOf(id)"
+          :data-pid-cell="id"
           class="pid-overlay"
         >
           <div class="info-card">{{ id }}</div>
@@ -931,7 +958,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <div
           v-for="id in regulators"
           :key="id"
-          :style="{ ...positionBeside(id, 'right', -40), marginTop: '-15px' }"
+          :style="positionBeside(id, sideFor(id, 'right'), 8)"
+          :data-pid-cell="id"
           class="pid-overlay"
         >
           <div class="info-card">{{ id }}</div>
