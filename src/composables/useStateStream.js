@@ -1,5 +1,6 @@
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useReconnectingSocket } from './useReconnectingSocket.js'
+import { normalizeSessionComponents } from '../utils/session.js'
 
 const COMMAND_CAP = 200   // keep at most this many commands in memory
 
@@ -21,9 +22,13 @@ const COMMAND_CAP = 200   // keep at most this many commands in memory
  *   kasaDevices:     import('vue').Ref<object[]>,
  *   commandsById:    import('vue').Ref<Map<number,object>>,
  *   tares:           import('vue').Ref<Record<string,number>>,
+ *   session:         import('vue').Ref<object|null>,
+ *   sessionWarning:  import('vue').Ref<object|null>,
  *   stateVersion:    import('vue').Ref<number>,
  *   status:          import('vue').Ref<string>,
  *   getStateSnapshot: () => Promise<object>,
+ *   applyStateSnapshot: (snapshot: object, version?: number) => boolean,
+ *   resyncState:      () => Promise<object>,
  * }}
  */
 export function useStateStream(serverIp) {
@@ -38,6 +43,8 @@ export function useStateStream(serverIp) {
   const kasaDevices  = ref([])
   const commandsById = ref(new Map())
   const tares        = ref({})    // sensor_name → offset
+  const session      = ref(null)
+  const sessionWarning = ref(null)
   const stateVersion = ref(-1)
 
   // ── URL + baseUrl ──────────────────────────────────────────────────────────────
@@ -62,7 +69,40 @@ export function useStateStream(serverIp) {
   function _publishVersion(v) { stateVersion.value  = v }
 
   // ── Full resync from snapshot ──────────────────────────────────────────────────
-  function _applySnapshot(state) {
+  function _normalizeVersion(value, fallback = -1) {
+    const version = Number(value)
+    return Number.isFinite(version) ? version : fallback
+  }
+
+  function _normalizeSession(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+
+    const normalized = { ...value }
+    normalized.components = normalizeSessionComponents(value.components)
+    return normalized
+  }
+
+  function _setSession(value) {
+    const previousId = session.value?.id ?? null
+    const next = value == null ? null : _normalizeSession(value)
+    session.value = next
+
+    // A warning belongs to one server-side session. Do not let it bleed into a
+    // later session (or remain after that session has stopped).
+    if (!next || previousId !== (next.id ?? null)) {
+      sessionWarning.value = null
+    }
+  }
+
+  function _applySnapshot(state, version = undefined) {
+    if (!state || typeof state !== 'object' || Array.isArray(state)) return false
+
+    const snapshotVersion = _normalizeVersion(
+      version ?? state.state_version,
+      _version
+    )
+    if (snapshotVersion >= 0 && snapshotVersion < _version) return false
+
     _byName.clear()
     _kasaByHost.clear()
     _commands.clear()
@@ -84,12 +124,36 @@ export function useStateStream(serverIp) {
     tares.value = snapshotTares && typeof snapshotTares === 'object' && !Array.isArray(snapshotTares)
       ? { ...snapshotTares }
       : {}
+    _setSession(state.session ?? null)
 
-    _version = state.state_version ?? -1
+    _version = snapshotVersion
     _publishDevices()
     _publishKasa()
     _publishCommands()
     _publishVersion(_version)
+    return true
+  }
+
+  /**
+   * Apply either a websocket snapshot envelope or the direct state shape
+   * returned by GET /v1/state. The explicit version parameter is useful to
+   * callers that already unwrapped an envelope.
+   */
+  function applyStateSnapshot(snapshot, version = undefined) {
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+      return false
+    }
+
+    const isEnvelope = !!snapshot.state &&
+      typeof snapshot.state === 'object' &&
+      !Array.isArray(snapshot.state) &&
+      (snapshot.type === 'state.snapshot' ||
+        _hasOwn(snapshot, 'state_version') ||
+        _hasOwn(snapshot.state, 'devices'))
+
+    const state = isEnvelope ? snapshot.state : snapshot
+    const snapshotVersion = version ?? snapshot.state_version
+    return _applySnapshot(state, snapshotVersion)
   }
 
   // ── Command upsert (with cap) ──────────────────────────────────────────────────
@@ -197,8 +261,114 @@ export function useStateStream(serverIp) {
   }
 
   // ── Delta event dispatcher ─────────────────────────────────────────────────────
+  const SESSION_FIELDS = [
+    'id',
+    'name',
+    'status',
+    'started_unix',
+    'started_monotonic',
+    'stopped_unix',
+    'size_bytes',
+    'download_path',
+    'components',
+  ]
+
+  function _sessionPayload(msg) {
+    const nested = [msg.session, msg.data?.session]
+      .find(value => value && typeof value === 'object' && !Array.isArray(value))
+    if (nested) return nested
+
+    const source = msg.data && typeof msg.data === 'object' && !Array.isArray(msg.data)
+      ? msg.data
+      : msg
+    const payload = {}
+    for (const key of SESSION_FIELDS) {
+      if (key === 'status' && (source.component || source.component_name)) continue
+      if (_hasOwn(source, key)) payload[key] = source[key]
+    }
+    if (!_hasOwn(payload, 'id') && _hasOwn(source, 'session_id')) {
+      payload.id = source.session_id
+    }
+    return Object.keys(payload).length ? payload : null
+  }
+
+  function _componentPatch(msg, payload) {
+    if (payload?.components && typeof payload.components === 'object' && !Array.isArray(payload.components)) {
+      return normalizeSessionComponents(payload.components)
+    }
+
+    const source = msg.update && typeof msg.update === 'object'
+      ? msg.update
+      : msg.data && typeof msg.data === 'object' && !Array.isArray(msg.data)
+        ? msg.data
+        : msg
+    const name = source.component_name ?? source.component
+    if (typeof name !== 'string' || !name) return {}
+
+    let value
+    if (_hasOwn(source, 'component_status')) {
+      value = source.component_status
+    } else if (_hasOwn(source, 'value')) {
+      value = source.value
+    } else if (_hasOwn(source, 'status')) {
+      value = { status: source.status, detail: source.detail ?? null }
+    } else {
+      return {}
+    }
+
+    return normalizeSessionComponents({ [name]: value })
+  }
+
+  function _mergeSessionPatch(payload, componentPatch = {}) {
+    const current = session.value
+    if (!current) return false
+
+    const payloadId = payload?.id ?? null
+    if (payloadId !== null && current.id != null && payloadId !== current.id) {
+      return false
+    }
+
+    const normalized = payload ? _normalizeSession(payload) : null
+    session.value = {
+      ...current,
+      ...(normalized ?? {}),
+      components: {
+        ...(current.components ?? {}),
+        ...(normalized?.components ?? {}),
+        ...componentPatch,
+      },
+    }
+    return true
+  }
+
+  function _warningPayload(msg) {
+    const warning = msg.warning ?? msg.data?.warning ?? msg.data ?? msg.detail ?? msg.message
+    const payload = warning && typeof warning === 'object' && !Array.isArray(warning)
+      ? { ...warning }
+      : { message: warning == null ? 'Session warning' : String(warning) }
+
+    return {
+      ...payload,
+      session_id: payload.session_id ?? msg.session_id ?? msg.session?.id ?? session.value?.id ?? null,
+      component: payload.component ?? msg.component ?? msg.component_name ?? null,
+    }
+  }
+
+  function _requestResync(reason) {
+    if (!baseUrl.value) return
+    void resyncState().catch((error) => {
+      console.error(`[state] resync failed after ${reason}:`, error)
+    })
+  }
+
   function _handleDelta(msg) {
-    const v = msg.state_version ?? 0
+    const v = _normalizeVersion(msg.state_version, -1)
+    if (v < 0) {
+      if (String(msg.type).startsWith('session.')) {
+        _requestResync(`${msg.type} without state_version`)
+      }
+      return
+    }
     if (v <= _version) return    // stale / replay — drop
     _version = v
     _publishVersion(_version)
@@ -271,6 +441,44 @@ export function useStateStream(serverIp) {
         }
         break
       }
+      case 'session.started': {
+        const payload = _sessionPayload(msg)
+        if (!payload || typeof payload.id !== 'string' || !payload.id) {
+          _requestResync('incomplete session.started')
+          break
+        }
+        _setSession(payload)
+        sessionWarning.value = null
+        break
+      }
+      case 'session.updated': {
+        const payload = _sessionPayload(msg)
+        const components = _componentPatch(msg, payload)
+        const hasPatch = !!payload || Object.keys(components).length > 0
+        if (!hasPatch || !_mergeSessionPatch(payload, components)) {
+          _requestResync('incomplete session.updated')
+        }
+        break
+      }
+      case 'session.stopped': {
+        const payload = _sessionPayload(msg)
+        const stoppedId = payload?.id ?? msg.session_id ?? null
+        if (stoppedId && session.value?.id && stoppedId !== session.value.id) {
+          _requestResync('mismatched session.stopped')
+          break
+        }
+        _setSession(null)
+        break
+      }
+      case 'session.warning': {
+        sessionWarning.value = _warningPayload(msg)
+        const payload = _sessionPayload(msg)
+        const components = _componentPatch(msg, payload)
+        if ((payload || Object.keys(components).length) && session.value) {
+          _mergeSessionPatch(payload, components)
+        }
+        break
+      }
       // Unknown delta types are silently ignored
     }
   }
@@ -280,12 +488,15 @@ export function useStateStream(serverIp) {
   // reconnect automatically resyncs the full store before any deltas arrive.
   const { status } = useReconnectingSocket(wsUrl, {
     onMessage(event) {
+      const sourceUrl = event.currentTarget?.url ?? event.target?.url
+      if (sourceUrl && sourceUrl !== wsUrl.value) return
+
       let msg = null
       try { msg = JSON.parse(event.data) } catch { return }
       if (!msg?.type) return
 
       if (msg.type === 'state.snapshot') {
-        _applySnapshot(msg.state)
+        applyStateSnapshot(msg)
       } else {
         _handleDelta(msg)
       }
@@ -294,14 +505,66 @@ export function useStateStream(serverIp) {
 
   // ── HTTP snapshot (for debug / bootstrap fallback) ─────────────────────────────
   async function getStateSnapshot() {
-    if (!baseUrl.value) throw new Error('No server IP configured')
-    const res = await fetch(`${baseUrl.value}/v1/state`)
+    const target = baseUrl.value
+    if (!target) throw new Error('No server IP configured')
+    const res = await fetch(`${target}/v1/state`)
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText)
-      throw new Error(`${res.status}: ${text}`)
+      const error = new Error(`${res.status}: ${text}`)
+      error.status = res.status
+      throw error
     }
     return res.json()
   }
 
-  return { devices, kasaDevices, commandsById, tares, stateVersion, status, getStateSnapshot }
+  let _resyncRequest = null
+
+  /**
+   * Fetch and apply the server's authoritative state. Concurrent callers for
+   * one target share a request; a response from an old target is returned but
+   * never applied after the configured server changes.
+   */
+  async function resyncState() {
+    const target = baseUrl.value
+    if (!target) throw new Error('No server IP configured')
+    if (_resyncRequest?.target === target) return _resyncRequest.promise
+
+    const promise = (async () => {
+      const snapshot = await getStateSnapshot()
+      if (baseUrl.value === target) applyStateSnapshot(snapshot)
+      return snapshot
+    })()
+    const request = { target, promise }
+    _resyncRequest = request
+
+    try {
+      return await promise
+    } finally {
+      if (_resyncRequest === request) _resyncRequest = null
+    }
+  }
+
+  // Session state is authoritative only for the currently selected server.
+  // Socket disconnects do not touch it; reconnect snapshots will refresh it.
+  watch(_host, (host, previousHost) => {
+    if (host === previousHost) return
+    session.value = null
+    sessionWarning.value = null
+    _version = -1
+    _publishVersion(_version)
+  }, { flush: 'sync' })
+
+  return {
+    devices,
+    kasaDevices,
+    commandsById,
+    tares,
+    session,
+    sessionWarning,
+    stateVersion,
+    status,
+    getStateSnapshot,
+    applyStateSnapshot,
+    resyncState,
+  }
 }

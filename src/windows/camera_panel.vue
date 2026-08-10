@@ -1,5 +1,4 @@
 <script setup>
-import { invoke } from "@tauri-apps/api/core";
 import {
     inject,
     nextTick,
@@ -29,6 +28,7 @@ const MAX_STREAM_RETRIES = 5;
 const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
 const server_ip = inject("serverIp");
+const liveSession = inject("session", ref(null));
 const cameras = ref([]);
 const arr = ref([]);
 const text = ref();
@@ -830,91 +830,6 @@ function onTileResizeEnd() {
     document.removeEventListener("mouseup", onTileResizeEnd);
 }
 
-async function listRecordings(ip = null) {
-    const params = new URLSearchParams();
-    if (ip) params.set("ip", ip);
-    const query = params.toString();
-    const url = `${apiBaseUrl()}/v1/camera/recordings${query ? `?${query}` : ""}`;
-    const response = await fetch(url, { headers: AUTH_HEADERS });
-    await ensureOk(response, "Failed to list recordings");
-
-    const payload = await response.json();
-    const recordings = Array.isArray(payload?.recordings) ? payload.recordings : [];
-    return recordings.sort((a, b) => Number(b.modified_unix_ms || 0) - Number(a.modified_unix_ms || 0));
-}
-
-function recordingDownloadUrl(downloadPath) {
-    if (/^https?:\/\//i.test(downloadPath)) return downloadPath;
-    return `${apiBaseUrl()}${downloadPath}`;
-}
-
-async function downloadRecording(recording) {
-    const url = recordingDownloadUrl(recording.download_path);
-    const response = await fetch(url, { headers: AUTH_HEADERS });
-    await ensureOk(response, "Failed to download recording");
-
-    const filename = recording.filename || "recording.mp4";
-    const buffer = await response.arrayBuffer();
-    const bytes = Array.from(new Uint8Array(buffer));
-    return invoke("save_downloaded_camera_recording", { filename, data: bytes });
-}
-
-async function startRecording(item) {
-    const ip = getCameraIp(item);
-    const hostname = getCameraHostname(item);
-    if (!ip) {
-        text.value = `Cannot start recording for ${hostname}: missing camera IP`;
-        return;
-    }
-    if (activeRecordings.value[ip]) return;
-
-    try {
-        const params = new URLSearchParams({ ip });
-        const response = await fetch(`${apiBaseUrl()}/v1/camera/recordings/start?${params}`, {
-            method: "POST",
-            headers: AUTH_HEADERS,
-        });
-        await ensureOk(response, `Failed to start recording for ${hostname} [${ip}]`);
-        activeRecordings.value = { ...activeRecordings.value, [ip]: true };
-        text.value = `Recording started for ${hostname} [${ip}]`;
-    } catch (e) {
-        text.value = String(e);
-    }
-}
-
-async function stopRecording(item) {
-    const ip = getCameraIp(item);
-    const hostname = getCameraHostname(item);
-    if (!ip) {
-        text.value = `Cannot stop recording for ${hostname}: missing camera IP`;
-        return;
-    }
-    if (!activeRecordings.value[ip]) return;
-
-    text.value = `Stopping recording for ${hostname} [${ip}]...`;
-    try {
-        const params = new URLSearchParams({ ip });
-        const response = await fetch(`${apiBaseUrl()}/v1/camera/recordings/stop?${params}`, {
-            method: "POST",
-            headers: AUTH_HEADERS,
-        });
-        await ensureOk(response, `Failed to stop recording for ${hostname} [${ip}]`);
-        activeRecordings.value = { ...activeRecordings.value, [ip]: false };
-
-        const recordings = await listRecordings(ip);
-        if (!recordings.length) {
-            text.value = `Stopped recording for ${hostname} [${ip}], but no file was listed yet`;
-            return;
-        }
-
-        const newest = recordings[0];
-        const savedPath = await downloadRecording(newest);
-        text.value = `Saved recording to ${savedPath} (${hostname} [${ip}])`;
-    } catch (e) {
-        text.value = String(e);
-    }
-}
-
 function normalizeCameraList(rawCameras) {
     const normalizedCameras = [];
     const seenKeys = new Set();
@@ -1104,10 +1019,28 @@ if (server_ip) {
     });
 }
 
+function liveCameraComponentStatus() {
+    const value = liveSession.value?.components?.cameras;
+    return typeof value === "string" ? value : value?.status ?? null;
+}
+
+watch(
+    [() => liveSession.value?.id ?? null, liveCameraComponentStatus],
+    ([nextId, nextStatus], [previousId, previousStatus]) => {
+        if (
+            (nextId === previousId && nextStatus === previousStatus)
+            || !panelActive
+            || arr.value.length === 0
+        ) return;
+        void get_list();
+    },
+);
+
 onActivated(async () => {
     panelActive = true;
     await nextTick();
     resumeAllStreams();
+    if (arr.value.length > 0) void get_list();
 });
 
 onDeactivated(() => {
@@ -1220,12 +1153,6 @@ onUnmounted(() => {
                         v-tooltip="isMuted(item.streamKey) ? 'Unmute' : 'Mute'"
                     />
 
-                    <div class="rec-controls">
-                        <Button label="Record" icon="pi pi-circle-fill" size="small" class="btn-record"
-                            @click="startRecording(item)" :disabled="!!activeRecordings[item.ip]" />
-                        <Button label="Stop" icon="pi pi-stop-circle" size="small" class="btn-stop"
-                            @click="stopRecording(item)" :disabled="!activeRecordings[item.ip]" />
-                    </div>
                 </div>
 
                 <div class="tile-resize-handle" @mousedown="onTileResizeStart($event, item.streamKey)" />
@@ -1472,18 +1399,6 @@ onUnmounted(() => {
     min-width: 0   !important;
     font-size: 0.6rem !important;
 }
-
-/* Record / Stop */
-.rec-controls {
-    margin-left: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-}
-
-.btn-record :deep(.p-button-icon) { color: #e74c3c !important; }
-.btn-stop                         { border-color: var(--border-color) !important; }
-.btn-stop:not(:disabled)          { border-color: #e74c3c !important; }
 
 .btn-muted { border-color: var(--border-accent) !important; }
 .btn-muted :deep(.p-button-icon) { color: var(--text-muted) !important; }

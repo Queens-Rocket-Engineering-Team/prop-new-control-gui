@@ -1,6 +1,5 @@
 <script setup>
 import { inject, ref, watch, nextTick, computed, reactive } from 'vue'
-import AudioRecorder from '../components/audio_recorder.vue'
 
 // ── Log source ─────────────────────────────────────────────────────────────────
 const logLines  = inject('logLines',  ref([]))
@@ -157,8 +156,6 @@ const statusClass = computed(() => {
           @click="activeView && toggleLevel(activeView, lvl.key)"
         >{{ lvl.label }}</button>
       </div>
-
-      <AudioRecorder class="audio-toolbar-item" />
 
       <button class="clear-btn" @click="clearLogs()">Clear</button>
     </div>
@@ -320,10 +317,6 @@ const statusClass = computed(() => {
 .lvl-warning.lvl-active  { color: #f39c12;  border-color: #f39c12; }
 .lvl-error.lvl-active    { color: #e74c3c;  border-color: #e74c3c; }
 .lvl-critical.lvl-active { color: #e74c3c;  border-color: #e74c3c; font-weight: 700; }
-
-.audio-toolbar-item {
-  flex-shrink: 0;
-}
 
 /* ── Clear ── */
 .clear-btn {

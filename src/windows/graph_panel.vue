@@ -10,6 +10,7 @@ const setTare       = inject('setTare',       () => Promise.resolve())
 const clearTare     = inject('clearTare',     () => Promise.resolve())
 const testFrequency = inject('testFrequency', ref(190))
 const testActive    = inject('testActive',    ref(false))
+const localRecordingActive = inject('localRecordingActive', ref(false))
 const telemetryStats = inject('telemetryStats', ref(null))
 
 const WINDOW_SEC = TELEMETRY_WINDOW_SEC  // rolling window displayed on every chart (seconds)
@@ -64,7 +65,7 @@ const telemetryRateTitle = computed(() => {
     `Unique point timestamps per sensor: avg ${fmtHz(stats.displayTimestampHzAvg)} Hz, max ${fmtHz(stats.displayTimestampHzMax)} Hz`,
     `Incoming points per sensor: avg ${fmtHz(stats.incomingPointHzAvg)} Hz, max ${fmtHz(stats.incomingPointHzMax)} Hz`,
     `Incoming points per sensor per batch: ${stats.incomingPointsPerSensorBatchAvg.toFixed(2)}`,
-    `Raw stream (CSV, Rust-side): ${testActive.value ? 'active' : 'inactive'}`,
+    `Raw stream (CSV, Rust-side): ${localRecordingActive.value ? 'armed' : 'inactive'}`,
     `Stats window: ${stats.statsWindowSec.toFixed(0)}s`,
   ].join('\n')
 })
