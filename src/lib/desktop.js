@@ -38,12 +38,18 @@ export class UnsupportedOnWebError extends Error {
 }
 
 // ── Server IP ────────────────────────────────────────────────────────────────
-// Desktop persists the IP in Rust. The web build is served *from* the propnet,
-// so it defaults to whatever host served the page — which is correct whenever
-// the GUI container runs alongside the server — and only falls back to an
-// operator-entered value stored locally.
-
-const IP_STORAGE_KEY = "qret-server-ip"
+// Desktop persists the IP in Rust: it runs on a laptop that could be pointed at
+// any stand, and has a picker to point it with.
+//
+// The web build has no such choice to make — it is served by the propnet host it
+// talks to — so its address is *derived on every load, never stored*: the
+// container's config.json if it was given PROP_SERVER_IP (for a GUI not
+// co-located with the server), otherwise whichever host served the page.
+//
+// Nothing is persisted client-side, deliberately. A stored override outlives the
+// tab and survives a redeploy, and with no picker in this build there would be
+// nothing to show or clear it — a tablet would sit pointed at a stale server
+// with no way to tell. Deriving it means reloading the page is always the fix.
 
 // Populated by main.js from the container's runtime config.json, if present.
 let _injectedServerIp = ""
@@ -54,19 +60,15 @@ export function setInjectedServerIp(ip) {
 
 export async function fetchServerIp() {
   if (!isWeb()) return call("fetch_server_ip")
-
-  const stored = localStorage.getItem(IP_STORAGE_KEY)
-  if (stored) return stored
-  if (_injectedServerIp) return _injectedServerIp
-  // Same-host default: the page came from the server, so the API is there too.
-  return window.location.hostname || ""
+  return _injectedServerIp || window.location.hostname || ""
 }
 
 export async function submitIp(newIp) {
   if (!isWeb()) return call("submit_ip", { newIp })
-
-  if (newIp) localStorage.setItem(IP_STORAGE_KEY, newIp)
-  else localStorage.removeItem(IP_STORAGE_KEY)
+  // No-op on web, and not merely because the picker is hidden: opening the
+  // settings modal syncs ipMode from the current IP, which trips the watcher
+  // that lands here. Persisting from that path is exactly the stale override
+  // this build avoids.
 }
 
 // Tares are not wrapped here: they are server state reached over the HTTP API

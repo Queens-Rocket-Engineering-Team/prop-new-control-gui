@@ -30,7 +30,11 @@ const overlayRef = ref(null);
 // disk to write to; the web build hides that section rather than showing a
 // control that does nothing.
 const showDesktopSettings = CAPS.fileSave;
-// Test configuration drives commands the view-only build cannot issue.
+// The web build is served by the host it talks to, so it has no server to pick.
+const canSelectServer = CAPS.serverSelection;
+// Gates only the settings that issue commands — currently the stream frequency,
+// which re-rates the whole stand. Deliberately not the P&ID picker: that just
+// selects which diagram this client draws. See the template.
 const readOnly = !CAPS.commands;
 
 // ── Dark mode — persisted in localStorage, synced across windows ──────────────
@@ -162,7 +166,11 @@ function applyCameraRecordingDir() {
             <i class="pi pi-moon" :style="{color: darkMode ? '#f39c12' : 'var(--text-secondary)'}"></i>
           </div>
         </div>
-        <div class="setting-group" v-if="!readOnly">
+        <!-- Not gated: this picks which P&ID the client draws, which is a
+             per-client view preference (localStorage + a same-browser
+             BroadcastChannel), not a command. An engineer at the pad needs it
+             to look at the stand they are standing next to. -->
+        <div class="setting-group">
           <span class="setting-group-label"><i class="pi pi-sliders-h" />Test Configuration</span>
           <label class="option-row" for="cfg-hot-fire">
             <RadioButton v-model="localPidConfig" value="hot-fire" inputId="cfg-hot-fire" />
@@ -188,7 +196,9 @@ function applyCameraRecordingDir() {
             <span v-if="props.testActive" class="freq-locked-label">locked during test</span>
           </div>
         </div>
-        <div class="setting-group">
+        <!-- The pad reaches the server by loading this page from it, so there is
+             nothing here for it to decide — see CAPS.serverSelection. -->
+        <div class="setting-group" v-if="canSelectServer">
           <span class="setting-group-label"><i class="pi pi-server" />Server IP Address</span>
           <label class="option-row">
             <RadioButton v-model="ipMode" value="localhost" />

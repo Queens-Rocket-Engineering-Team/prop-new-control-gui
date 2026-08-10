@@ -65,6 +65,16 @@ export const CAPS = {
     return mode() === "web"
   },
 
+  // Choosing which server to talk to. The desktop app has to ask, because it is
+  // installed on a laptop that could be pointed anywhere. The web build cannot
+  // meaningfully be pointed elsewhere: it is *served by* the propnet host it
+  // talks to, so the answer is already known before the page renders (see
+  // fetchServerIp in desktop.js). Showing the picker there offers a choice that
+  // is at best redundant and at worst points a tablet at the wrong stand.
+  get serverSelection() {
+    return mode() === "desktop"
+  },
+
   /** CSV recording of the raw telemetry stream (Rust-side). */
   get recording() {
     return mode() === "desktop"
