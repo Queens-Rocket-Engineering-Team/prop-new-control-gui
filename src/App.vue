@@ -1,7 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, provide, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { useServerApi } from "./composables/useServerApi.js";
 import { useStateStream } from "./composables/useStateStream.js";
 import { useTelemetryStream } from "./composables/useTelemetryStream.js";
@@ -41,7 +40,7 @@ provide('pidConfig', pidConfig);
 const testFrequency = ref(parseInt(localStorage.getItem('qret-test-frequency') ?? '', 10) || 190);
 provide('testFrequency', testFrequency);
 
-const { stopStream, setStream, setControl, requestStatus, discoverDevices, discoverKasaDevices, controlKasaDevice, sendEstop, startAudio, stopAudio, listAudioFiles, audioFileUrl } = useServerApi(server_ip);
+const { stopStream, setStream, setControl, requestStatus, discoverDevices, discoverKasaDevices, controlKasaDevice, sendEstop, setTare: apiSetTare, clearTare: apiClearTare, startAudio, stopAudio, listAudioFiles, audioFileUrl } = useServerApi(server_ip);
 
 function requestStatusSnapshot(reason = 'manual') {
   if (!server_ip.value) return Promise.resolve();
@@ -70,47 +69,36 @@ function startStatusRefresh() {
 
 // ── State stream (/ws/state → devices, kasa, commands) ──────────────────────
 
-const { devices, kasaDevices, commandsById, status: stateStatus } = useStateStream(server_ip);
+const { devices, kasaDevices, commandsById, tares, status: stateStatus } = useStateStream(server_ip);
 provide('devices',      devices);
 provide('kasaDevices',  kasaDevices);
 provide('commandsById', commandsById);
 
 // ── Tare offsets ─────────────────────────────────────────────────────────────
-// { [sensorName]: rawOffset } — subtracted from displayed values and CSV writes.
-// Kept in memory for each connected device lifetime. Closing the GUI clears all
-// tares; disconnecting/removing a device clears tares for that device's sensors.
+// { [sensorName]: offset } — owned by the server, mirrored here from /ws/state.
+// The server applies offsets before fanning telemetry out, so every value that
+// reaches this app is *already* tared: this map exists only to show which
+// sensors are tared. Never subtract it from a reading.
+//
+// Consequences of server ownership: every connected GUI (including the web/pad
+// build) stays in sync automatically, offsets survive a device disconnect —
+// deliberate, so flight handoff keeps the offset — and they are lost on a
+// server restart, since the server holds them in memory only.
 
-const tares = ref({});
 provide('tares', tares);
 
-function applyTaresSnapshot(snapshot) {
-  tares.value = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)
-    ? { ...snapshot }
-    : {};
-}
-
-function setTare(name, rawValue) {
-  invoke('set_tare', { name, value: rawValue })
-    .then(applyTaresSnapshot)
-    .catch((err) => console.error('[App] set_tare failed:', err));
+// Capture a tare. The server averages its own recent raw samples, so no value
+// is passed. Returns the TareInfo promise so callers can surface `applies_to`
+// or recover from the 409 raised when two devices report the same sensor name.
+function setTare(name, opts) {
+  return apiSetTare(name, opts);
 }
 provide('setTare', setTare);
 
-watch(devices, (currentDevices) => {
-  const liveSensorNames = [];
-
-  for (const dev of currentDevices) {
-    if (dev.connected === false) continue;
-    for (const sensor of (dev.sensors ?? [])) {
-      const name = String(sensor?.name ?? '').trim();
-      if (!name) continue;
-      liveSensorNames.push(name);
-    }
-  }
-
-  invoke('prune_tares_for_live_sensors', { liveSensorNames })
-    .catch((err) => console.error('[App] prune_tares_for_live_sensors failed:', err));
-}, { deep: false });
+function clearTare(name) {
+  return apiClearTare(name);
+}
+provide('clearTare', clearTare);
 
 // ── Test state ───────────────────────────────────────────────────────────────
 
@@ -129,7 +117,7 @@ provide('telemetryStats', telemetryStats);
 // The raw /ws/telemetry/raw stream is consumed entirely in Rust and only
 // carries sensor readings, so valve/auxiliary/kasa state bits — derived here
 // from /ws/state — are pushed separately whenever they change. Tare offsets
-// are applied in Rust (see telemetry_raw.rs) since TARES already lives there.
+// need no such push: the server applies them before the stream is sent.
 
 function _normalizeId(id) { return id.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() }
 
@@ -265,8 +253,9 @@ provide('startTest', startTest);
 provide('stopTest',  stopTest);
 
 // ── Config fetch on connect ──────────────────────────────────────────────────
-// The /ws/state socket auto-resyncss on connect, so no manual config fetching is needed.
-// We just manage the stream rate and tares.
+// The /ws/state socket auto-resyncss on connect, so no manual config fetching is
+// needed — the snapshot brings devices, kasa, commands and tares. We just manage
+// the stream rate.
 
 watch(server_ip, async (ip) => {
   stopStatusRefresh();
@@ -372,6 +361,9 @@ onMounted(async () => {
     console.error('[App] tare sync setup failed:', err);
   }
 
+onMounted(() => {
+  // Tares need no bootstrap: the /ws/state snapshot that arrives on connect
+  // carries the full map, and tare.updated/tare.cleared deltas keep it current.
   invoke("fetch_server_ip")
     .then((ip) => { if (ip) server_ip.value = ip; })
     .catch(() => {});
@@ -379,7 +371,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopStatusRefresh();
-  _unlistenTares?.();
   _ipChannel.close();
   _settingsChannel.close();
   _testChannel.close();

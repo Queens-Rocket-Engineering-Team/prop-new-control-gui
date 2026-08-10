@@ -133,12 +133,17 @@ function applyCameraRecordingDir() {
        tabindex="-1">
     <div class="modal-container">
       <div class="modal-header">
-        <h3>Settings</h3>
-        <button class="modal-close-btn" @click="$emit('close')">✕</button>
+        <div class="modal-header-title">
+          <i class="pi pi-cog" />
+          <h3>Settings</h3>
+        </div>
+        <button class="modal-close-btn" @click="$emit('close')" title="Close">
+          <i class="pi pi-times" />
+        </button>
       </div>
       <div class="modal-body">
         <div class="setting-group">
-          <span class="setting-group-label">View</span>
+          <span class="setting-group-label"><i class="pi pi-palette" />View</span>
           <div class="view-toggle">
             <i class="pi pi-sun" :style="{color: darkMode ? 'var(--text-secondary)' : '#f39c12'}"></i>
             <ToggleSwitch v-model="darkMode" class="theme-switch" />
@@ -146,18 +151,18 @@ function applyCameraRecordingDir() {
           </div>
         </div>
         <div class="setting-group">
-          <span class="setting-group-label">Test Configuration</span>
-          <div class="option-row">
+          <span class="setting-group-label"><i class="pi pi-sliders-h" />Test Configuration</span>
+          <label class="option-row" for="cfg-hot-fire">
             <RadioButton v-model="localPidConfig" value="hot-fire" inputId="cfg-hot-fire" />
-            <label for="cfg-hot-fire">Hot Fire</label>
-          </div>
-          <div class="option-row">
+            <span>Hot Fire</span>
+          </label>
+          <label class="option-row" for="cfg-rocket-launch">
             <RadioButton v-model="localPidConfig" value="rocket-launch" inputId="cfg-rocket-launch" />
-            <label for="cfg-rocket-launch">Rocket Launch</label>
-          </div>
+            <span>Rocket Launch</span>
+          </label>
         </div>
         <div class="setting-group">
-          <span class="setting-group-label">Test Stream Frequency</span>
+          <span class="setting-group-label"><i class="pi pi-wave-pulse" />Test Stream Frequency</span>
           <div class="option-row freq-row">
             <input
               type="number"
@@ -172,14 +177,14 @@ function applyCameraRecordingDir() {
           </div>
         </div>
         <div class="setting-group">
-          <span class="setting-group-label">Server IP Address</span>
-          <div class="option-row">
+          <span class="setting-group-label"><i class="pi pi-server" />Server IP Address</span>
+          <label class="option-row">
             <RadioButton v-model="ipMode" value="localhost" />
-            <label>Localhost (127.0.0.1)</label>
-          </div>
-          <div class="option-row">
+            <span>Localhost (127.0.0.1)</span>
+          </label>
+          <label class="option-row">
             <RadioButton v-model="ipMode" value="custom" />
-            <label>Custom: </label>
+            <span class="custom-ip-label">Custom:</span>
             <input
               type="text"
               v-model="customIp"
@@ -188,11 +193,11 @@ function applyCameraRecordingDir() {
               class="ip-text-input"
               @click="ipMode = 'custom'"
             />
-          </div>
+          </label>
         </div>
 
         <div class="setting-group">
-          <span class="setting-group-label">Camera Recording Directory</span>
+          <span class="setting-group-label"><i class="pi pi-video" />Camera Recording Directory</span>
           <input
             type="text"
             v-model="cameraRecordingDir"
@@ -231,58 +236,92 @@ function applyCameraRecordingDir() {
   max-width: 420px;
   width: 90%;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
 }
 
 .modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 18px;
+  padding: 12px 16px;
+  background: var(--bg-surface);
   border-bottom: 1px solid var(--border-color);
+}
+
+.modal-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.modal-header-title .pi {
+  font-size: 0.95rem;
+  color: var(--text-muted);
 }
 
 .modal-header h3 {
   margin: 0;
   font-size: 1rem;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: 0.2px;
   color: var(--text-primary);
 }
 
 .modal-body {
-  padding: 20px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
 }
 
 /* Close button styles */
 .modal-close-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
   background: none;
-  border: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
   color: var(--text-secondary);
-  font-size: 1rem;
+  font-size: 0.85rem;
   cursor: pointer;
-  padding: 2px 6px;
-  line-height: 1;
+  padding: 0;
   box-shadow: none;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
 .modal-close-btn:hover {
   color: var(--text-primary);
-  border-color: transparent;
-  background: none;
+  border-color: var(--border-color);
+  background: var(--bg-secondary);
 }
 
-/* Setting group styles */
+/* Setting group styles — bordered section card, matching the app's card sections */
 .setting-group {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
 }
 
 .setting-group-label {
-  font-size: 0.78rem;
-  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+.setting-group-label .pi {
+  font-size: 0.78rem;
 }
 
 /* IP Input styles */
@@ -324,10 +363,34 @@ function applyCameraRecordingDir() {
 .option-row {
   display: flex;
   align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  margin: 0 -6px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+label.option-row:hover {
+  background: var(--bg-primary);
+}
+
+.option-row span {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+
+.custom-ip-label {
+  white-space: nowrap;
 }
 
 .freq-row {
   gap: 6px;
+  cursor: default;
+}
+
+.freq-row:hover {
+  background: none;
 }
 
 .freq-input {
@@ -349,7 +412,8 @@ function applyCameraRecordingDir() {
 }
 
 .option-row :deep(.p-radiobutton) {
-  margin-right: 6px;
+  margin-right: 0;
+  flex-shrink: 0;
 }
 
 /* Theme transition for dark/light switch */

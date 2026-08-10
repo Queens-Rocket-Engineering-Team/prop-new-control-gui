@@ -11,11 +11,16 @@ const COMMAND_CAP = 200   // keep at most this many commands in memory
  * maintains the authoritative in-memory store for devices, kasa devices, and
  * command lifecycle, and republishes to reactive refs after each message.
  *
+ * Tare offsets ride the same stream. The server owns them and applies them to
+ * telemetry before fan-out, so `tares` here is only ever read to tell whether a
+ * sensor is tared — never subtracted from a reading.
+ *
  * @param {import('vue').Ref<string>} serverIp
  * @returns {{
  *   devices:         import('vue').Ref<object[]>,
  *   kasaDevices:     import('vue').Ref<object[]>,
  *   commandsById:    import('vue').Ref<Map<number,object>>,
+ *   tares:           import('vue').Ref<Record<string,number>>,
  *   stateVersion:    import('vue').Ref<number>,
  *   status:          import('vue').Ref<string>,
  *   getStateSnapshot: () => Promise<object>,
@@ -32,6 +37,7 @@ export function useStateStream(serverIp) {
   const devices      = ref([])
   const kasaDevices  = ref([])
   const commandsById = ref(new Map())
+  const tares        = ref({})    // sensor_name → offset
   const stateVersion = ref(-1)
 
   // ── URL + baseUrl ──────────────────────────────────────────────────────────────
@@ -73,6 +79,11 @@ export function useStateStream(serverIp) {
     ]) {
       _commands.set(cmd.command_id, cmd)
     }
+
+    const snapshotTares = state.tares
+    tares.value = snapshotTares && typeof snapshotTares === 'object' && !Array.isArray(snapshotTares)
+      ? { ...snapshotTares }
+      : {}
 
     _version = state.state_version ?? -1
     _publishDevices()
@@ -234,6 +245,18 @@ export function useStateStream(serverIp) {
         }
         break
       }
+      case 'tare.updated': {
+        tares.value = { ...tares.value, [msg.sensor_name]: msg.offset }
+        break
+      }
+      case 'tare.cleared': {
+        if (msg.sensor_name in tares.value) {
+          const next = { ...tares.value }
+          delete next[msg.sensor_name]
+          tares.value = next
+        }
+        break
+      }
       case 'kasa.registered':
       case 'kasa.updated': {
         _kasaByHost.set(msg.kasa.host, msg.kasa)
@@ -280,5 +303,5 @@ export function useStateStream(serverIp) {
     return res.json()
   }
 
-  return { devices, kasaDevices, commandsById, stateVersion, status, getStateSnapshot }
+  return { devices, kasaDevices, commandsById, tares, stateVersion, status, getStateSnapshot }
 }

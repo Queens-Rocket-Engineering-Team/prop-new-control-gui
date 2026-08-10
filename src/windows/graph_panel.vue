@@ -1,11 +1,13 @@
 <script setup>
-import { ref, inject, computed } from 'vue'
+import { ref, reactive, inject, computed, onUnmounted } from 'vue'
 import UPlotChart from '../components/uplot_chart.vue'
 import { TELEMETRY_WINDOW_SEC } from '../composables/useTelemetryStream.js'
 
 const sensorData    = inject('sensorData',    ref({}))
+const devices       = inject('devices',       ref([]))
 const tares         = inject('tares',         ref({}))
-const setTare       = inject('setTare',       () => {})
+const setTare       = inject('setTare',       () => Promise.resolve())
+const clearTare     = inject('clearTare',     () => Promise.resolve())
 const testFrequency = inject('testFrequency', ref(190))
 const testActive    = inject('testActive',    ref(false))
 const telemetryStats = inject('telemetryStats', ref(null))
@@ -96,21 +98,21 @@ const slots = computed(() => {
       : windowEnd - WINDOW_SEC
     const windowed = h.filter((p) => p.t >= windowStart && p.t <= windowEnd)
 
-    const color  = TYPE_MAP[typeKey].color
-    const offset = tares.value[name] ?? 0
+    // Points arrive already tared from the server — never subtract an offset here.
+    const color = TYPE_MAP[typeKey].color
     const x = []
     const y = []
     for (const p of windowed) {
       x.push(p.t - windowEnd)
-      y.push(p.v - offset)
+      y.push(p.v)
     }
 
     groups[typeKey].push({
       name,
       typeKey,
-      unit:     info.unit,
-      rawValue: info.value,
-      value:    info.value - offset,
+      unit:  info.unit,
+      value: info.value,
+      tared: (tares.value[name] ?? 0) !== 0,
       color,
       fill: color + '18',
       plotData: [x, y],
@@ -142,6 +144,100 @@ function fmt(v) {
   if (abs >= 1000) return v.toFixed(0)
   if (abs >= 10)   return v.toFixed(1)
   return v.toFixed(2)
+}
+
+// ── Tare ─────────────────────────────────────────────────────────────────────
+//
+// Tares live on the server: it captures the offset by averaging its own recent
+// raw samples, applies it before fanning telemetry out, and broadcasts the
+// change to every connected GUI over /ws/state. So these handlers only fire the
+// request — `tares` updates itself, and the T-button state follows.
+//
+// Clicking an inactive T captures a tare; clicking an active one clears it,
+// which matters more than it used to: the server keeps offsets across a device
+// disconnect (deliberately, so flight handoff carries them), so nothing removes
+// an offset automatically any more.
+
+const tarePending = reactive({})   // sensorName → true while a request is in flight
+const tareNotice  = ref(null)      // { text, kind: 'ok'|'error' }
+const tareChoice  = ref(null)      // { name, candidates: string[] } — 409 device picker
+
+let noticeTimer = null
+
+function notify(text, kind = 'ok') {
+  tareNotice.value = { text, kind }
+  clearTimeout(noticeTimer)
+  noticeTimer = setTimeout(() => { tareNotice.value = null }, 6000)
+}
+
+onUnmounted(() => clearTimeout(noticeTimer))
+
+function errText(err) {
+  const d = err?.detail
+  if (typeof d === 'string') return d
+  if (d) return JSON.stringify(d)
+  return err?.message ?? String(err)
+}
+
+// Connected devices reporting this exact sensor name. The server matches names
+// exactly, so this mirrors the set it considers ambiguous.
+function candidateDevices(sensorName) {
+  const names = []
+  for (const dev of devices.value) {
+    if (dev.connected === false) continue
+    if ((dev.sensors ?? []).some(s => s.name === sensorName)) names.push(dev.name)
+  }
+  return names
+}
+
+async function runTare(name, opts) {
+  if (tarePending[name]) return
+  tarePending[name] = true
+  try {
+    const info    = await setTare(name, opts)
+    const applies = Array.isArray(info?.applies_to) ? info.applies_to : []
+    tareChoice.value = null
+    notify(applies.length ? `Tared ${name} on ${applies.join(', ')}` : `Tared ${name}`)
+  } catch (err) {
+    // 409 covers both "sensor not reported in the last 2 s" and "two devices
+    // report this name". Only the latter is recoverable, and only by asking —
+    // picking the wrong device would capture the offset off the wrong sensor.
+    if (err?.status === 409) {
+      const candidates = candidateDevices(name)
+      if (candidates.length > 1) {
+        tareChoice.value = { name, candidates }
+        notify(`${name} is reported by ${candidates.join(' and ')} — choose which to tare from`, 'error')
+        return
+      }
+    }
+    notify(`Tare ${name} failed — ${errText(err)}`, 'error')
+  } finally {
+    delete tarePending[name]
+  }
+}
+
+async function runClearTare(name) {
+  if (tarePending[name]) return
+  tarePending[name] = true
+  try {
+    await clearTare(name)
+    tareChoice.value = null
+    notify(`Cleared tare on ${name}`)
+  } catch (err) {
+    notify(`Clearing tare on ${name} failed — ${errText(err)}`, 'error')
+  } finally {
+    delete tarePending[name]
+  }
+}
+
+function onTareClick(s) {
+  if (tareChoice.value?.name === s.name) { tareChoice.value = null; return }
+  return s.tared ? runClearTare(s.name) : runTare(s.name)
+}
+
+function tareTitle(s) {
+  if (!s.tared) return 'Tare — server captures and zeroes at the current value'
+  return `Tared (offset ${fmt(tares.value[s.name])}) — click to clear`
 }
 </script>
 
@@ -176,6 +272,14 @@ function fmt(v) {
       <span class="window-label">{{ WINDOW_SEC }}s window</span>
     </div>
 
+    <!-- Tare result / failure — server-side tares affect every connected GUI,
+         so the outcome is worth stating rather than logging to the console. -->
+    <div
+      v-if="tareNotice"
+      class="tare-notice"
+      :class="{ 'tare-notice--error': tareNotice.kind === 'error' }"
+    >{{ tareNotice.text }}</div>
+
     <!-- ── Empty state ── -->
     <div v-if="slots.length === 0" class="no-data">
       No sensor data yet — connect to a server and start a test.
@@ -197,11 +301,26 @@ function fmt(v) {
             </span>
             <button
               class="tare-btn"
-              :class="{ 'tare-active': (tares[s.name] ?? 0) !== 0 }"
-              @click="setTare(s.name, s.rawValue)"
-              title="Tare (zero at current value)"
+              :class="{ 'tare-active': s.tared }"
+              :disabled="!!tarePending[s.name]"
+              :title="tareTitle(s)"
+              @click="onTareClick(s)"
             >T</button>
           </div>
+
+          <!-- Two devices report this sensor name (flight handoff) — the server
+               will not guess which one to sample, so the operator picks. -->
+          <div v-if="tareChoice?.name === s.name" class="tare-choice">
+            <span class="tare-choice-label">Tare from</span>
+            <button
+              v-for="d in tareChoice.candidates"
+              :key="d"
+              class="tare-choice-btn"
+              @click="runTare(s.name, { deviceName: d })"
+            >{{ d }}</button>
+            <button class="tare-choice-btn tare-choice-cancel" @click="tareChoice = null">✕</button>
+          </div>
+
           <div class="chart-body">
             <UPlotChart :data="s.plotData" :color="s.color" :fill="s.fill" :window-sec="WINDOW_SEC" />
           </div>
@@ -419,6 +538,74 @@ function fmt(v) {
 .tare-btn.tare-active {
   border-color: #e67e22;
   color: #e67e22;
+}
+
+.tare-btn:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+/* ── Tare notice + ambiguity picker ── */
+
+.tare-notice {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #2ecc71;
+  background: color-mix(in srgb, #2ecc71 10%, transparent);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.tare-notice--error {
+  color: #e67e22;
+  background: color-mix(in srgb, #e67e22 12%, transparent);
+}
+
+.tare-choice {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 4px 7px;
+  border-bottom: 1px solid var(--border-color);
+  background: color-mix(in srgb, #e67e22 10%, transparent);
+}
+
+.tare-choice-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.tare-choice-btn {
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid #e67e22;
+  background: var(--bg-surface);
+  color: #e67e22;
+  font-size: 0.62rem;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.tare-choice-btn:hover {
+  background: #e67e22;
+  color: var(--bg-primary);
+}
+
+.tare-choice-cancel {
+  margin-left: auto;
+  border-color: var(--border-color);
+  color: var(--text-muted);
+}
+
+.tare-choice-cancel:hover {
+  background: var(--bg-primary);
+  color: var(--text-primary);
 }
 
 /* ── Chart canvas ── */

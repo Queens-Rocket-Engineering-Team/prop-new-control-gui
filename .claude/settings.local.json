@@ -22,7 +22,8 @@
       "Bash(IDs)",
       "Bash(git rm *)",
       "Bash(\"/c/Program Files/Google/Chrome/Application/chrome.exe\" --headless --disable-gpu --hide-scrollbars --window-size=900,650 --virtual-time-budget=9000 --dump-dom \"http://localhost:4291/measure.html\")",
-      "Bash(\"/c/Program Files/Google/Chrome/Application/chrome.exe\" --headless --disable-gpu --virtual-time-budget=9000 --dump-dom \"http://localhost:4291/sampler.html\")"
+      "Bash(\"/c/Program Files/Google/Chrome/Application/chrome.exe\" --headless --disable-gpu --virtual-time-budget=9000 --dump-dom \"http://localhost:4291/sampler.html\")",
+      "Bash(curl -sf http://localhost:1420)"
     ]
   }
 }
