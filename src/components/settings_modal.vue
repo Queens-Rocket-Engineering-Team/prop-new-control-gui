@@ -222,6 +222,10 @@ function applyCameraRecordingDir() {
   align-items: center;
   justify-content: center;
   z-index: 1000;
+  /* The overlay is focused programmatically so it can receive the esc keydown.
+     It is tabindex="-1" (not keyboard-reachable), so suppressing the focus ring
+     costs nothing — otherwise Chromium traces one around the whole viewport. */
+  outline: none;
 }
 
 .modal-container {

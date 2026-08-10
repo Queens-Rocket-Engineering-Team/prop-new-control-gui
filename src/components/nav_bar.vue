@@ -3,6 +3,7 @@ import { ref, watch, inject, onMounted, onUnmounted } from "vue";
 import Button from "primevue/button";
 import ServerBar from "./server_bar.vue";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import logoUrl from "../../app-icon.svg";
 
 import CameraPanel from "../windows/camera_panel.vue";
 import GraphPanel from "../windows/graph_panel.vue";
@@ -11,7 +12,7 @@ import DebugPanel from "../windows/debug_panel.vue";
 import FlightPanel from "../windows/flight_panel.vue";
 import DeviceSummaryPanel from "../windows/device_summary.vue";
 
-const emit = defineEmits(["navigate", "open-settings", "resize"]);
+const emit = defineEmits(["navigate", "open-settings", "open-about", "resize"]);
 
 const COLLAPSE_THRESHOLD = 130;
 const MIN_WIDTH          = 52;
@@ -125,6 +126,9 @@ function formatElapsed(ms) {
 <template>
   <div id="navbar" :style="{ width: navbarWidth + 'px' }">
     <div id="menu-buttons" :class="{ collapsed: isCollapsed }">
+      <div id="helm-button" @click="emit('open-about')" title="About HELM">
+        <img :src="logoUrl" alt="HELM" class="helm-icon" />
+      </div>
       <div id="menu-button" @click="toggleCollapse" title="Toggle menu">
         <i class="pi pi-bars" style="font-size: 24px"></i>
       </div>
@@ -200,6 +204,26 @@ function formatElapsed(ms) {
   align-items: stretch;
   gap: 6px;
 }
+
+#helm-button {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 4px;
+}
+
+.helm-icon {
+  width: 26px;
+  height: 26px;
+  display: block;
+  opacity: 0.85;
+}
+
+#helm-button:hover .helm-icon { opacity: 1; }
 
 #menu-button {
   cursor: pointer;
@@ -324,6 +348,7 @@ function formatElapsed(ms) {
 }
 
 #navbar,
+#helm-button,
 #menu-button,
 #gear-button,
 #screens-button {

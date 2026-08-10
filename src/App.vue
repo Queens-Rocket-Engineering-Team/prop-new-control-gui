@@ -16,6 +16,7 @@ import DebugPanel from "./windows/debug_panel.vue";
 import FlightPanel from "./windows/flight_panel.vue";
 
 import SettingsModal from "./components/settings_modal.vue";
+import AboutModal from "./components/about_modal.vue";
 
 const window_content = shallowRef(ControlPanel);
 function setActive(component) {
@@ -347,6 +348,18 @@ function get_ip(new_ip) {
 }
 
 const settingsOpen = ref(false);
+const aboutOpen    = ref(false);
+let _unlistenTares = null;
+
+onMounted(async () => {
+  try {
+    _unlistenTares = await listen('tares-updated', (event) => {
+      applyTaresSnapshot(event.payload);
+    });
+    applyTaresSnapshot(await invoke('get_tares'));
+  } catch (err) {
+    console.error('[App] tare sync setup failed:', err);
+  }
 
 onMounted(() => {
   // Tares need no bootstrap: the /ws/state snapshot that arrives on connect
@@ -373,6 +386,7 @@ onUnmounted(() => {
       <nav-bar
         @navigate="setActive"
         @open-settings="settingsOpen = true"
+        @open-about="aboutOpen = true"
         @resize="onNavResize"
       ></nav-bar>
 
@@ -393,6 +407,11 @@ onUnmounted(() => {
       @update-pid-config="pidConfig = $event"
       @update-test-frequency="testFrequency = $event"
     ></settings-modal>
+
+    <about-modal
+      :is-open="aboutOpen"
+      @close="aboutOpen = false"
+    ></about-modal>
   </main>
 </template>
 
