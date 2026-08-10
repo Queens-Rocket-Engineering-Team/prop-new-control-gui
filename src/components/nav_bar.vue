@@ -2,7 +2,7 @@
 import { ref, computed, watch, inject, onMounted, onUnmounted } from "vue";
 import Button from "primevue/button";
 import ServerBar from "./server_bar.vue";
-import { CAPS, availablePanels } from "../lib/platform.js";
+import { CAPS, availablePanels, isWeb } from "../lib/platform.js";
 import logoUrl from "../../app-icon.svg";
 
 import CameraPanel from "../windows/camera_panel.vue";
@@ -188,6 +188,40 @@ async function addWindow() {
   });
 }
 
+// ── Full screen ──────────────────────────────────────────────────────────────
+//
+// Chrome's address bar and gesture strip cost a serious slice of a phone's
+// height, on panels that are mostly diagram. The desktop build owns a real
+// window and needs no such control, so this is web-only.
+//
+// Feature-detected rather than assumed: iOS exposes no element fullscreen — and
+// Chrome on iOS is WebKit underneath, so it inherits that — meaning the button
+// hides itself there instead of failing on tap. `fullscreenEnabled` is also
+// false when embedded without an allowfullscreen grant, which is the same
+// answer for the same reason.
+const canFullscreen = isWeb() && Boolean(document.fullscreenEnabled);
+const isFullscreen  = ref(false);
+
+// Fullscreen can end without touching this button — Esc, the back gesture, a
+// task switch — so the icon follows the browser rather than our own last
+// action, which would otherwise get stuck showing "exit".
+function syncFullscreen() {
+  isFullscreen.value = Boolean(document.fullscreenElement);
+}
+
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await document.documentElement.requestFullscreen({ navigationUI: "hide" });
+  } catch (err) {
+    // Rejects if the gesture was not user-initiated, or the platform refuses.
+    console.error("[NavBar] fullscreen toggle failed:", err);
+  }
+}
+
+onMounted(() => document.addEventListener("fullscreenchange", syncFullscreen));
+onUnmounted(() => document.removeEventListener("fullscreenchange", syncFullscreen));
+
 function toggleCollapse() {
   if (isCollapsed.value) {
     isCollapsed.value = false;
@@ -276,6 +310,14 @@ function formatElapsed(ms) {
         title="Add window"
       >
         <i class="pi pi-plus-circle"></i>
+      </div>
+      <div
+        v-if="canFullscreen"
+        id="fullscreen-button"
+        @click="toggleFullscreen"
+        :title="isFullscreen ? 'Exit full screen' : 'Full screen'"
+      >
+        <i :class="isFullscreen ? 'pi pi-window-minimize' : 'pi pi-window-maximize'"></i>
       </div>
     </div>
 
@@ -377,7 +419,8 @@ function formatElapsed(ms) {
 #helm-button,
 #menu-button,
 #gear-button,
-#screens-button {
+#screens-button,
+#fullscreen-button {
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -395,7 +438,8 @@ function formatElapsed(ms) {
 
 #menu-button:hover,
 #gear-button:hover,
-#screens-button:hover { color: var(--text-primary); }
+#screens-button:hover,
+#fullscreen-button:hover { color: var(--text-primary); }
 
 /* The About button is an image, so it dims rather than recolouring on hover.
    Sized in em with its siblings so it tracks --nav-scale on phone and tablet. */
@@ -565,7 +609,8 @@ function formatElapsed(ms) {
 #helm-button,
 #menu-button,
 #gear-button,
-#screens-button {
+#screens-button,
+#fullscreen-button {
   transition: var(--theme-transition);
 }
 </style>
