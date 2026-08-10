@@ -360,6 +360,7 @@ onMounted(async () => {
   } catch (err) {
     console.error('[App] tare sync setup failed:', err);
   }
+});
 
 onMounted(() => {
   // Tares need no bootstrap: the /ws/state snapshot that arrives on connect
