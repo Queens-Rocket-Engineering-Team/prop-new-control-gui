@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "HELM"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tokio",
+ "tokio-tungstenite",
+ "webkit2gtk",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2776,22 +2792,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89ae43fd86e4158d6db51ad8e2b80f313af9cc74f5c0e03ccb87de09998732de"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "prop-control-gui"
-version = "0.1.0"
-dependencies = [
- "dirs 5.0.1",
- "futures-util",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tokio",
- "tokio-tungstenite",
- "webkit2gtk",
 ]
 
 [[package]]
