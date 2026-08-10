@@ -198,41 +198,51 @@ export function useServerApi(serverIp) {
     return _delete(`/v1/tares?sensor_name=${encodeURIComponent(sensorName)}`)
   }
 
-  // ── Audio (Mumble) ────────────────────────────────────────────────────────────
+  // ── Recording sessions ────────────────────────────────────────────────────────
 
   /**
-   * POST /v1/audio/start — begin recording the Mumble channel.
-   * Tolerates 409 (already recording).
-   * @returns {Promise<{status:string}>}
+   * POST /v1/sessions/start — start telemetry, audio, and every camera.
+   * A 409 is benign because another client already started the session.
+   * @param {string} name
+   * @returns {Promise<object>}
    */
-  function startAudio() {
-    return _post('/v1/audio/start', undefined, { tolerateCodes: [409] })
+  function startSession(name) {
+    return _post('/v1/sessions/start', { name }, { tolerateCodes: [409] })
   }
 
   /**
-   * POST /v1/audio/stop — stop recording and transcode.
-   * Tolerates 409 (not recording).
-   * @returns {Promise<{status:string, file?:string}>}
+   * POST /v1/sessions/stop — stop the active server recording session.
+   * A 409 is benign because another client already stopped it.
+   * @returns {Promise<object>}
    */
-  function stopAudio() {
-    return _post('/v1/audio/stop', undefined, { tolerateCodes: [409] })
+  function stopSession() {
+    return _post('/v1/sessions/stop', undefined, { tolerateCodes: [409] })
   }
 
   /**
-   * GET /v1/audio/files — list available Opus recordings.
-   * @returns {Promise<{files:{filename:string,download_path:string}[]}>}
+   * GET /v1/sessions — newest-first sessions and server free disk space.
+   * @returns {Promise<{sessions:object[], free_bytes:number}>}
    */
-  function listAudioFiles() {
-    return _get('/v1/audio/files')
+  function listSessions() {
+    return _get('/v1/sessions')
   }
 
   /**
-   * Build the full download URL for an audio file.
-   * @param {string} filename
+   * GET /v1/sessions/{id} — complete session.json metadata.
+   * @param {string} sessionId
+   * @returns {Promise<object>}
+   */
+  function getSession(sessionId) {
+    return _get(`/v1/sessions/${encodeURIComponent(sessionId)}`)
+  }
+
+  /**
+   * Build the full URL for the streamed session ZIP.
+   * @param {string} sessionId
    * @returns {string}
    */
-  function audioFileUrl(filename) {
-    return `${_requireUrl()}/v1/audio/files/${encodeURIComponent(filename)}`
+  function sessionDownloadUrl(sessionId) {
+    return `${_requireUrl()}/v1/sessions/${encodeURIComponent(sessionId)}/download`
   }
 
   return {
@@ -253,11 +263,12 @@ export function useServerApi(serverIp) {
     setTare,
     getTares,
     clearTare,
-    // Audio
-    startAudio,
-    stopAudio,
-    listAudioFiles,
-    audioFileUrl,
+    // Recording sessions
+    startSession,
+    stopSession,
+    listSessions,
+    getSession,
+    sessionDownloadUrl,
     // Exposed for consumers that build URLs (e.g. camera panel)
     baseUrl,
   }
