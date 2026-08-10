@@ -17,6 +17,7 @@ import DebugPanel from "./windows/debug_panel.vue";
 import FlightPanel from "./windows/flight_panel.vue";
 
 import SettingsModal from "./components/settings_modal.vue";
+import AboutModal from "./components/about_modal.vue";
 
 const window_content = shallowRef(ControlPanel);
 function setActive(component) {
@@ -358,6 +359,7 @@ function get_ip(new_ip) {
 }
 
 const settingsOpen = ref(false);
+const aboutOpen    = ref(false);
 let _unlistenTares = null;
 
 onMounted(async () => {
@@ -393,6 +395,7 @@ onUnmounted(() => {
       <nav-bar
         @navigate="setActive"
         @open-settings="settingsOpen = true"
+        @open-about="aboutOpen = true"
         @resize="onNavResize"
       ></nav-bar>
 
@@ -413,6 +416,11 @@ onUnmounted(() => {
       @update-pid-config="pidConfig = $event"
       @update-test-frequency="testFrequency = $event"
     ></settings-modal>
+
+    <about-modal
+      :is-open="aboutOpen"
+      @close="aboutOpen = false"
+    ></about-modal>
   </main>
 </template>
 
