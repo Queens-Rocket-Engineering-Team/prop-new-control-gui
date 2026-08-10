@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, inject, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, inject, onMounted, onUnmounted } from "vue";
 import Button from "primevue/button";
 import ServerBar from "./server_bar.vue";
 import { CAPS, availablePanels } from "../lib/platform.js";
@@ -25,21 +25,100 @@ const PANELS = {
 
 const navPanels = availablePanels().map((key) => ({ key, ...PANELS[key] }));
 
-const canCommand = CAPS.commands;
+const canCommand    = CAPS.commands;
+const canAddWindows = CAPS.nativeWindows;
 
 const emit = defineEmits(["navigate", "open-settings", "open-about", "resize"]);
 
-const COLLAPSE_THRESHOLD = 130;
-const MIN_WIDTH          = 52;
+// ── Responsive sizing ───────────────────────────────────────────────────────
+//
+// A fixed 180px sidebar is fine on a monitor and ruinous on a phone, where it
+// eats half the viewport before the panel gets a pixel. Three tiers:
+//
+//   desktop — 180px, in flow, drag-resizable (unchanged).
+//   tablet  — 140px, in flow. Enough for the labels, less stolen from the P&ID.
+//   phone   — starts as an icon rail; expanding floats it *over* the panel as a
+//             drawer rather than squeezing it, so the content keeps full width.
+//
+// Breakpoints are matchMedia rather than CSS-only because the width has to be
+// reported up to App.vue, which owns the grid column.
+
+// The tablet/phone widths are tighter than a naive scale-down because the type
+// shrinks too (see --nav-scale in the styles) — the same labels fit in less.
+const COLLAPSE_THRESHOLD = 100;  // below TABLET_WIDTH, so a small drag can't snap it shut
+const MIN_WIDTH          = 52;   // desktop/tablet icon rail
+const PHONE_RAIL         = 56;   // clears the 34px tap-target floor plus padding
 const DEFAULT_WIDTH      = 180;
+const TABLET_WIDTH       = 128;
+const DRAWER_WIDTH       = 190;
 
-const navbarWidth  = ref(DEFAULT_WIDTH);
-const isCollapsed  = ref(false);
+const PHONE_QUERY  = "(max-width: 700px)";
+const TABLET_QUERY = "(max-width: 1200px)";
 
-watch(navbarWidth, (w) => emit("resize", w));
-onMounted(() => emit("resize", navbarWidth.value));
+/**
+ * Reactive matchMedia, torn down with the component.
+ *
+ * Also re-reads on window resize: the MediaQueryList's `change` event is not
+ * dependable in every embedding (an iframe resized by attribute updates
+ * `mql.matches` without ever dispatching `change`), and a nav stuck in the
+ * wrong tier after a rotation is worse than one redundant read.
+ */
+function useMedia(query) {
+  const mql     = window.matchMedia(query);
+  const matches = ref(mql.matches);
+  const sync    = () => { matches.value = mql.matches; };
+  mql.addEventListener("change", sync);
+  window.addEventListener("resize", sync);
+  onUnmounted(() => {
+    mql.removeEventListener("change", sync);
+    window.removeEventListener("resize", sync);
+  });
+  return matches;
+}
+
+const isPhone  = useMedia(PHONE_QUERY);
+const isTablet = useMedia(TABLET_QUERY);
+
+const collapsedWidth = () => (isPhone.value ? PHONE_RAIL : MIN_WIDTH);
+const expandedWidth  = () => {
+  if (isPhone.value)  return DRAWER_WIDTH;
+  if (isTablet.value) return TABLET_WIDTH;
+  return DEFAULT_WIDTH;
+};
+
+const navbarWidth = ref(0);
+const isCollapsed = ref(false);
+
+function applyDefaults() {
+  isCollapsed.value = isPhone.value;
+  navbarWidth.value = isPhone.value ? collapsedWidth() : expandedWidth();
+}
+applyDefaults();
+
+function collapse() {
+  isCollapsed.value = true;
+  navbarWidth.value = collapsedWidth();
+}
+
+// What App.vue reserves in the grid. On a phone the open drawer is positioned
+// over the panel, so the column stays at the rail — widening it would defeat
+// the point of the drawer.
+const gridWidth = computed(() =>
+  isPhone.value ? collapsedWidth() : navbarWidth.value
+);
+
+watch(gridWidth, (w) => emit("resize", w));
+onMounted(() => emit("resize", gridWidth.value));
+
+// Rotating a tablet or resizing a browser window can cross a tier; re-derive
+// rather than stranding a 210px drawer in a desktop layout.
+watch([isPhone, isTablet], applyDefaults);
 
 // ── Resize drag ─────────────────────────────────────────────────────────────
+//
+// Pointer events, not mouse events, so the handle also works under touch and
+// stylus on a tablet. It is hidden entirely on phones, where the drawer toggle
+// is the only sensible control.
 
 let isResizing      = false;
 let resizeStartX    = 0;
@@ -49,17 +128,20 @@ function onResizeStart(e) {
   isResizing      = true;
   resizeStartX    = e.clientX;
   resizeStartWidth = navbarWidth.value;
-  document.addEventListener("mousemove", onResizeMove);
-  document.addEventListener("mouseup",   onResizeEnd);
+  e.currentTarget.setPointerCapture?.(e.pointerId);
+  document.addEventListener("pointermove",   onResizeMove);
+  document.addEventListener("pointerup",     onResizeEnd);
+  document.addEventListener("pointercancel", onResizeEnd);
   e.preventDefault();
 }
 
 function onResizeMove(e) {
   if (!isResizing) return;
-  const newWidth = Math.max(MIN_WIDTH, resizeStartWidth + (e.clientX - resizeStartX));
+  const min      = collapsedWidth();
+  const newWidth = Math.max(min, resizeStartWidth + (e.clientX - resizeStartX));
   if (newWidth < COLLAPSE_THRESHOLD) {
     isCollapsed.value  = true;
-    navbarWidth.value  = MIN_WIDTH;
+    navbarWidth.value  = min;
   } else {
     isCollapsed.value  = false;
     navbarWidth.value  = newWidth;
@@ -68,13 +150,15 @@ function onResizeMove(e) {
 
 function onResizeEnd() {
   isResizing = false;
-  document.removeEventListener("mousemove", onResizeMove);
-  document.removeEventListener("mouseup",   onResizeEnd);
+  document.removeEventListener("pointermove",   onResizeMove);
+  document.removeEventListener("pointerup",     onResizeEnd);
+  document.removeEventListener("pointercancel", onResizeEnd);
 }
 
 onUnmounted(() => {
-  document.removeEventListener("mousemove", onResizeMove);
-  document.removeEventListener("mouseup",   onResizeEnd);
+  document.removeEventListener("pointermove",   onResizeMove);
+  document.removeEventListener("pointerup",     onResizeEnd);
+  document.removeEventListener("pointercancel", onResizeEnd);
   clearInterval(timerInterval);
 });
 
@@ -82,16 +166,14 @@ onUnmounted(() => {
 
 let _extraWindowCount = 0;
 
-// Desktop spawns a real native window; the browser opens a tab. Either way the
+// Desktop only — the control is hidden in the web build (see canAddWindows).
+// A browser tab is not a second window in any useful sense: the pad client is
+// view-only, so a duplicate tab just doubles the telemetry subscription over
+// the wifi link the test depends on and gives the engineer nothing new. The
 // BroadcastChannel sync in App.vue keeps server IP, settings and test state
-// consistent between them, so both behave the same from here on.
+// consistent across the native windows this does spawn.
 async function addWindow() {
   _extraWindowCount++;
-
-  if (!CAPS.nativeWindows) {
-    window.open(window.location.href, '_blank');
-    return;
-  }
 
   const label = `extra-${_extraWindowCount}`;
   const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
@@ -109,11 +191,22 @@ async function addWindow() {
 function toggleCollapse() {
   if (isCollapsed.value) {
     isCollapsed.value = false;
-    navbarWidth.value = DEFAULT_WIDTH;
+    navbarWidth.value = expandedWidth();
   } else {
-    isCollapsed.value = true;
-    navbarWidth.value = MIN_WIDTH;
+    collapse();
   }
+}
+
+// On a phone the drawer covers the panel, so leaving it open after a tap would
+// hide the very thing the tap asked for.
+function onNavigate(component) {
+  emit("navigate", component);
+  if (isPhone.value) collapse();
+}
+
+function onOpenSettings() {
+  emit("open-settings");
+  if (isPhone.value) collapse();
 }
 
 // ── Test controls ───────────────────────────────────────────────────────────
@@ -149,19 +242,40 @@ function formatElapsed(ms) {
 </script>
 
 <template>
-  <div id="navbar" :style="{ width: navbarWidth + 'px' }">
+  <!-- Tapping outside the phone drawer closes it — on a small screen there is
+       no spare chrome to reach for, so the panel itself is the dismiss target.
+       Teleported because #navbar is a grid item: left as a sibling root it
+       would claim a grid column of its own and shove the layout sideways. -->
+  <Teleport to="body">
+    <div
+      v-if="isPhone && !isCollapsed"
+      class="nav-backdrop"
+      @click="collapse"
+    ></div>
+  </Teleport>
+
+  <div
+    id="navbar"
+    :class="{ 'nav-phone': isPhone, 'nav-open': !isCollapsed }"
+    :style="{ width: navbarWidth + 'px' }"
+  >
     <div id="menu-buttons" :class="{ collapsed: isCollapsed }">
       <div id="helm-button" @click="emit('open-about')" title="About HELM">
         <img :src="logoUrl" alt="HELM" class="helm-icon" />
       </div>
       <div id="menu-button" @click="toggleCollapse" title="Toggle menu">
-        <i class="pi pi-bars" style="font-size: 24px"></i>
+        <i class="pi pi-bars"></i>
       </div>
-      <div id="gear-button" @click="emit('open-settings')" title="Settings">
-        <i class="pi pi-cog" style="font-size: 24px"></i>
+      <div id="gear-button" @click="onOpenSettings" title="Settings">
+        <i class="pi pi-cog"></i>
       </div>
-      <div id="screens-button" @click="addWindow" title="Add window">
-        <i class="pi pi-plus-circle" style="font-size: 24px"></i>
+      <div
+        v-if="canAddWindows"
+        id="screens-button"
+        @click="addWindow"
+        title="Add window"
+      >
+        <i class="pi pi-plus-circle"></i>
       </div>
     </div>
 
@@ -171,7 +285,7 @@ function formatElapsed(ms) {
           v-for="panel in navPanels"
           :key="panel.key"
           :label="panel.label"
-          @click="emit('navigate', panel.component)"
+          @click="onNavigate(panel.component)"
         />
       </div>
 
@@ -199,12 +313,25 @@ function formatElapsed(ms) {
       </div>
     </div>
 
-    <div class="nav-resize-handle" @mousedown="onResizeStart"></div>
+    <!-- Dragging to resize has no meaning at phone width, where the nav is
+         either a rail or a full-height drawer. -->
+    <div
+      v-if="!isPhone"
+      class="nav-resize-handle"
+      @pointerdown="onResizeStart"
+    ></div>
   </div>
 </template>
 
 <style scoped>
+/* Everything inside the nav is sized in `em` off this one font-size, so the
+   whole sidebar — labels, icons, padding, the server bar — shrinks together
+   with the viewport instead of keeping desktop-sized type in a 140px column.
+   Only --nav-scale changes per tier. */
 #navbar {
+  --nav-scale: 1;
+  font-size: calc(14px * var(--nav-scale));
+
   position: relative;
   background-color: var(--bg-primary);
   border-top: var(--border-color) 2px solid;
@@ -212,88 +339,74 @@ function formatElapsed(ms) {
   border-bottom: var(--border-color) 2px solid;
   border-radius: 10px 0 0 10px;
   overflow: hidden;
-  padding: 10px;
+  padding: 0.7em;
   text-align: left;
   display: flex;
   flex-direction: column;
 }
 
+@media (max-width: 1200px) {
+  #navbar { --nav-scale: 0.9; }
+}
+
+@media (max-width: 700px) {
+  #navbar { --nav-scale: 0.85; }
+}
+
 #navbar :deep(button) {
   width: 100%;
-  margin-top: 2pt;
-  margin-bottom: 2pt;
+  margin-top: 0.15em;
+  margin-bottom: 0.15em;
+  font-size: 0.95em;
+  padding: 0.55em 0.8em;
 }
 
 #menu-buttons {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
+  gap: 0.45em;
+  margin-bottom: 0.3em;
 }
 
 #menu-buttons.collapsed {
   flex-direction: column;
   align-items: stretch;
-  gap: 6px;
+  gap: 0.45em;
 }
 
-#helm-button {
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  flex: none;
-  border-radius: 4px;
-}
-
-.helm-icon {
-  width: 26px;
-  height: 26px;
-  display: block;
-  opacity: 0.85;
-}
-
-#helm-button:hover .helm-icon { opacity: 1; }
-
-#menu-button {
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  color: var(--text-secondary);
-}
-
-#menu-button:hover { color: var(--text-primary); }
-
-#gear-button {
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  color: var(--text-secondary);
-  border-radius: 4px;
-}
-
-#gear-button:hover { color: var(--text-primary); }
-
+#helm-button,
+#menu-button,
+#gear-button,
 #screens-button {
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 2.15em;
+  height: 2.15em;
+  flex: none;
   color: var(--text-secondary);
   border-radius: 4px;
 }
 
+#menu-buttons .pi {
+  font-size: 1.7em;
+}
+
+#menu-button:hover,
+#gear-button:hover,
 #screens-button:hover { color: var(--text-primary); }
+
+/* The About button is an image, so it dims rather than recolouring on hover.
+   Sized in em with its siblings so it tracks --nav-scale on phone and tablet. */
+.helm-icon {
+  width: 1.85em;
+  height: 1.85em;
+  display: block;
+  opacity: 0.85;
+}
+
+#helm-button:hover .helm-icon { opacity: 1; }
 
 /* Nav sections */
 #collapse {
@@ -312,10 +425,10 @@ function formatElapsed(ms) {
 #nav-lower {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding-top: 8px;
+  gap: 0.45em;
+  padding-top: 0.6em;
   border-top: 1px solid var(--border-color);
-  margin-top: 8px;
+  margin-top: 0.6em;
 }
 
 /* Test button */
@@ -325,14 +438,14 @@ function formatElapsed(ms) {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 2px;
-  padding: 8px 6px;
+  gap: 0.15em;
+  padding: 0.6em 0.45em;
   border-radius: 6px;
   border: none;
   cursor: pointer;
   font-family: inherit;
   font-weight: 700;
-  font-size: 0.82rem;
+  font-size: 0.82em;
   letter-spacing: 0.03em;
   transition: filter 0.15s, background 0.2s;
 }
@@ -350,13 +463,15 @@ function formatElapsed(ms) {
   color: #fff;
 }
 
+/* Relative to .test-btn's own 0.82em, not to the nav root — nesting these as
+   fractions of the root would compound the two scales. */
 .test-btn-label {
-  font-size: 0.82rem;
+  font-size: 1em;
   font-weight: 700;
 }
 
 .test-btn-timer {
-  font-size: 0.72rem;
+  font-size: 0.88em;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.08em;
@@ -369,18 +484,18 @@ function formatElapsed(ms) {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 8px 6px;
+  gap: 0.45em;
+  padding: 0.6em 0.45em;
   border-radius: 6px;
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
-  font-size: 0.78rem;
+  font-size: 0.78em;
   font-weight: 600;
   letter-spacing: 0.03em;
 }
 
 .view-only-badge .pi {
-  font-size: 0.85rem;
+  font-size: 1.1em;
 }
 
 /* Drag handle */
@@ -397,6 +512,53 @@ function formatElapsed(ms) {
 .nav-resize-handle:hover,
 .nav-resize-handle:active {
   background: rgba(45, 88, 104, 0.45);
+}
+
+/* Without this a touch-drag on the handle scrolls the page instead of
+   resizing — the browser claims the gesture before pointermove arrives. */
+.nav-resize-handle {
+  touch-action: none;
+}
+
+/* ── Phone ──────────────────────────────────────────────────────────────────
+   App.vue holds the grid column at the rail width (see gridWidth), while the
+   open drawer is simply wider than its column and overflows across the panel.
+   The nav deliberately stays *in flow* — taking it out with position:fixed
+   drops it as a grid item, and the panel then slides up into column 1. The
+   z-index is what puts the overflow on top rather than under the panel. */
+
+#navbar.nav-phone {
+  z-index: 1000;
+  border-radius: 0;
+  border-left: none;
+}
+
+#navbar.nav-phone.nav-open {
+  box-shadow: 4px 0 16px rgba(0, 0, 0, 0.4);
+}
+
+.nav-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+@media (max-width: 700px) {
+  /* Type keeps scaling down with --nav-scale, but a *tap target* has a hard
+     floor no matter how small the labels get — 2.15em would land near 25px
+     here, which is not reliably hittable with a thumb. PHONE_RAIL is sized to
+     clear this inside #navbar's padding. */
+  #menu-button,
+  #gear-button,
+  #screens-button {
+    min-width: 34px;
+    min-height: 34px;
+  }
+
+  #navbar :deep(button) {
+    min-height: 34px;
+  }
 }
 
 #navbar,

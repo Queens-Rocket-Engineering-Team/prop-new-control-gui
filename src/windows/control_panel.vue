@@ -429,13 +429,6 @@ async function onAuxToggle(controlName, newEnergised) {
 
 <template>
   <div id="control-panel">
-    <!-- Occupies the slot the E-STOP button uses on desktop, so the absence of
-         that button reads as intentional rather than as a failed render. -->
-    <div v-if="readOnly" class="view-only-banner">
-      <i class="pi pi-eye" />
-      <span>VIEW ONLY — controls are issued from launch control</span>
-    </div>
-
     <PidDiagram :svg-url="svgUrl" @cells-parsed="onCellsParsed">
       <template #default="{ positionOf, positionBeside }">
 
@@ -707,6 +700,36 @@ async function onAuxToggle(controlName, newEnergised) {
 }
 
 /* ── Popup card shared base ── */
+
+/* Overlay cards are sized in fixed px while the P&ID itself scales to fit its
+   container, so on a tablet they eat a far larger share of the diagram than they
+   do on a desktop monitor. One variable drives every card type; 1 leaves desktop
+   untouched.
+   `zoom` — not `transform: scale()` — is what shrinks them: zoom changes a card's
+   *used layout size*, so the collision pass in usePidOverlay measures and reserves
+   the smaller box. A transform is visual only, and the solver would keep spacing
+   cards as if they were still full size. It has to stay on the card rather than on
+   .pid-overlay: the wrapper carries JS-computed left/top in px, which zoom would
+   scale along with everything else and throw the anchoring off. */
+#control-panel {
+  --pid-card-scale: 1;
+}
+
+/* iPad Pro 12.9" landscape (1366) and most laptops below it. */
+@media (max-width: 1400px) {
+  #control-panel { --pid-card-scale: 0.85; }
+}
+
+/* iPad 10.2"/11" landscape (1024–1194) and anything narrower. */
+@media (max-width: 1200px) {
+  #control-panel { --pid-card-scale: 0.72; }
+}
+
+.valve-card,
+.sensor-card,
+.info-card {
+  zoom: var(--pid-card-scale);
+}
 
 .valve-card,
 .sensor-card {
