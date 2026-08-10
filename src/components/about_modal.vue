@@ -56,7 +56,7 @@ async function openRepo() {
       <div class="about-body">
         <img :src="logoUrl" alt="HELM logo" class="about-logo" style="--logo-size: 240px;"/>
 
-        <h1 class="about-title">H.E.L.M</h1>
+        <h1 class="about-title">HELM</h1>
         <p class="about-expansion">Hub for Engine and Launch Monitoring</p>
 
         <p class="about-version">Version {{ version }}</p>
@@ -79,6 +79,9 @@ async function openRepo() {
   align-items: center;
   justify-content: center;
   z-index: 1000;
+  /* See settings_modal.vue — focused for esc handling, so hide the focus ring
+     that would otherwise outline the entire viewport. */
+  outline: none;
 }
 
 .modal-container {
