@@ -222,6 +222,22 @@ async function toggleFullscreen() {
 onMounted(() => document.addEventListener("fullscreenchange", syncFullscreen));
 onUnmounted(() => document.removeEventListener("fullscreenchange", syncFullscreen));
 
+// iPadOS paints its own exit-fullscreen control over the top-left of the page.
+// It is browser UI, not content: a page cannot hide, restyle or reposition it,
+// and `navigationUI: "hide"` is only a hint that WebKit ignores. Our button row
+// sits exactly underneath it.
+//
+// So move ours rather than trying to dodge a fixed offset — bottom of the
+// sidebar clears the overlay whatever size it turns out to be, and costs
+// nothing on the platforms that draw no overlay because they never get here.
+//
+// iPadOS reports itself as a Mac, so touch points are the reliable tell.
+const isAppleTouch =
+  /iP(hone|ad|od)/.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+const controlsAtBottom = computed(() => isFullscreen.value && isAppleTouch);
+
 function toggleCollapse() {
   if (isCollapsed.value) {
     isCollapsed.value = false;
@@ -290,7 +306,7 @@ function formatElapsed(ms) {
 
   <div
     id="navbar"
-    :class="{ 'nav-phone': isPhone, 'nav-open': !isCollapsed }"
+    :class="{ 'nav-phone': isPhone, 'nav-open': !isCollapsed, 'fs-controls-bottom': controlsAtBottom }"
     :style="{ width: navbarWidth + 'px' }"
   >
     <div id="menu-buttons" :class="{ collapsed: isCollapsed }">
@@ -416,6 +432,16 @@ function formatElapsed(ms) {
   gap: 0.45em;
 }
 
+/* See controlsAtBottom in the script: iPadOS overlays its own exit-fullscreen
+   button on the top-left while fullscreen, right on top of this row, and the
+   page has no way to move or hide it. Ours moves instead. `order` rather than a
+   padding guess, because the overlay's size is not ours to know. */
+#navbar.fs-controls-bottom #menu-buttons {
+  order: 2;
+  margin-top: 0.3em;
+  margin-bottom: 0;
+}
+
 #helm-button,
 #menu-button,
 #gear-button,
@@ -434,6 +460,38 @@ function formatElapsed(ms) {
 
 #menu-buttons .pi {
   font-size: 1.7em;
+}
+
+/* Four icon buttons have to share the sidebar once the fullscreen control is
+   present, and the tablet tier is the tightest fit by a distance: a 128px
+   sidebar leaves ~110px of content, while four buttons at desktop size want
+   ~125px — so the last one clipped off the edge. Shrink the buttons and close
+   the gaps here rather than losing one.
+   `wrap` is a backstop, not the mechanism: if a fifth button ever lands, it
+   drops to a second row instead of silently disappearing under overflow:hidden. */
+@media (max-width: 1200px) {
+  #menu-buttons {
+    gap: 0.28em;
+    flex-wrap: wrap;
+  }
+
+  #helm-button,
+  #menu-button,
+  #gear-button,
+  #screens-button,
+  #fullscreen-button {
+    width: 1.9em;
+    height: 1.9em;
+  }
+
+  #menu-buttons .pi {
+    font-size: 1.45em;
+  }
+
+  .helm-icon {
+    width: 1.6em;
+    height: 1.6em;
+  }
 }
 
 #menu-button:hover,
