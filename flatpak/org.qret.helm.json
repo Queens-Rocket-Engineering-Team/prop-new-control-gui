@@ -48,6 +48,8 @@
                         ".claude",
                         ".flatpak-builder",
                         "build-dir",
+                        "flatpak_app",
+                        "repo",
                         "node_modules",
                         "src-tauri/target",
                         "dist"
