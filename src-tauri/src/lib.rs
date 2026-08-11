@@ -40,15 +40,6 @@ fn sensor_unit(name: &str) -> Option<String> {
     SENSOR_UNITS.lock().unwrap().get(name).cloned()
 }
 
-// Session archives default to the operator's Downloads folder and can be changed
-// from the settings modal.
-static SESSION_DOWNLOAD_DIR: LazyLock<Mutex<String>> = LazyLock::new(|| {
-    let default_dir = dirs::download_dir()
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_default();
-    Mutex::new(default_dir)
-});
-
 static SESSION_DOWNLOAD_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
@@ -125,9 +116,15 @@ static RECORDER: Mutex<RecorderState> = Mutex::new(RecorderState {
 });
 
 fn data_dir() -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("data")
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("telemetry")
+}
+
+fn sessions_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("sessions")
 }
 
 /// Flush the pending buffer: collect all sensor names seen, write the CSV
@@ -398,28 +395,6 @@ fn stop_recording() -> Result<(), String> {
         }
         println!("[Recorder] stopped");
     }
-    Ok(())
-}
-
-#[tauri::command]
-async fn fetch_session_download_dir() -> Result<String, String> {
-    let guarded_dir = SESSION_DOWNLOAD_DIR.lock().map_err(|e| e.to_string())?;
-    Ok(guarded_dir.to_string())
-}
-
-#[tauri::command]
-async fn set_session_download_dir(new_dir: String) -> Result<(), String> {
-    let normalized = if new_dir.trim().is_empty() {
-        dirs::download_dir()
-            .map(|path| path.to_string_lossy().to_string())
-            .ok_or_else(|| "the system Downloads directory is unavailable".to_string())?
-    } else {
-        new_dir.trim().to_string()
-    };
-
-    let mut guarded_dir = SESSION_DOWNLOAD_DIR.lock().map_err(|e| e.to_string())?;
-    println!("New Session Download Directory Submitted: {}", normalized);
-    *guarded_dir = normalized;
     Ok(())
 }
 
@@ -735,18 +710,8 @@ async fn download_session_zip(session_id: String) -> Result<String, SessionDownl
             "configure a server before downloading a session",
         ));
     }
-    let directory = PathBuf::from(
-        SESSION_DOWNLOAD_DIR
-            .lock()
-            .map_err(|error| {
-                SessionDownloadError::new(
-                    "state",
-                    None,
-                    format!("failed to read the session download directory: {error}"),
-                )
-            })?
-            .clone(),
-    );
+    
+    let directory = sessions_dir();
 
     let _download_guard = SessionDownloadGuard::acquire()?;
     let path = download_session_zip_to(&server, 8000, &session_id, &directory).await?;
@@ -872,8 +837,6 @@ pub fn run() {
             stop_recording,
             local_recording_active,
             telemetry_raw::update_control_states,
-            fetch_session_download_dir,
-            set_session_download_dir,
             download_session_zip,
         ])
         .run(tauri::generate_context!())
