@@ -28,3 +28,4 @@ dist-ssr/
 data/
 
 .flatpak-builder/
+build-dir/

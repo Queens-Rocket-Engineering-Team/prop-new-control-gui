@@ -13,8 +13,7 @@
         "--socket=wayland",
         "--socket=fallback-x11",
         "--socket=pulseaudio",
-        "--device=dri",
-        "--filesystem=home"
+        "--device=dri"
     ],
     "build-options": {
         "append-path": "/usr/lib/sdk/node22/bin:/usr/lib/sdk/rust-stable/bin",
@@ -41,7 +40,18 @@
             "sources": [
                 {
                     "type": "dir",
-                    "path": ".."
+                    "path": "..",
+                    "skip": [
+                        ".git",
+                        ".github",
+                        ".vscode",
+                        ".claude",
+                        ".flatpak-builder",
+                        "build-dir",
+                        "node_modules",
+                        "src-tauri/target",
+                        "dist"
+                    ]
                 }
             ]
         }
