@@ -26,3 +26,5 @@ dist-ssr/
 
 # Residual datafiles from old gui
 data/
+
+.flatpak-builder/
