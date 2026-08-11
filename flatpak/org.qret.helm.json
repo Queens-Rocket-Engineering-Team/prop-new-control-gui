@@ -1,0 +1,49 @@
+{
+    "app-id": "org.qret.helm",
+    "runtime": "org.gnome.Platform",
+    "runtime-version": "50",
+    "sdk": "org.gnome.Sdk",
+    "sdk-extensions": [
+        "org.freedesktop.Sdk.Extension.node22",
+        "org.freedesktop.Sdk.Extension.rust-stable"
+    ],
+    "command": "HELM",
+    "finish-args": [
+        "--share=network",
+        "--socket=wayland",
+        "--socket=fallback-x11",
+        "--socket=pulseaudio",
+        "--device=dri",
+        "--filesystem=home"
+    ],
+    "build-options": {
+        "append-path": "/usr/lib/sdk/node22/bin:/usr/lib/sdk/rust-stable/bin",
+        "env": {
+            "CARGO_HOME": "/run/build/helm/cargo"
+        }
+    },
+    "modules": [
+        {
+            "name": "helm",
+            "buildsystem": "simple",
+            "build-options": {
+                "build-args": [
+                    "--share=network"
+                ]
+            },
+            "build-commands": [
+                "npm ci",
+                "npx tauri build --no-bundle",
+                "install -Dm755 src-tauri/target/release/HELM /app/bin/HELM",
+                "install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/org.qret.helm.png",
+                "install -Dm644 flatpak/org.qret.helm.desktop /app/share/applications/org.qret.helm.desktop"
+            ],
+            "sources": [
+                {
+                    "type": "dir",
+                    "path": ".."
+                }
+            ]
+        }
+    ]
+}

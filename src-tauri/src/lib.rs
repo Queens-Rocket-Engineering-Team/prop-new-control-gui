@@ -852,7 +852,7 @@ pub fn run() {
                     format!("screen-{}", i),
                     tauri::WebviewUrl::App("/".into()),
                 )
-                .title(format!("prop-control-gui — Screen {}", i + 1))
+                .title(format!("HELM — Screen {}", i + 1))
                 .position(lx, ly)
                 .maximized(true)
                 .build();
