@@ -31,6 +31,11 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v7
 
+      - name: Generate Flatpak source manifests
+        run: |
+          chmod +x ./flatpak/generate-flatpak-sources.sh
+          ./flatpak/generate-flatpak-sources.sh
+
       # Runs flatpak-builder with --install-deps-from=flathub --force-clean, the
       # same as a local build, but exports to a local ostree repo and bundles it
       # into a single .flatpak instead of installing into the runner.
