@@ -1,10 +1,33 @@
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useReconnectingSocket } from './useReconnectingSocket.js'
 
 export const TELEMETRY_WINDOW_SEC = 30
 export const TELEMETRY_DISPLAY_HZ = 30
 const DISPLAY_SAMPLE_INTERVAL_SEC = 1 / TELEMETRY_DISPLAY_HZ
 const STATS_WINDOW_SEC = 5
+
+// Server-side downsampling algorithms exposed by /ws/telemetry/display.
+// Omitting the query param entirely gets m4, but we always send it so the
+// request is self-describing in server logs and devtools — which also means
+// the GUI's default need not match the server's.
+export const DOWNSAMPLE_ALGORITHMS = ['m4', 'decimation']
+
+// Deliberately decimation, not the server's m4 default: an operator who has
+// never opened Settings gets evenly spaced points. A GUI too old to send the
+// param still lands on m4, so the two defaults can disagree by version.
+export const DEFAULT_DOWNSAMPLE_ALGORITHM = 'decimation'
+
+/**
+ * Coerce an arbitrary value (localStorage entry, BroadcastChannel payload) to a
+ * known algorithm. A stale or hand-edited value falls back to the default
+ * rather than propagating into the socket URL.
+ *
+ * @param {unknown} value
+ * @returns {'m4'|'decimation'}
+ */
+export function normalizeDownsampleAlgorithm(value) {
+  return DOWNSAMPLE_ALGORITHMS.includes(value) ? value : DEFAULT_DOWNSAMPLE_ALGORITHM
+}
 
 function pruneHistory(history, cutoffT) {
   let firstKept = 0
@@ -78,15 +101,21 @@ function mergeDisplayPoint(info, sourcePoint, plotT) {
  * The sensorData shape keeps the legacy value/unit/history fields and adds
  * windowStart/windowEnd so charts can render the same fixed rolling timeframe.
  *
+ * The downsampling algorithm is chosen per connection and fixed at handshake,
+ * so changing it requires reconnecting — folding it into the URL computed lets
+ * useReconnectingSocket's existing URL watcher do exactly that.
+ *
  * @param {import('vue').Ref<string>} serverIp
+ * @param {import('vue').Ref<string>} [downsampleAlgorithm]
  * @returns {{
  *   sensorData:      import('vue').Ref<Record<string,object>>,
  *   telemetryStats:  import('vue').Ref<Record<string,number>>,
  *   displayStatus:   import('vue').Ref<string>,
+ *   streamAlgorithm: import('vue').Ref<string|null>,
  *   clearSensorData: () => void,
  * }}
  */
-export function useTelemetryStream(serverIp) {
+export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_DOWNSAMPLE_ALGORITHM)) {
   // ── Non-reactive internal store ────────────────────────────────────────────────
   // _store[sensorName] = { value: number, unit: string, history: {t,v,sourceT}[], lastSourceT: number, lastDisplayBucket: number }
   const _store = {}
@@ -120,9 +149,20 @@ export function useTelemetryStream(serverIp) {
     return ip === 'localhost' ? '127.0.0.1' : ip
   })
 
-  const displayUrl = computed(() =>
-    _host.value ? `ws://${_host.value}:8000/ws/telemetry/display` : null
-  )
+  const displayUrl = computed(() => {
+    if (!_host.value) return null
+    const algorithm = normalizeDownsampleAlgorithm(downsampleAlgorithm.value)
+    return `ws://${_host.value}:8000/ws/telemetry/display?algorithm=${algorithm}`
+  })
+
+  // What the stream is actually serving, echoed by the server on every batch.
+  // null means "not told" — either nothing has arrived yet, or the server
+  // predates the algorithm parameter and is silently serving m4.
+  const streamAlgorithm = ref(null)
+
+  // A reconnect (IP change or algorithm change) invalidates the echo until the
+  // new connection reports one of its own.
+  watch(displayUrl, () => { streamAlgorithm.value = null })
 
   function publishTelemetryStats() {
     const pointRates = []
@@ -194,6 +234,9 @@ export function useTelemetryStream(serverIp) {
       let msg = null
       try { msg = JSON.parse(event.data) } catch { publishTelemetryStats(); return }
       if (msg?.type !== 'telemetry.display_batch') { publishTelemetryStats(); return }
+
+      const reportedAlgorithm = typeof msg.algorithm === 'string' ? msg.algorithm : null
+      if (streamAlgorithm.value !== reportedAlgorithm) streamAlgorithm.value = reportedAlgorithm
 
       let batchPointCount = 0
       let batchSensorCount = 0
@@ -277,8 +320,9 @@ export function useTelemetryStream(serverIp) {
     _statsStore.incomingPointsBySensor.clear()
     _statsStore.incomingPointsPerSensorBatch = []
     sensorData.value = {}
+    streamAlgorithm.value = null
     publishTelemetryStats()
   }
 
-  return { sensorData, telemetryStats, displayStatus, clearSensorData }
+  return { sensorData, telemetryStats, displayStatus, streamAlgorithm, clearSensorData }
 }

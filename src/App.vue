@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, provide, ref, shallowRef, watch } fro
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { useServerApi } from "./composables/useServerApi.js";
 import { useStateStream } from "./composables/useStateStream.js";
-import { useTelemetryStream } from "./composables/useTelemetryStream.js";
+import { useTelemetryStream, normalizeDownsampleAlgorithm } from "./composables/useTelemetryStream.js";
 import { useLogStream } from "./composables/useLogStream.js";
 import "primeicons/primeicons.css";
 
@@ -39,6 +39,13 @@ provide('pidConfig', pidConfig);
 
 const testFrequency = ref(parseInt(localStorage.getItem('qret-test-frequency') ?? '', 10) || 190);
 provide('testFrequency', testFrequency);
+
+// Server-side downsampling for the display stream. Fixed per connection, so
+// changing it reconnects /ws/telemetry/display — see useTelemetryStream.
+const downsampleAlgorithm = ref(
+  normalizeDownsampleAlgorithm(localStorage.getItem('qret-downsample-algorithm')),
+);
+provide('downsampleAlgorithm', downsampleAlgorithm);
 
 const {
   stopStream,
@@ -169,9 +176,11 @@ watch(
 
 // ── Telemetry streams (display→charts; raw→CSV is ingested on the Rust side) ─
 
-const { sensorData, telemetryStats, clearSensorData } = useTelemetryStream(server_ip);
+const { sensorData, telemetryStats, streamAlgorithm, clearSensorData } =
+  useTelemetryStream(server_ip, downsampleAlgorithm);
 provide('sensorData', sensorData);
 provide('telemetryStats', telemetryStats);
+provide('streamAlgorithm', streamAlgorithm);
 
 // ── Control state bits → Rust (used by the raw-telemetry CSV recorder) ───────
 // The raw /ws/telemetry/raw stream is consumed entirely in Rust and only
@@ -608,9 +617,19 @@ watch(testFrequency, (hz) => {
   _settingsChannel.postMessage({ type: 'testFrequency', value: hz });
 });
 
+watch(downsampleAlgorithm, (algorithm) => {
+  localStorage.setItem('qret-downsample-algorithm', algorithm);
+  _settingsChannel.postMessage({ type: 'downsampleAlgorithm', value: algorithm });
+});
+
 _settingsChannel.onmessage = (e) => {
   if (e.data.type === 'pidConfig')     pidConfig.value     = e.data.value;
   if (e.data.type === 'testFrequency') testFrequency.value = e.data.value;
+  // Re-validate on the way in: another window is no more trustworthy a source
+  // than localStorage, and an unknown value would reach the socket URL.
+  if (e.data.type === 'downsampleAlgorithm') {
+    downsampleAlgorithm.value = normalizeDownsampleAlgorithm(e.data.value);
+  }
   // darkMode messages are handled by settings_modal.vue's own channel instance
 };
 
@@ -678,6 +697,7 @@ onUnmounted(() => {
       :current-ip="server_ip"
       :pid-config="pidConfig"
       :test-frequency="testFrequency"
+      :downsample-algorithm="downsampleAlgorithm"
       :test-active="testActive"
       :server-session-active-connected="testActive && stateStatus === 'connected'"
       :local-recording-active="localRecordingActive"
@@ -685,6 +705,7 @@ onUnmounted(() => {
       @update-ip="get_ip"
       @update-pid-config="pidConfig = $event"
       @update-test-frequency="testFrequency = $event"
+      @update-downsample-algorithm="downsampleAlgorithm = $event"
     ></settings-modal>
 
     <about-modal
