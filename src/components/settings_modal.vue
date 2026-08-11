@@ -1,6 +1,5 @@
 <script setup>
 import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
-import { invoke } from "@tauri-apps/api/core";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
 
@@ -18,7 +17,6 @@ const emit = defineEmits(["close", "update-ip", "update-pid-config", "update-tes
 
 const ipMode = ref("none");
 const customIp = ref("");
-const sessionDownloadDir = ref("");
 const localPidConfig = ref("rocket-launch");
 const localTestFreq = ref(190);
 const overlayRef = ref(null);
@@ -62,7 +60,7 @@ onUnmounted(() => _settingsChannel.close());
 
 watch(
   () => props.isOpen,
-  async (open) => {
+  (open) => {
     if (open) {
       nextTick(() => overlayRef.value?.focus());
       const ip = props.currentIp || "";
@@ -76,13 +74,6 @@ watch(
       }
       localPidConfig.value = props.pidConfig || "rocket-launch";
       localTestFreq.value  = props.testFrequency || 190;
-
-      try {
-        const dir = await invoke("fetch_session_download_dir");
-        sessionDownloadDir.value = dir || "";
-      } catch (err) {
-        console.error("Failed to fetch session download directory:", err);
-      }
     }
   }
 );
@@ -122,13 +113,6 @@ watch(customIp, () => {
     applyIp();
   }
 });
-
-function applySessionDownloadDir() {
-  const dir = sessionDownloadDir.value.trim();
-  invoke("set_session_download_dir", { newDir: dir }).catch((err) => {
-    console.error("Failed to set session download directory:", err);
-  });
-}
 </script>
 
 <template>
@@ -204,18 +188,6 @@ function applySessionDownloadDir() {
           <span v-if="serverIpLocked" class="freq-locked-label">
             locked while a server session or laptop recording is active
           </span>
-        </div>
-
-        <div class="setting-group">
-          <span class="setting-group-label"><i class="pi pi-download" />Session Download Directory</span>
-          <input
-            type="text"
-            v-model="sessionDownloadDir"
-            class="ip-text-input"
-            placeholder="Defaults to your Downloads folder"
-            @blur="applySessionDownloadDir"
-            @keyup.enter="applySessionDownloadDir"
-          />
         </div>
       </div>
     </div>

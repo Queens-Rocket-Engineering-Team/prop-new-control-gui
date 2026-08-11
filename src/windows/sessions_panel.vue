@@ -23,9 +23,14 @@ const detailsById = ref({})
 const detailErrors = ref({})
 const loadingDetailId = ref(null)
 const downloadingId = ref(null)
+const openingSessionsFolder = ref(false)
 const downloadMessage = ref('')
 const downloadMessageTitle = ref('')
 const downloadError = ref('')
+
+// Downloaded archives land in the app's local data directory, which only the
+// desktop build can reveal in a file manager.
+const isDesktop = isTauri()
 
 let listRequestId = 0
 let detailRequestId = 0
@@ -235,6 +240,23 @@ async function downloadSession(item) {
   }
 }
 
+async function openSessionsFolder() {
+  if (openingSessionsFolder.value) return
+  openingSessionsFolder.value = true
+  downloadError.value = ''
+  try {
+    const path = await invoke('open_sessions_dir')
+    showDownloadMessage(
+      'Opened sessions folder',
+      path ? `Opened ${path}` : 'Opened sessions folder',
+    )
+  } catch (error) {
+    downloadError.value = errorMessage(error)
+  } finally {
+    openingSessionsFolder.value = false
+  }
+}
+
 onMounted(refreshSessions)
 onActivated(refreshSessions)
 onUnmounted(() => {
@@ -308,6 +330,22 @@ watch(liveSession, (next, previous) => {
             aria-hidden="true"
           />
           <span class="toolbar-button-label">Latest ZIP</span>
+        </button>
+        <button
+          v-if="isDesktop"
+          class="toolbar-button"
+          type="button"
+          :disabled="openingSessionsFolder"
+          aria-label="Open the local folder where downloaded sessions are saved"
+          title="Open the local folder where downloaded sessions are saved"
+          @click="openSessionsFolder"
+        >
+          <i
+            class="pi"
+            :class="openingSessionsFolder ? 'pi-spinner pi-spin' : 'pi-folder-open'"
+            aria-hidden="true"
+          />
+          <span class="toolbar-button-label">Open Folder</span>
         </button>
         <button
           class="toolbar-button toolbar-button-icon"

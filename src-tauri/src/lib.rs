@@ -12,6 +12,7 @@ use std::sync::{
 };
 use std::time::Duration;
 use tauri::Manager;
+use tauri_plugin_opener::OpenerExt;
 use tokio::io::AsyncWriteExt;
 
 mod telemetry_raw;
@@ -719,6 +720,22 @@ async fn download_session_zip(session_id: String) -> Result<String, SessionDownl
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Open the local sessions directory in the system file manager. The directory
+/// is created first so the button still works before the first download.
+#[tauri::command]
+async fn open_sessions_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let directory = sessions_dir();
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("failed to create the sessions directory: {error}"))?;
+
+    let path = directory.to_string_lossy().to_string();
+    app.opener()
+        .open_path(path.clone(), None::<&str>)
+        .map_err(|error| format!("failed to open {path}: {error}"))?;
+
+    Ok(path)
+}
+
 #[cfg(target_os = "linux")]
 fn linux_media_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
     tauri::plugin::Builder::new("linux-media")
@@ -838,6 +855,7 @@ pub fn run() {
             local_recording_active,
             telemetry_raw::update_control_states,
             download_session_zip,
+            open_sessions_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
