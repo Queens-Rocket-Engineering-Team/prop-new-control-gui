@@ -1,12 +1,17 @@
 <script setup>
-import { ref, inject, computed } from 'vue'
+import { ref, inject, computed, onUnmounted } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
+import { CAPS } from '../lib/platform.js'
 
 const devices     = inject('devices',     ref([]))
 const sensorData  = inject('sensorData',  ref({}))
 const kasaDevices = inject('kasaDevices', ref([]))
 const discover    = inject('discover',    () => {})
 const setKasaState = inject('setKasaState', () => {})
+
+// Kasa plugs switch mains power; the view-only build shows their state but
+// cannot change it. Discovery is the deliberate exception — see onDiscover.
+const readOnly = !CAPS.commands
 
 // ── Live sensor lookup ────────────────────────────────────────────────────────
 
@@ -53,16 +58,45 @@ function heartbeatTitle(dev) {
 
 // ── Discovery ─────────────────────────────────────────────────────────────────
 
+// Discovery is kept available in the view-only build so an engineer at the pad
+// who just powered a device on can pull it in without radioing launch control.
+//
+// The request itself resolves almost immediately — it only asks the server to
+// emit a multicast — while the devices it finds arrive asynchronously over
+// /ws/state a moment later. Without a cooldown the button would flash and look
+// like it did nothing, and users would hammer it. Hold it for a few seconds so
+// the feedback covers the window in which a device would actually show up.
+
+const DISCOVER_COOLDOWN_S = 5
+
 const discovering = ref(false)
+const cooldown    = ref(0)
+let cooldownTimer = null
 
 async function onDiscover() {
+  if (discovering.value || cooldown.value > 0) return
   discovering.value = true
   try {
     await discover()
+  } catch (err) {
+    console.error('[DeviceSummary] discover failed:', err)
   } finally {
     discovering.value = false
   }
+
+  cooldown.value = DISCOVER_COOLDOWN_S
+  cooldownTimer = setInterval(() => {
+    cooldown.value -= 1
+    if (cooldown.value <= 0) {
+      clearInterval(cooldownTimer)
+      cooldownTimer = null
+    }
+  }, 1000)
 }
+
+onUnmounted(() => {
+  if (cooldownTimer !== null) clearInterval(cooldownTimer)
+})
 
 // ── Control/sensor accessors for the new devices[] shape ─────────────────────
 
@@ -128,9 +162,9 @@ function getSensors(dev) {
       <span class="device-count-badge">
         {{ devices.length }} device{{ devices.length !== 1 ? 's' : '' }}
       </span>
-      <button class="discover-btn" :disabled="discovering" @click="onDiscover">
-        <i class="pi" :class="discovering ? 'pi-spin pi-spinner' : 'pi-refresh'" />
-        {{ discovering ? 'Scanning…' : 'Discover' }}
+      <button class="discover-btn" :disabled="discovering || cooldown > 0" @click="onDiscover">
+        <i class="pi" :class="discovering || cooldown > 0 ? 'pi-spin pi-spinner' : 'pi-refresh'" />
+        {{ discovering || cooldown > 0 ? 'Scanning…' : 'Discover' }}
       </button>
     </div>
 
@@ -270,7 +304,7 @@ function getSensors(dev) {
               <td>
                 <ToggleSwitch
                   :modelValue="dev.active"
-                  :disabled="!dev.connected"
+                  :disabled="!dev.connected || readOnly"
                   @update:modelValue="setKasaState(dev.host, $event)"
                   class="kasa-toggle"
                 />

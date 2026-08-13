@@ -2,12 +2,18 @@
 import { ref, reactive, inject, computed, onUnmounted } from 'vue'
 import UPlotChart from '../components/uplot_chart.vue'
 import { TELEMETRY_WINDOW_SEC } from '../composables/useTelemetryStream.js'
+import { CAPS } from '../lib/platform.js'
 
 const sensorData    = inject('sensorData',    ref({}))
 const devices       = inject('devices',       ref([]))
 const tares         = inject('tares',         ref({}))
 const setTare       = inject('setTare',       () => Promise.resolve())
 const clearTare     = inject('clearTare',     () => Promise.resolve())
+
+// Tares are server state and are applied to what every client displays, so a
+// pad tablet setting one would silently change the numbers launch control reads
+// off its screen. The view-only build shows tared values but cannot change them.
+const canTare = CAPS.tares
 const testFrequency = inject('testFrequency', ref(190))
 const testActive    = inject('testActive',    ref(false))
 const localRecordingActive = inject('localRecordingActive', ref(false))
@@ -301,6 +307,7 @@ function tareTitle(s) {
               {{ fmt(s.value) }}<span class="chart-unit"> {{ s.unit }}</span>
             </span>
             <button
+              v-if="canTare"
               class="tare-btn"
               :class="{ 'tare-active': s.tared }"
               :disabled="!!tarePending[s.name]"

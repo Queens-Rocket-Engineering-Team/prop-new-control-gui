@@ -1,0 +1,70 @@
+name: Flatpak
+
+on:
+  release:
+    types: [published]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A full build compiles the Rust backend from scratch, so supersede queued runs
+# for the same PR rather than building the same branch twice.
+concurrency:
+  group: flatpak-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build bundle (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      # Tracks "runtime-version": "50" in the manifest. The image ships
+      # flatpak-builder, xvfb and a preconfigured flathub remote; --privileged
+      # is required for bubblewrap to set up the build sandbox.
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Generate Flatpak source manifests
+        run: |
+          chmod +x ./flatpak/generate-flatpak-sources.sh
+          ./flatpak/generate-flatpak-sources.sh
+
+      # Runs flatpak-builder with --install-deps-from=flathub --force-clean, the
+      # same as a local build, but exports to a local ostree repo and bundles it
+      # into a single .flatpak instead of installing into the runner.
+      - name: Build org.qret.helm
+        uses: flathub-infra/flatpak-github-actions/flatpak-builder@933e9e8ca36e85046ebca8e211f0785c6becac40 # master @ 2025-04-24
+        with:
+          manifest-path: flatpak/org.qret.helm.json
+          bundle: org.qret.helm.flatpak
+
+  publish:
+    name: Attach bundle to the release
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # The build job names its artifact after the bundle plus the architecture.
+      - name: Download the bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: org.qret.helm-x86_64.flatpak
+          path: bundle
+
+      - name: Upload the bundle to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release upload "${{ github.event.release.tag_name }}"
+          bundle/org.qret.helm.flatpak
+          --repo "${{ github.repository }}"
+          --clobber

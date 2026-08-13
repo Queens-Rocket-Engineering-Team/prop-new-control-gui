@@ -1,6 +1,8 @@
 <script setup>
 import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { CAPS } from "../lib/platform.js";
+import { useKeyBindings } from "../composables/useKeyBindings.js";
+import KeybindsModal from "./keybinds_modal.vue";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
 import { DEFAULT_DOWNSAMPLE_ALGORITHM } from '../composables/useTelemetryStream.js';
@@ -26,7 +28,6 @@ const emit = defineEmits([
 
 const ipMode = ref("none");
 const customIp = ref("");
-const sessionDownloadDir = ref("");
 const localPidConfig = ref("rocket-launch");
 const localTestFreq = ref(190);
 const localDownsample = ref(DEFAULT_DOWNSAMPLE_ALGORITHM);
@@ -34,6 +35,13 @@ const overlayRef = ref(null);
 const serverIpLocked = computed(
   () => props.serverSessionActiveConnected || props.localRecordingActive,
 );
+
+// The web build is served by the host it talks to, so it has no server to pick.
+const canSelectServer = CAPS.serverSelection;
+// Gates only the settings that issue commands — currently the stream frequency,
+// which re-rates the whole stand. Deliberately not the P&ID picker: that just
+// selects which diagram this client draws. See the template.
+const readOnly = !CAPS.commands;
 
 // ── Dark mode — persisted in localStorage, synced across windows ──────────────
 // localStorage is shared across all Tauri windows (same WebView2 data dir),
@@ -71,7 +79,7 @@ onUnmounted(() => _settingsChannel.close());
 
 watch(
   () => props.isOpen,
-  async (open) => {
+  (open) => {
     if (open) {
       nextTick(() => overlayRef.value?.focus());
       const ip = props.currentIp || "";
@@ -86,13 +94,6 @@ watch(
       localPidConfig.value = props.pidConfig || "rocket-launch";
       localTestFreq.value  = props.testFrequency || 190;
       localDownsample.value = props.downsampleAlgorithm || DEFAULT_DOWNSAMPLE_ALGORITHM;
-
-      try {
-        const dir = await invoke("fetch_session_download_dir");
-        sessionDownloadDir.value = dir || "";
-      } catch (err) {
-        console.error("Failed to fetch session download directory:", err);
-      }
     }
   }
 );
@@ -118,6 +119,10 @@ function isValidIp(ip) {
   return ipv4Pattern.test(ip);
 }
 
+// Emits only — persisting the choice is App.vue's job (get_ip), which is also
+// where it can refuse the change outright if a recording is running. This just
+// declines to emit while locked so the modal cannot start an argument it has
+// no standing to win.
 function applyIp() {
   if (serverIpLocked.value) return;
 
@@ -140,12 +145,15 @@ watch(customIp, () => {
   }
 });
 
-function applySessionDownloadDir() {
-  const dir = sessionDownloadDir.value.trim();
-  invoke("set_session_download_dir", { newDir: dir }).catch((err) => {
-    console.error("Failed to set session download directory:", err);
-  });
-}
+// ── Keybindings ──────────────────────────────────────────────────────────────
+// The editor itself lives in its own modal: every actuator binds two keys, and
+// that grid does not fit this modal's width. All this group holds is the way in
+// and a count of what is currently bound.
+
+const { bindings } = useKeyBindings();
+const keybindsOpen = ref(false);
+
+const boundCount = computed(() => Object.keys(bindings.value).length);
 </script>
 
 <template>
@@ -174,6 +182,10 @@ function applySessionDownloadDir() {
             <i class="pi pi-moon" :style="{color: darkMode ? '#f39c12' : 'var(--text-secondary)'}"></i>
           </div>
         </div>
+        <!-- Not gated: this picks which P&ID the client draws, which is a
+             per-client view preference (localStorage + a same-browser
+             BroadcastChannel), not a command. An engineer at the pad needs it
+             to look at the stand they are standing next to. -->
         <div class="setting-group">
           <span class="setting-group-label"><i class="pi pi-sliders-h" />Test Configuration</span>
           <label class="option-row" for="cfg-hot-fire">
@@ -185,7 +197,7 @@ function applySessionDownloadDir() {
             <span>Rocket Launch</span>
           </label>
         </div>
-        <div class="setting-group">
+        <div class="setting-group" v-if="!readOnly">
           <span class="setting-group-label"><i class="pi pi-wave-pulse" />Test Stream Frequency</span>
           <div class="option-row freq-row">
             <input
@@ -200,6 +212,9 @@ function applySessionDownloadDir() {
             <span v-if="props.testActive" class="freq-locked-label">locked during test</span>
           </div>
         </div>
+        <!-- Not gated on readOnly: which downsampler the server runs for *this*
+             client's display socket is a per-client view preference, like the
+             P&ID picker above, and changes nothing about the stand. -->
         <div class="setting-group">
           <span class="setting-group-label"><i class="pi pi-chart-line" />Graph Downsampling</span>
           <label class="option-row" for="ds-m4">
@@ -216,7 +231,24 @@ function applySessionDownloadDir() {
           </span>
         </div>
 
-        <div class="setting-group">
+        <!-- Hidden in the pad build for the same reason as the frequency above:
+             that client cannot command the stand, so a shortcut for doing so
+             would be a control that looks live and does nothing. -->
+        <div class="setting-group" v-if="!readOnly">
+          <span class="setting-group-label"><i class="pi pi-key" />Keybindings</span>
+          <div class="option-row binding-row">
+            <span class="binding-summary">
+              {{ boundCount === 0 ? 'No shortcuts set' : `${boundCount} shortcut${boundCount === 1 ? '' : 's'} set` }}
+            </span>
+            <button class="binding-open-btn" @click="keybindsOpen = true">
+              <i class="pi pi-pencil" />
+              <span>Edit</span>
+            </button>
+          </div>
+        </div>
+        <!-- The pad reaches the server by loading this page from it, so there is
+             nothing here for it to decide — see CAPS.serverSelection. -->
+        <div class="setting-group" v-if="canSelectServer">
           <span class="setting-group-label"><i class="pi pi-server" />Server IP Address</span>
           <label class="option-row">
             <RadioButton v-model="ipMode" value="localhost" :disabled="serverIpLocked" />
@@ -238,21 +270,14 @@ function applySessionDownloadDir() {
             locked while a server session or laptop recording is active
           </span>
         </div>
-
-        <div class="setting-group">
-          <span class="setting-group-label"><i class="pi pi-download" />Session Download Directory</span>
-          <input
-            type="text"
-            v-model="sessionDownloadDir"
-            class="ip-text-input"
-            placeholder="Defaults to your Downloads folder"
-            @blur="applySessionDownloadDir"
-            @keyup.enter="applySessionDownloadDir"
-          />
-        </div>
       </div>
     </div>
   </div>
+
+  <!-- Outside the overlay above, and teleported to <body> from inside itself:
+       it stands on its own, so closing Settings behind it leaves it open and its
+       esc keydown does not also dismiss Settings. -->
+  <keybinds-modal :is-open="keybindsOpen" @close="keybindsOpen = false" />
 </template>
 
 <style scoped>
@@ -272,12 +297,18 @@ function applySessionDownloadDir() {
 }
 
 .modal-container {
+  display: flex;
+  flex-direction: column;
   background: var(--modal-bg);
   border: 1px solid var(--border-color);
   border-radius: 10px;
   min-width: 320px;
   max-width: 420px;
   width: 90%;
+  /* The overlay centres this box, so anything taller than the viewport spills
+     off both ends with no way to reach either. Five groups clear a short laptop
+     window, so the body scrolls and the header stays put. */
+  max-height: 90vh;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
   overflow: hidden;
 }
@@ -315,6 +346,8 @@ function applySessionDownloadDir() {
   flex-direction: column;
   gap: 12px;
   padding: 16px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* Close button styles */
@@ -457,6 +490,71 @@ label.option-row:hover {
 .setting-hint {
   font-size: 0.68rem;
   line-height: 1.35;
+  color: var(--text-muted);
+}
+
+/* Keybinding editor */
+/* A stand can carry twenty-odd valves, so the list scrolls inside the group
+   rather than pushing the rest of the settings off the modal. */
+.binding-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.binding-group-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 6px 0 2px;
+}
+
+.binding-group-label:first-child {
+  margin-top: 0;
+}
+
+/* Keybindings — a summary and the way into the editor, which is its own modal. */
+.binding-row {
+  gap: 8px;
+  cursor: default;
+}
+
+.binding-row:hover {
+  background: none;
+}
+
+.binding-summary {
+  flex: 1;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.binding-open-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.binding-open-btn:hover {
+  border-color: var(--input-focus-border);
+}
+
+.binding-open-btn .pi {
+  font-size: 0.72rem;
   color: var(--text-muted);
 }
 

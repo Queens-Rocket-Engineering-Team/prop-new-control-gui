@@ -113,6 +113,7 @@ function mergeDisplayPoint(info, sourcePoint, plotT) {
  *   displayStatus:   import('vue').Ref<string>,
  *   streamAlgorithm: import('vue').Ref<string|null>,
  *   clearSensorData: () => void,
+ *   msSinceLastTelemetry: () => number,
  * }}
  */
 export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_DOWNSAMPLE_ALGORITHM)) {
@@ -222,6 +223,9 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
     }
   }
 
+  // Wall-clock time of the last display batch off the socket. 0 = none yet.
+  let _lastMessageAtMs = 0
+
   // ── Display stream → sensorData ────────────────────────────────────────────────
   // Each message: { type: 'telemetry.display_batch', readings: [{ sensor_name, unit, sensor_type, points: [{t,v}] }] }
   // The server may include multiple points per reading; charts keep only the latest
@@ -230,6 +234,13 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
     onMessage(event) {
       const receivedAt = performance.now() / 1000
       _statsStore.displayReceiveTimes.push(receivedAt)
+
+      // Liveness marker, stamped on delivery rather than on publish, so it
+      // answers "is the stand streaming?" rather than "is the UI up to date?".
+      // Keep it that way: anything derived from sensorData or telemetryStats
+      // reports on rendering, and a caller deciding whether to touch the
+      // stand's stream rate must not confuse a stalled view for a silent stand.
+      _lastMessageAtMs = Date.now()
 
       let msg = null
       try { msg = JSON.parse(event.data) } catch { publishTelemetryStats(); return }
@@ -319,10 +330,23 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
     _statsStore.displayReceiveTimes = []
     _statsStore.incomingPointsBySensor.clear()
     _statsStore.incomingPointsPerSensorBatch = []
+    _lastMessageAtMs = 0
     sensorData.value = {}
     streamAlgorithm.value = null
     publishTelemetryStats()
   }
 
-  return { sensorData, telemetryStats, displayStatus, streamAlgorithm, clearSensorData }
+  /**
+   * Milliseconds since a display batch last arrived on the socket, or Infinity
+   * if none ever has.
+   *
+   * Stamped on delivery rather than derived from sensorData, and deliberately a
+   * function rather than a ref: callers ask "is the stand streaming?", which
+   * must stay truthful independently of whether anything is re-rendering.
+   */
+  function msSinceLastTelemetry() {
+    return _lastMessageAtMs === 0 ? Infinity : Date.now() - _lastMessageAtMs
+  }
+
+  return { sensorData, telemetryStats, displayStatus, streamAlgorithm, clearSensorData, msSinceLastTelemetry }
 }
