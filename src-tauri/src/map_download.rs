@@ -2,9 +2,9 @@
 //!
 //! Downloads Esri World Imagery XYZ tiles for a bbox + zoom range into a
 //! per-site MBTiles file under `maps_dir()`, updating manifest.json — the
-//! same formats the tiles:// protocol (maps.rs) reads. Replaces the old
-//! tile-prep Python scripts so a single shipped app covers the whole
-//! prepare-at-home → fly-offline workflow.
+//! same formats the tiles:// protocol (maps.rs) reads. The app owns the whole
+//! prepare-at-home → fly-offline workflow, so there is no external script to
+//! run for tiles beforehand.
 //!
 //! Downloads run as one background task per app process; progress streams to
 //! every window via `map-download-progress` events.
