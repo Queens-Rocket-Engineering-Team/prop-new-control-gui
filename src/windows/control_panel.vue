@@ -1,8 +1,11 @@
 <script setup>
-import { ref, inject, computed, reactive, watch } from 'vue'
+import { ref, inject, computed, reactive, watch, onMounted, onBeforeUnmount } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 import PidDiagram from '../components/PidDiagram.vue'
 import { useServerApi } from '../composables/useServerApi.js'
+import { useKeyBindings, buildKeyCombo, targetId, controlKey } from '../composables/useKeyBindings.js'
+import { useSwitchSync } from '../composables/useSwitchSync.js'
+import SwitchSyncModal from '../components/switch_sync_modal.vue'
 import { CAPS } from '../lib/platform.js'
 
 const serverIp     = inject('serverIp',     ref(''))
@@ -425,6 +428,283 @@ async function onAuxToggle(controlName, newEnergised) {
     warning[controlName] = { message: String(err), errorCode: null }
   }
 }
+
+// ── Keyboard shortcuts ───────────────────────────────────────────────────────
+// Bindings are assigned in Settings and stored per client (useKeyBindings.js).
+// A key press does exactly what clicking the control would: it routes through
+// the handlers above, so pending/NACK tracking and server authority are
+// identical whether the command came from a mouse or the keyboard.
+//
+// Each actuator gets two keys — one per state — rather than one that toggles.
+// A toggle key's effect depends on where the stand currently is, so pressing it
+// is only as correct as the presser's belief about the current state. A state
+// key means the same thing every time, and pressing it twice is a no-op instead
+// of an undo.
+
+const { keyForTarget, registerTargets, resolve } = useKeyBindings()
+
+// Publish what can be bound so the settings editor has something to list.
+// Valves come from the parsed P&ID rather than from the device list, because a
+// valve card is a drawio ID that may drive several server controls at once —
+// binding the card is what matches the thing on screen.
+watch([valves, auxiliaryControls, variableControls, kasaDevices], () => {
+  const rows = []
+  for (const id of valves.value) {
+    rows.push({ target: { type: 'valve', id, action: 'open'  }, label: id, action: 'OPEN',  group: 'Valves' })
+    rows.push({ target: { type: 'valve', id, action: 'close' }, label: id, action: 'CLOSE', group: 'Valves' })
+  }
+  // Relay wording follows the cards: CLOSED is energised, OPEN is not. Ordered
+  // OPEN then CLOSE like the valves, so a control occupies the same column here
+  // and in the switch-sync prompt.
+  for (const ctrl of auxiliaryControls.value) {
+    rows.push({ target: { type: 'aux', key: ctrl.key, action: 'open'  }, label: ctrl.label, action: 'OPEN',  group: 'Aux Controls' })
+    rows.push({ target: { type: 'aux', key: ctrl.key, action: 'close' }, label: ctrl.label, action: 'CLOSE', group: 'Aux Controls' })
+  }
+  // No open/close pair: a numeric control has no two states to bind, so its key
+  // opens the editor and the value is still typed and confirmed by hand.
+  for (const ctrl of variableControls.value) {
+    rows.push({ target: { type: 'variable', key: ctrl.key }, label: ctrl.label, action: 'SET', group: 'Variable Controls' })
+  }
+  for (const dev of kasaDevices.value) {
+    const label = dev.alias || dev.host
+    rows.push({ target: { type: 'kasa', host: dev.host, action: 'on'  }, label, action: 'ON',  group: 'Smart Plugs' })
+    rows.push({ target: { type: 'kasa', host: dev.host, action: 'off' }, label, action: 'OFF', group: 'Smart Plugs' })
+  }
+  rows.push({ target: { type: 'estop' }, label: 'E-STOP', action: 'CONFIRM', group: 'Emergency' })
+  registerTargets(rows)
+}, { immediate: true })
+
+// The one hint still drawn on the panel — see the note by .estop-keybind.
+const estopKey = computed(() => keyForTarget.value[targetId({ type: 'estop' })])
+
+// ── Physical switch reconciliation ───────────────────────────────────────────
+// A device comes up in its controls' default states while the switches on the
+// panel are wherever the last operator left them. useSwitchSync.js explains why
+// that combination is dangerous rather than merely untidy; this is the half
+// that knows what the device actually reports.
+
+const {
+  switchActionFor,
+  recordSwitch,
+  pendingDevices,
+  flagged,
+  confirmSync,
+  dismissSync,
+  skipSync,
+} = useSwitchSync()
+
+const reviewOpen = ref(false)
+
+// Which server controls each pending device exposes. Names, because that is
+// what a binding and a P&ID match both resolve to.
+const pendingControlNames = computed(() => {
+  const names = new Set()
+  for (const dev of devices.value) {
+    if (!pendingDevices.value.includes(dev.name)) continue
+    for (const ctrl of (dev.controls ?? [])) names.add(ctrl.name)
+  }
+  return names
+})
+
+// A row per bound control, in the panel's own vocabulary. `expected` is the
+// action the switch must be in for the position to agree with the device.
+function buildSyncRow(kind, id, label, expectedOpen) {
+  const target = kind === 'valve' ? { type: 'valve', id } : { type: 'aux', key: id }
+  const key = controlKey(target)
+  // Aux relays read CLOSED when energised, valves read OPEN when open — the two
+  // land on the same pair of action words, so one comparison serves both.
+  const expected = expectedOpen ? 'open' : 'close'
+  const actual = switchActionFor(key)
+  const word = (action) => (action === 'open' ? 'OPEN' : action === 'close' ? 'CLOSED' : '—')
+  return {
+    key,
+    label,
+    expected,
+    deviceLabel: word(expected),
+    switchLabel: actual ? word(actual) : 'UNKNOWN',
+    matched: actual === expected,
+    cells: [
+      { id: `${key}:open`,  target: { ...target, action: 'open'  }, action: 'OPEN'  },
+      { id: `${key}:close`, target: { ...target, action: 'close' }, action: 'CLOSE' },
+    ],
+  }
+}
+
+// Every bound valve and relay, with its switch position judged against the
+// device. Variable controls and smart plugs are absent by design: a variable
+// control's key is momentary rather than a position, and a plug is not a device
+// that registers controls.
+const allSyncRows = computed(() => {
+  const rows = []
+  for (const id of valves.value) {
+    if (!keyForTarget.value[`valve:${id}:open`] && !keyForTarget.value[`valve:${id}:close`]) continue
+    if (!isValveEnabled(id)) continue
+    rows.push(buildSyncRow('valve', id, id, getDisplayedOpen(id)))
+  }
+  for (const ctrl of auxiliaryControls.value) {
+    if (!keyForTarget.value[`aux:${ctrl.key}:open`] && !keyForTarget.value[`aux:${ctrl.key}:close`]) continue
+    // Energised (CLOSED) is the relay's "open" action — see buildSyncRow.
+    rows.push(buildSyncRow('aux', ctrl.key, ctrl.label, !getAuxDisplayed(ctrl.key)))
+  }
+  return rows
+})
+
+// Which server controls a row speaks for, so a row can be attributed to the
+// device that just registered. A valve card may drive several at once.
+function rowControlNames(row) {
+  if (row.key.startsWith('valve:')) {
+    return getMatchingControls(row.key.slice('valve:'.length)).map((c) => c.name)
+  }
+  return [row.key.slice('aux:'.length)]
+}
+
+// name → owning device, so a row can be labelled with whose registration it
+// answers. A second device registering mid-review otherwise adds rows that
+// look identical to the first device's — nothing marks them as new, so an
+// operator scrolled deep into a long valve list has no reason to notice the
+// list grew under them while Confirm stays mysteriously disabled.
+const controlDeviceOf = computed(() => {
+  const map = new Map()
+  for (const dev of devices.value) {
+    for (const ctrl of (dev.controls ?? [])) map.set(ctrl.name, dev.name)
+  }
+  return map
+})
+
+// Attributed to whichever pending device owns the row, preferring queue order
+// so a row touched by more than one device's controls (rare, but the fuzzy
+// P&ID match does not forbid it) lands under the one that has been waiting
+// longest rather than splitting across two sections.
+function deviceGroupFor(row) {
+  const names = rowControlNames(row)
+  for (const dev of pendingDevices.value) {
+    if (names.some((n) => controlDeviceOf.value.get(n) === dev)) return dev
+  }
+  return ''
+}
+
+// A registration prompts for that device's controls; the review chip reopens
+// with whatever was left unreconciled. Only the first case attributes rows to
+// a device — grouping a handful of leftover mismatches of unrelated origin
+// would suggest a relationship between them that is not there.
+const syncRows = computed(() => {
+  if (pendingDevices.value.length > 0) {
+    const names = pendingControlNames.value
+    return allSyncRows.value
+      .filter((row) => rowControlNames(row).some((n) => names.has(n)))
+      .map((row) => ({ ...row, group: deviceGroupFor(row) }))
+  }
+  if (reviewOpen.value) {
+    return allSyncRows.value.filter((row) => flagged.value.includes(row.key))
+  }
+  return []
+})
+
+const syncOpen = computed(() => !readOnly && syncRows.value.length > 0)
+
+// Flagged controls that still disagree — a control that has since been put
+// right needs no chip, and one that was never flagged was never in question.
+const outOfSync = computed(() =>
+  allSyncRows.value.filter((row) => flagged.value.includes(row.key) && !row.matched)
+)
+
+// A registration from a device with nothing bound owes no prompt. Dropping it
+// here rather than never queueing it keeps useSwitchSync.js free of any
+// knowledge of what is bound to what.
+//
+// "No rows" is only trustworthy once rows could have been built at all: a
+// device can register before its controls have landed in the device list, and
+// valve bindings are keyed by drawio ID, so before the P&ID parses every valve
+// row is missing. Dropping the registration then would skip the prompt for a
+// device whose valves are bound. Waiting instead means a late parse raises the
+// prompt late, which is the outcome worth having.
+watch([pendingDevices, syncRows, valves, devices], () => {
+  if (pendingDevices.value.length === 0) return
+  if (syncRows.value.length > 0) return
+  if (pendingControlNames.value.size === 0) return   // controls not published yet
+  if (valves.value.length === 0) return              // P&ID not parsed yet
+  skipSync()
+})
+
+function onSyncConfirm(keys) {
+  confirmSync(keys)
+  reviewOpen.value = false
+}
+
+function onSyncDismiss(mismatchedKeys) {
+  dismissSync(mismatchedKeys)
+  reviewOpen.value = false
+}
+
+function onKeydown(evt) {
+  // The pad build cannot command the stand — same reason every control in this
+  // template is :disabled there.
+  if (readOnly) return
+  // A held key must not machine-gun a valve.
+  if (evt.repeat) return
+
+  const el = evt.target
+  if (el && (['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) || el.isContentEditable)) return
+
+  // The reconciliation prompt is the one dialog that still wants these keys —
+  // and the only one that must not let them through. The operator is flipping
+  // switches to match the device, so a press records the position it reports
+  // and commands nothing. Checked before the generic modal guard below, which
+  // would otherwise swallow it like any other open modal.
+  if (syncOpen.value) {
+    const flip = resolve(buildKeyCombo(evt))
+    if (!flip) return
+    evt.preventDefault()
+    recordSwitch(flip)
+    return
+  }
+
+  // A dialog owns the keyboard while it is up: the E-STOP confirmation and the
+  // variable-control popover here, and — via the shared .modal-overlay class —
+  // the settings and about modals, whose overlay is focused programmatically
+  // but whose keydowns still bubble to window. Settings in particular must be
+  // able to capture a key for rebinding without also firing it.
+  if (showEstopConfirm.value || openVariableEditor.value) return
+  if (document.querySelector('.modal-overlay')) return
+
+  const binding = resolve(buildKeyCombo(evt))
+  if (!binding) return
+  evt.preventDefault()
+
+  // A flip is a position report as well as a command, so the switch's recorded
+  // state tracks normal operation and not just reconciliation.
+  recordSwitch(binding)
+
+  // The requested state is commanded outright, never derived from the current
+  // one. Pressing OPEN on an already-open valve re-asserts it, which is the
+  // harmless half of the trade that makes the keys unambiguous.
+  switch (binding.type) {
+    case 'valve':
+      if (!isValveEnabled(binding.id) || isControlPending(binding.id)) return
+      onValveToggle(binding.id, binding.action === 'open')
+      break
+    case 'aux':
+      if (isAuxPending(binding.key)) return
+      onAuxToggle(binding.key, binding.action === 'close')   // close = energised
+      break
+    case 'variable':
+      if (isAuxPending(binding.key)) return
+      toggleVariableEditor(binding.key)
+      break
+    case 'kasa': {
+      const dev = kasaDevices.value.find((d) => d.host === binding.host)
+      if (dev) setKasaState(dev.host, binding.action === 'on')
+      break
+    }
+    // Opens the confirmation dialog only — a keystroke never sends an E-STOP.
+    case 'estop':
+      showEstopConfirm.value = true
+      break
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
@@ -661,7 +941,30 @@ async function onAuxToggle(controlName, newEnergised) {
     </PidDiagram>
 
     <!-- ── E-STOP button (fixed top-right) ── -->
-    <button v-if="!readOnly" class="estop-btn" @click="showEstopConfirm = true">E-STOP</button>
+    <button v-if="!readOnly" class="estop-btn" @click="showEstopConfirm = true">
+      E-STOP
+      <span v-if="estopKey" class="estop-keybind">[{{ estopKey }}]</span>
+    </button>
+
+    <!-- ── Switches left unreconciled after a prompt was dismissed ── -->
+    <button
+      v-if="!readOnly && !syncOpen && outOfSync.length > 0"
+      class="sync-chip"
+      @click="reviewOpen = true"
+    >
+      <i class="pi pi-exclamation-triangle" />
+      {{ outOfSync.length }} switch{{ outOfSync.length === 1 ? '' : 'es' }} out of sync
+      <span class="sync-chip-action">Review</span>
+    </button>
+
+    <!-- ── Physical switch reconciliation prompt ── -->
+    <switch-sync-modal
+      :is-open="syncOpen"
+      :rows="syncRows"
+      :devices="pendingDevices"
+      @confirm="onSyncConfirm"
+      @dismiss="onSyncDismiss"
+    />
 
     <!-- ── E-STOP confirmation dialog ── -->
     <Teleport to="body">
@@ -754,6 +1057,58 @@ async function onAuxToggle(controlName, newEnergised) {
   align-items: center;
   justify-content: space-between;
   gap: 4px;
+}
+
+/* ── Out-of-sync switch chip ── */
+/* Bottom-left, clear of the E-STOP button and the aux panel. Deliberately a
+   single chip rather than a badge per card: a stale switch is a fact about the
+   panel in front of the operator, not about any one valve on the diagram. */
+
+.sync-chip {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-surface);
+  border: 1px solid #f39c12;
+  border-radius: 6px;
+  color: #f39c12;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  padding: 5px 10px;
+  cursor: pointer;
+  box-shadow: 0 0 8px rgba(243, 156, 18, 0.25);
+}
+
+.sync-chip:hover {
+  background: rgba(243, 156, 18, 0.12);
+}
+
+.sync-chip .pi {
+  font-size: 11px;
+}
+
+.sync-chip-action {
+  color: var(--text-muted);
+  font-weight: 400;
+  text-decoration: underline;
+}
+
+/* ── Keyboard shortcut hint ── */
+/* Only E-STOP carries one. The cards deliberately do not: at card scale the
+   hint is unreadable, and with separate open/close keys there is no single
+   key to print on a card anyway. Settings is where bindings are read. */
+
+.estop-keybind {
+  font-size: 9px;
+  color: inherit;
+  letter-spacing: normal;
+  opacity: 0.75;
 }
 
 /* ── Locked state ── */

@@ -1,6 +1,8 @@
 <script setup>
 import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { CAPS } from "../lib/platform.js";
+import { useKeyBindings } from "../composables/useKeyBindings.js";
+import KeybindsModal from "./keybinds_modal.vue";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
 
@@ -125,6 +127,16 @@ watch(customIp, () => {
     applyIp();
   }
 });
+
+// ── Keybindings ──────────────────────────────────────────────────────────────
+// The editor itself lives in its own modal: every actuator binds two keys, and
+// that grid does not fit this modal's width. All this group holds is the way in
+// and a count of what is currently bound.
+
+const { bindings } = useKeyBindings();
+const keybindsOpen = ref(false);
+
+const boundCount = computed(() => Object.keys(bindings.value).length);
 </script>
 
 <template>
@@ -183,6 +195,21 @@ watch(customIp, () => {
             <span v-if="props.testActive" class="freq-locked-label">locked during test</span>
           </div>
         </div>
+        <!-- Hidden in the pad build for the same reason as the frequency above:
+             that client cannot command the stand, so a shortcut for doing so
+             would be a control that looks live and does nothing. -->
+        <div class="setting-group" v-if="!readOnly">
+          <span class="setting-group-label"><i class="pi pi-key" />Keybindings</span>
+          <div class="option-row binding-row">
+            <span class="binding-summary">
+              {{ boundCount === 0 ? 'No shortcuts set' : `${boundCount} shortcut${boundCount === 1 ? '' : 's'} set` }}
+            </span>
+            <button class="binding-open-btn" @click="keybindsOpen = true">
+              <i class="pi pi-pencil" />
+              <span>Edit</span>
+            </button>
+          </div>
+        </div>
         <!-- The pad reaches the server by loading this page from it, so there is
              nothing here for it to decide — see CAPS.serverSelection. -->
         <div class="setting-group" v-if="canSelectServer">
@@ -210,6 +237,11 @@ watch(customIp, () => {
       </div>
     </div>
   </div>
+
+  <!-- Outside the overlay above, and teleported to <body> from inside itself:
+       it stands on its own, so closing Settings behind it leaves it open and its
+       esc keydown does not also dismiss Settings. -->
+  <keybinds-modal :is-open="keybindsOpen" @close="keybindsOpen = false" />
 </template>
 
 <style scoped>
@@ -229,12 +261,18 @@ watch(customIp, () => {
 }
 
 .modal-container {
+  display: flex;
+  flex-direction: column;
   background: var(--modal-bg);
   border: 1px solid var(--border-color);
   border-radius: 10px;
   min-width: 320px;
   max-width: 420px;
   width: 90%;
+  /* The overlay centres this box, so anything taller than the viewport spills
+     off both ends with no way to reach either. Five groups clear a short laptop
+     window, so the body scrolls and the header stays put. */
+  max-height: 90vh;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
   overflow: hidden;
 }
@@ -272,6 +310,8 @@ watch(customIp, () => {
   flex-direction: column;
   gap: 12px;
   padding: 16px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* Close button styles */
@@ -409,6 +449,71 @@ label.option-row:hover {
   color: var(--text-muted);
   font-style: italic;
   margin-left: 4px;
+}
+
+/* Keybinding editor */
+/* A stand can carry twenty-odd valves, so the list scrolls inside the group
+   rather than pushing the rest of the settings off the modal. */
+.binding-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.binding-group-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 6px 0 2px;
+}
+
+.binding-group-label:first-child {
+  margin-top: 0;
+}
+
+/* Keybindings — a summary and the way into the editor, which is its own modal. */
+.binding-row {
+  gap: 8px;
+  cursor: default;
+}
+
+.binding-row:hover {
+  background: none;
+}
+
+.binding-summary {
+  flex: 1;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.binding-open-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.binding-open-btn:hover {
+  border-color: var(--input-focus-border);
+}
+
+.binding-open-btn .pi {
+  font-size: 0.72rem;
+  color: var(--text-muted);
 }
 
 .option-row :deep(.p-radiobutton) {

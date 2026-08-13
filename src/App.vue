@@ -10,6 +10,7 @@ import {
   localRecordingActive as fetchLocalRecordingActive,
   setServerSessionLock,
 } from "./lib/desktop.js";
+import { noteDeviceRegistered, noteDevicesPresent } from "./composables/useSwitchSync.js";
 import { useServerApi, PREVIEW_STREAM_HZ } from "./composables/useServerApi.js";
 import { useStateStream } from "./composables/useStateStream.js";
 import { useTelemetryStream } from "./composables/useTelemetryStream.js";
@@ -108,8 +109,12 @@ function startStatusRefresh() {
 // A device that just joined has never been told to stream, so however far
 // priming has backed off, it backed off against a stand that no longer looks
 // like this one. Retry promptly instead of sitting out the widened gap.
-function onDeviceRegistered() {
+function onDeviceRegistered(deviceName) {
   resetPrimingBudget();          // no-ops outside the view-only build
+  // A device comes up in its controls' default states while the physical
+  // switches are wherever they were left. The control panel prompts the
+  // operator to reconcile the two — see useSwitchSync.js.
+  noteDeviceRegistered(deviceName);
 }
 
 const {
@@ -123,6 +128,15 @@ const {
   status: stateStatus,
   resyncState,
 } = useStateStream(server_ip, { onDeviceRegistered });
+// Connecting to a server that already has devices on it produces no
+// device.registered delta — they arrive in the /ws/state snapshot instead — so
+// the prompt above would never be raised for the devices most likely to have
+// been running longest. Presence counts as much as the announcement; the
+// dedupe that keeps this from firing on every republish lives in useSwitchSync.
+watch(devices, () => {
+  noteDevicesPresent(server_ip.value, devices.value.map((dev) => dev.name));
+}, { immediate: true });
+
 provide('devices',      devices);
 provide('kasaDevices',  kasaDevices);
 provide('commandsById', commandsById);
