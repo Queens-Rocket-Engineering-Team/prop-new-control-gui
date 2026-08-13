@@ -1,7 +1,8 @@
 <script setup>
 import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { CAPS } from "../lib/platform.js";
-import { useKeyBindings, buildKeyCombo } from "../composables/useKeyBindings.js";
+import { useKeyBindings } from "../composables/useKeyBindings.js";
+import KeybindsModal from "./keybinds_modal.vue";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
 
@@ -128,48 +129,14 @@ watch(customIp, () => {
 });
 
 // ── Keybindings ──────────────────────────────────────────────────────────────
-// The list of bindable controls is published by control_panel.vue, which is the
-// only place that knows them: valves come from the parsed P&ID, not the device
-// list. Every window mounts that panel first, so the list is populated by the
-// time anyone opens this modal. All binding logic lives in the composable — this
-// is just the editor.
+// The editor itself lives in its own modal: every actuator binds two keys, and
+// that grid does not fit this modal's width. All this group holds is the way in
+// and a count of what is currently bound.
 
-const { editableControls, setBinding, clearBinding } = useKeyBindings();
+const { bindings } = useKeyBindings();
+const keybindsOpen = ref(false);
 
-// Sectioned in registration order so the editor reads like the control panel.
-// Each section carries its own column captions — OPEN/CLOSE for valves, ON/OFF
-// for plugs — taken from its widest row, so the states are named once at the
-// top instead of on every line. Sections whose controls have a single binding
-// (variable controls, E-STOP) get no caption row: there is no column to
-// distinguish.
-const bindingGroups = computed(() => {
-  const groups = [];
-  for (const row of editableControls.value) {
-    const name = row.group || 'Controls';
-    let group = groups.find((g) => g.name === name);
-    if (!group) groups.push((group = { name, rows: [], columns: [] }));
-    group.rows.push(row);
-    if (row.cells.length > group.columns.length) {
-      group.columns = row.cells.map((c) => c.action);
-    }
-  }
-  return groups;
-});
-
-// The input is readonly and its keydowns are captured, not typed: whatever
-// combo is pressed becomes the binding. Backspace/delete clears it instead.
-// Tab and escape are left alone so the modal can still be navigated and
-// dismissed while a row has focus; setBinding rejects the rest of the reserved
-// keys itself.
-function captureKey(cell, event) {
-  if (event.key === 'Tab' || event.key === 'Escape') return;
-  event.preventDefault();
-  if (event.key === 'Backspace' || event.key === 'Delete') {
-    clearBinding(cell.target);
-    return;
-  }
-  setBinding(cell.target, buildKeyCombo(event));
-}
+const boundCount = computed(() => Object.keys(bindings.value).length);
 </script>
 
 <template>
@@ -233,37 +200,15 @@ function captureKey(cell, event) {
              would be a control that looks live and does nothing. -->
         <div class="setting-group" v-if="!readOnly">
           <span class="setting-group-label"><i class="pi pi-key" />Keybindings</span>
-          <div v-if="bindingGroups.length === 0" class="binding-empty">
-            Open the Control panel to load bindable controls.
+          <div class="option-row binding-row">
+            <span class="binding-summary">
+              {{ boundCount === 0 ? 'No shortcuts set' : `${boundCount} shortcut${boundCount === 1 ? '' : 's'} set` }}
+            </span>
+            <button class="binding-open-btn" @click="keybindsOpen = true">
+              <i class="pi pi-pencil" />
+              <span>Edit</span>
+            </button>
           </div>
-          <div v-else class="binding-list">
-            <template v-for="group in bindingGroups" :key="group.name">
-              <div class="binding-group-label">{{ group.name }}</div>
-              <div v-if="group.columns.length > 1" class="binding-row binding-head">
-                <span class="binding-label" />
-                <span v-for="col in group.columns" :key="col" class="binding-col">{{ col }}</span>
-              </div>
-              <div v-for="row in group.rows" :key="row.id" class="binding-row">
-                <span class="binding-label" :title="row.label">{{ row.label }}</span>
-                <input
-                  v-for="cell in row.cells"
-                  :key="cell.id"
-                  type="text"
-                  readonly
-                  class="ip-text-input binding-input"
-                  :class="{ bound: cell.combo }"
-                  :value="cell.combo"
-                  :title="`${row.label} — ${cell.action}`"
-                  @keydown="captureKey(cell, $event)"
-                />
-              </div>
-            </template>
-          </div>
-          <span class="binding-hint">
-            Click a field and press a key to bind it; backspace clears.
-            Each key commands one state, so open and close are bound separately.
-            Shortcuts act on the Control panel only.
-          </span>
         </div>
         <!-- The pad reaches the server by loading this page from it, so there is
              nothing here for it to decide — see CAPS.serverSelection. -->
@@ -292,6 +237,11 @@ function captureKey(cell, event) {
       </div>
     </div>
   </div>
+
+  <!-- Outside the overlay above, and teleported to <body> from inside itself:
+       it stands on its own, so closing Settings behind it leaves it open and its
+       esc keydown does not also dismiss Settings. -->
+  <keybinds-modal :is-open="keybindsOpen" @close="keybindsOpen = false" />
 </template>
 
 <style scoped>
@@ -311,12 +261,18 @@ function captureKey(cell, event) {
 }
 
 .modal-container {
+  display: flex;
+  flex-direction: column;
   background: var(--modal-bg);
   border: 1px solid var(--border-color);
   border-radius: 10px;
   min-width: 320px;
   max-width: 420px;
   width: 90%;
+  /* The overlay centres this box, so anything taller than the viewport spills
+     off both ends with no way to reach either. Five groups clear a short laptop
+     window, so the body scrolls and the header stays put. */
+  max-height: 90vh;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
   overflow: hidden;
 }
@@ -354,6 +310,8 @@ function captureKey(cell, event) {
   flex-direction: column;
   gap: 12px;
   padding: 16px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* Close button styles */
@@ -517,60 +475,45 @@ label.option-row:hover {
   margin-top: 0;
 }
 
-/* One row per control, one field per state — the state is named once in the
-   caption row above rather than on every line. */
+/* Keybindings — a summary and the way into the editor, which is its own modal. */
 .binding-row {
+  gap: 8px;
+  cursor: default;
+}
+
+.binding-row:hover {
+  background: none;
+}
+
+.binding-summary {
+  flex: 1;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.binding-open-btn {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 0;
-}
-
-.binding-label {
-  flex: 1;
-  min-width: 0;
-  font-size: 0.85rem;
+  flex: none;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
   color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.binding-head {
-  padding-bottom: 1px;
-}
-
-.binding-col {
-  flex: none;
-  width: 78px;
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  color: var(--text-muted);
-  text-align: center;
-}
-
-.binding-input {
-  flex: none;
-  width: 78px;
-  text-align: center;
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 4px 10px;
   cursor: pointer;
-  text-transform: lowercase;
+  transition: background 0.15s, border-color 0.15s;
 }
 
-/* An unbound field is legible but recessive, so a half-bound pair reads as a
-   gap in the column rather than as two equal-looking fields. */
-.binding-input:not(.bound) {
-  color: var(--text-muted);
-  border-style: dashed;
+.binding-open-btn:hover {
+  border-color: var(--input-focus-border);
 }
 
-.binding-hint,
-.binding-empty {
-  font-size: 0.68rem;
+.binding-open-btn .pi {
+  font-size: 0.72rem;
   color: var(--text-muted);
-  font-style: italic;
-  line-height: 1.4;
 }
 
 .option-row :deep(.p-radiobutton) {

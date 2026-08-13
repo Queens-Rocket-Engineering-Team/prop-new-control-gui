@@ -116,9 +116,11 @@ export function isValidKeyCombo(combo) {
 
 // ── Stored bindings: { [combo]: target } ─────────────────────────────────────
 
-function loadBindings() {
+// Used for both sources of a map — the stored one and the one another window
+// broadcasts — so neither can introduce a shape the other could not.
+function parseBindings(json) {
   try {
-    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}')
+    const raw = JSON.parse(json ?? '{}')
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
     // Drop anything unrecognisable rather than letting it reach the keydown
     // handler — a descriptor from a future or hand-edited format would resolve
@@ -133,7 +135,7 @@ function loadBindings() {
   }
 }
 
-const bindings = ref(loadBindings())
+const bindings = ref(parseBindings(localStorage.getItem(STORAGE_KEY)))
 
 // The registered bindable controls, published by control_panel.vue.
 // [{ target, label, group }] in the order the settings editor should show them.
@@ -142,16 +144,24 @@ const targets = ref([])
 const _settingsChannel = new BroadcastChannel('qret-settings')
 let _applyingBroadcast = false
 
+// The map is sent as JSON, not as the object. postMessage structured-clones its
+// payload and a Vue reactive proxy cannot be cloned — passing the ref's value
+// straight in throws DataCloneError inside the watcher, which loses the
+// broadcast (and, being a watcher, does so fairly quietly). Serialising also
+// makes the wire format identical to the stored one, so there is one shape to
+// think about rather than two.
+//
 // flush:'sync' is load-bearing, unlike the boolean prefs on this same channel:
-// an echoed object is never identity-equal to the one we hold, so a deferred
-// watch (which would run after _applyingBroadcast is back to false) would
-// re-post every message it received and two windows would ping-pong forever.
+// an echoed map is never identity-equal to the one we hold, so a deferred watch
+// (which would run after _applyingBroadcast is back to false) would re-post
+// every message it received and two windows would ping-pong forever.
 watch(
   bindings,
   (value) => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(value))
+    const json = JSON.stringify(value)
+    localStorage.setItem(STORAGE_KEY, json)
     if (!_applyingBroadcast) {
-      _settingsChannel.postMessage({ type: 'keybindings', value })
+      _settingsChannel.postMessage({ type: 'keybindings', json })
     }
   },
   { deep: true, flush: 'sync' },
@@ -162,14 +172,9 @@ watch(
 _settingsChannel.addEventListener('message', (e) => {
   if (e.data?.type !== 'keybindings') return
   _applyingBroadcast = true
-  bindings.value = loadRemote(e.data.value)
+  bindings.value = parseBindings(e.data.json)
   _applyingBroadcast = false
 })
-
-function loadRemote(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
-  return { ...value }
-}
 
 // ── Reads ────────────────────────────────────────────────────────────────────
 
