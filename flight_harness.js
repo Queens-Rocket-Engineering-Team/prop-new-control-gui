@@ -101,19 +101,37 @@ function stepSim() {
 
   // Snapshot shaped exactly like useTelemetryStream publishes: replaced
   // wholesale, one entry per sensor, history carrying sourceT.
-  const entry = (value, unit) => ({
+  const entry = (value, unit, sensorType = 'rocket_position') => ({
     value,
     unit,
-    sensorType: 'rocket_position',
+    sensorType,
     history: [{ t: sim.t, sourceT: sim.t, v: value }],
     windowStart: sim.t - 30,
     windowEnd: sim.t,
   })
+
+  // Board liveness, mirroring the ground station's `rocket_nodes` group:
+  // 1 alive, 0 dead, -1 nothing heard over LoRa yet. On the pad everything is
+  // -1 so the "never connected" grey state is what you see first; PWR stays
+  // dead throughout and GPS drops at drogue, so a single run exercises all
+  // three LED colours. The sensorType matters — rocket_pane rejects any stream
+  // not in this group, which is what stops `ALT` binding to `Alt`.
+  const node = (value) => entry(value, 'state', 'rocket_nodes')
+  const live = phase.value !== 'pad' ? 1 : -1
+  const nodes = {
+    UCM: node(live),
+    LCM: node(live),
+    ALT: node(live),
+    GPS: node(phase.value === 'drogue' || phase.value === 'main' || phase.value === 'landed' ? 0 : live),
+    PWR: node(phase.value !== 'pad' ? 0 : -1),
+  }
+
   sensorData.value = {
     Lat: entry(lat, 'deg'),
     Lon: entry(lon, 'deg'),
     Alt: entry(Math.round(sim.alt), 'm'),
     Sats: entry(12, ''),
+    ...nodes,
   }
 }
 
@@ -125,6 +143,14 @@ function launch() {
   sim.downrange = 0
   sim.crosswind = 0
   setPhase('boost')
+}
+
+// Exercises the "ground station gone" path: the node values keep their last
+// reading, so this is the only way to see whether the LEDs correctly fall back
+// to unknown instead of latching green.
+function toggleGroundStation() {
+  const gs = devices.value[0]
+  devices.value = [{ ...gs, connected: !gs.connected }]
 }
 
 function resetFlight() {
@@ -160,6 +186,8 @@ const Harness = {
           h('span', `phase: ${phase.value}`),
           h('button', { onClick: launch }, 'Launch'),
           h('button', { onClick: resetFlight }, 'Reset (test edge)'),
+          h('button', { onClick: toggleGroundStation },
+            devices.value[0].connected ? 'Drop GREG' : 'Restore GREG'),
         ]),
         h(FlightPanel, { class: 'swap-container' }),
       ]),

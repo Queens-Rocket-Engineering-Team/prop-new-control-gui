@@ -108,40 +108,6 @@ function parsePidCells(svgText) {
     }
   }
 
-  // ── Pass 1.5: recover the model → viewBox translation ───────────────────
-  // drawio crops its SVG export to the drawing's content bounds, so every
-  // mxGeometry coordinate is uniformly translated relative to the rendered
-  // viewBox (e.g. -60,+132 for the rocket P&ID, -60,-17 for hot-fire).
-  // Each rendered cell group carries an invisible hitbox <rect> whose x/y is
-  // that cell's unrotated top-left *in viewBox space*, so comparing those to
-  // mxGeometry recovers the offset — using attributes only, no layout needed.
-  function modelToViewBox() {
-    const dxs = []
-    const dys = []
-
-    for (const g of svgDoc.querySelectorAll('g[data-cell-id]')) {
-      const cell = raw[g.getAttribute('data-cell-id')]
-      if (!cell || cell.isEdge || !cell.w || !cell.h) continue
-      // Child cells carry parent-relative geometry; only compare root-level ones.
-      if (cell.parent !== '1' && cell.parent !== '0') continue
-
-      for (const rect of g.querySelectorAll('rect[fill="none"][stroke="none"]')) {
-        const w = parseFloat(rect.getAttribute('width'))
-        const h = parseFloat(rect.getAttribute('height'))
-        if (Math.abs(w - cell.w) > 1.5 || Math.abs(h - cell.h) > 1.5) continue
-        dxs.push(parseFloat(rect.getAttribute('x')) - cell.x)
-        dys.push(parseFloat(rect.getAttribute('y')) - cell.y)
-        break
-      }
-    }
-
-    // Median shrugs off any shape whose hitbox happens to match by coincidence.
-    const median = (a) => (a.length ? a.slice().sort((p, q) => p - q)[a.length >> 1] : 0)
-    return { tx: median(dxs), ty: median(dys), n: dxs.length }
-  }
-
-  const { tx, ty, n: tn } = modelToViewBox()
-
   // ── Pass 2: resolve absolute position by walking the parent chain ───────
   const absCache = {}
   function resolveAbs(id, depth = 0) {
@@ -155,6 +121,59 @@ function parsePidCells(svgText) {
     const parentAbs = resolveAbs(cell.parent, depth + 1)
     return (absCache[id] = { x: cell.x + parentAbs.x, y: cell.y + parentAbs.y })
   }
+
+  // ── Pass 2.5: recover the model → viewBox translation ───────────────────
+  // drawio crops its SVG export to the drawing's content bounds, so every
+  // model coordinate is uniformly translated relative to the rendered viewBox
+  // (e.g. -60,+132 for the rocket P&ID, -60,-17 for hot-fire).
+  // Each rendered cell group carries a <rect> whose x/y is that cell's
+  // unrotated top-left *in viewBox space*, so comparing those to the model
+  // recovers the offset — using attributes only, no layout needed.
+  //
+  // Compared against *absolute* coords (hence running after Pass 2): wrapping a
+  // drawing in a drawio group re-parents every cell, leaving the group itself as
+  // the only root-level cell — and a group renders as an empty <g> with no rect
+  // of its own. Sampling raw geometry from root-level cells only would find
+  // nothing at all and yield a (0, 0) offset that throws every overlay
+  // off-canvas.
+  //
+  // Only drawio's custom library shapes (mxgraph.pid.*) emit an invisible
+  // hitbox rect. Diagrams drawn from plain rectangles have none — the visible
+  // <rect> *is* the shape — so the strict selector runs first and any <rect> is
+  // accepted only as a fallback, leaving hitbox-bearing diagrams on their
+  // original path. The w/h match and the median filter both passes: a rotated
+  // shape's hitbox has swapped dimensions and is skipped rather than averaged in.
+  function modelToViewBox() {
+    function sample(selector) {
+      const dxs = []
+      const dys = []
+
+      for (const g of svgDoc.querySelectorAll('g[data-cell-id]')) {
+        const id = g.getAttribute('data-cell-id')
+        const cell = raw[id]
+        if (!cell || cell.isEdge || !cell.w || !cell.h) continue
+        const abs = resolveAbs(id)
+
+        for (const rect of g.querySelectorAll(selector)) {
+          const w = parseFloat(rect.getAttribute('width'))
+          const h = parseFloat(rect.getAttribute('height'))
+          if (Math.abs(w - cell.w) > 1.5 || Math.abs(h - cell.h) > 1.5) continue
+          dxs.push(parseFloat(rect.getAttribute('x')) - abs.x)
+          dys.push(parseFloat(rect.getAttribute('y')) - abs.y)
+          break
+        }
+      }
+
+      // Median shrugs off any shape whose hitbox happens to match by coincidence.
+      const median = (a) => (a.length ? a.slice().sort((p, q) => p - q)[a.length >> 1] : 0)
+      return { tx: median(dxs), ty: median(dys), n: dxs.length }
+    }
+
+    const strict = sample('rect[fill="none"][stroke="none"]')
+    return strict.n > 0 ? strict : sample('rect')
+  }
+
+  const { tx, ty, n: tn } = modelToViewBox()
 
   // ── Pass 3: build the final map — only named vertex cells ───────────────
   const cells = {}
