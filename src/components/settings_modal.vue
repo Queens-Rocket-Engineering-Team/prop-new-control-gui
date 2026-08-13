@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { CAPS } from "../lib/platform.js";
+import { useKeyBindings, buildKeyCombo } from "../composables/useKeyBindings.js";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
 
@@ -125,6 +126,46 @@ watch(customIp, () => {
     applyIp();
   }
 });
+
+// ── Keybindings ──────────────────────────────────────────────────────────────
+// The list of bindable controls is published by control_panel.vue, which is the
+// only place that knows them: valves come from the parsed P&ID, not the device
+// list. Every window mounts that panel first, so the list is populated by the
+// time anyone opens this modal. All binding logic lives in the composable — this
+// is just the editor.
+
+const { editableTargets, keyForTarget, setBinding, clearBinding } = useKeyBindings();
+
+// Sectioned in registration order so the editor reads like the control panel.
+const bindingGroups = computed(() => {
+  const groups = [];
+  for (const row of editableTargets.value) {
+    const name = row.group || 'Controls';
+    let group = groups.find((g) => g.name === name);
+    if (!group) groups.push((group = { name, rows: [] }));
+    group.rows.push(row);
+  }
+  return groups;
+});
+
+function comboFor(row) {
+  return keyForTarget.value[row.id] ?? '';
+}
+
+// The input is readonly and its keydowns are captured, not typed: whatever
+// combo is pressed becomes the binding. Backspace/delete clears it instead.
+// Tab and escape are left alone so the modal can still be navigated and
+// dismissed while a row has focus; setBinding rejects the rest of the reserved
+// keys itself.
+function captureKey(row, event) {
+  if (event.key === 'Tab' || event.key === 'Escape') return;
+  event.preventDefault();
+  if (event.key === 'Backspace' || event.key === 'Delete') {
+    clearBinding(row.target);
+    return;
+  }
+  setBinding(row.target, buildKeyCombo(event));
+}
 </script>
 
 <template>
@@ -182,6 +223,45 @@ watch(customIp, () => {
             <span class="freq-unit-label">Hz</span>
             <span v-if="props.testActive" class="freq-locked-label">locked during test</span>
           </div>
+        </div>
+        <!-- Hidden in the pad build for the same reason as the frequency above:
+             that client cannot command the stand, so a shortcut for doing so
+             would be a control that looks live and does nothing. -->
+        <div class="setting-group" v-if="!readOnly">
+          <span class="setting-group-label"><i class="pi pi-key" />Keybindings</span>
+          <div v-if="bindingGroups.length === 0" class="binding-empty">
+            Open the Control panel to load bindable controls.
+          </div>
+          <div v-else class="binding-list">
+            <template v-for="group in bindingGroups" :key="group.name">
+              <div class="binding-group-label">{{ group.name }}</div>
+              <div v-for="row in group.rows" :key="row.id" class="option-row binding-row">
+                <span class="binding-label">{{ row.label }}</span>
+                <span v-if="row.action" class="binding-action">{{ row.action }}</span>
+                <input
+                  type="text"
+                  readonly
+                  class="ip-text-input binding-input"
+                  :value="comboFor(row)"
+                  placeholder="unbound"
+                  @keydown="captureKey(row, $event)"
+                />
+                <button
+                  class="binding-clear-btn"
+                  title="Clear"
+                  :disabled="!comboFor(row)"
+                  @click="clearBinding(row.target)"
+                >
+                  <i class="pi pi-times" />
+                </button>
+              </div>
+            </template>
+          </div>
+          <span class="binding-hint">
+            Click a field and press a key to bind it; backspace clears.
+            Each key commands one state, so open and close are bound separately.
+            Shortcuts act on the Control panel only.
+          </span>
         </div>
         <!-- The pad reaches the server by loading this page from it, so there is
              nothing here for it to decide — see CAPS.serverSelection. -->
@@ -409,6 +489,103 @@ label.option-row:hover {
   color: var(--text-muted);
   font-style: italic;
   margin-left: 4px;
+}
+
+/* Keybinding editor */
+/* A stand can carry twenty-odd valves, so the list scrolls inside the group
+   rather than pushing the rest of the settings off the modal. */
+.binding-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.binding-group-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 6px 0 2px;
+}
+
+.binding-group-label:first-child {
+  margin-top: 0;
+}
+
+.binding-row {
+  gap: 6px;
+  cursor: default;
+}
+
+.binding-row:hover {
+  background: none;
+}
+
+.binding-label {
+  flex: 1;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The state this key commands. Fixed-width so the key fields line up down the
+   column and an unbound half of a pair is obvious at a glance. */
+.binding-action {
+  flex: none;
+  width: 52px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.binding-input {
+  flex: none;
+  width: 96px;
+  text-align: center;
+  cursor: pointer;
+  text-transform: lowercase;
+}
+
+.binding-clear-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  cursor: pointer;
+  padding: 0;
+}
+
+.binding-clear-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.binding-clear-btn:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.binding-hint,
+.binding-empty {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-style: italic;
+  line-height: 1.4;
 }
 
 .option-row :deep(.p-radiobutton) {

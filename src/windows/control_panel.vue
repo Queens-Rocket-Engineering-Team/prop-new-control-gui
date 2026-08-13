@@ -1,8 +1,9 @@
 <script setup>
-import { ref, inject, computed, reactive, watch } from 'vue'
+import { ref, inject, computed, reactive, watch, onMounted, onBeforeUnmount } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 import PidDiagram from '../components/PidDiagram.vue'
 import { useServerApi } from '../composables/useServerApi.js'
+import { useKeyBindings, buildKeyCombo, targetId } from '../composables/useKeyBindings.js'
 import { CAPS } from '../lib/platform.js'
 
 const serverIp     = inject('serverIp',     ref(''))
@@ -425,6 +426,105 @@ async function onAuxToggle(controlName, newEnergised) {
     warning[controlName] = { message: String(err), errorCode: null }
   }
 }
+
+// ── Keyboard shortcuts ───────────────────────────────────────────────────────
+// Bindings are assigned in Settings and stored per client (useKeyBindings.js).
+// A key press does exactly what clicking the control would: it routes through
+// the handlers above, so pending/NACK tracking and server authority are
+// identical whether the command came from a mouse or the keyboard.
+//
+// Each actuator gets two keys — one per state — rather than one that toggles.
+// A toggle key's effect depends on where the stand currently is, so pressing it
+// is only as correct as the presser's belief about the current state. A state
+// key means the same thing every time, and pressing it twice is a no-op instead
+// of an undo.
+
+const { keyForTarget, registerTargets, resolve } = useKeyBindings()
+
+// Publish what can be bound so the settings editor has something to list.
+// Valves come from the parsed P&ID rather than from the device list, because a
+// valve card is a drawio ID that may drive several server controls at once —
+// binding the card is what matches the thing on screen.
+watch([valves, auxiliaryControls, variableControls, kasaDevices], () => {
+  const rows = []
+  for (const id of valves.value) {
+    rows.push({ target: { type: 'valve', id, action: 'open'  }, label: id, action: 'OPEN',  group: 'Valves' })
+    rows.push({ target: { type: 'valve', id, action: 'close' }, label: id, action: 'CLOSE', group: 'Valves' })
+  }
+  // Relay wording follows the cards: CLOSED is energised, OPEN is not.
+  for (const ctrl of auxiliaryControls.value) {
+    rows.push({ target: { type: 'aux', key: ctrl.key, action: 'close' }, label: ctrl.label, action: 'CLOSE', group: 'Aux Controls' })
+    rows.push({ target: { type: 'aux', key: ctrl.key, action: 'open'  }, label: ctrl.label, action: 'OPEN',  group: 'Aux Controls' })
+  }
+  // No open/close pair: a numeric control has no two states to bind, so its key
+  // opens the editor and the value is still typed and confirmed by hand.
+  for (const ctrl of variableControls.value) {
+    rows.push({ target: { type: 'variable', key: ctrl.key }, label: ctrl.label, action: 'SET', group: 'Variable Controls' })
+  }
+  for (const dev of kasaDevices.value) {
+    const label = dev.alias || dev.host
+    rows.push({ target: { type: 'kasa', host: dev.host, action: 'on'  }, label, action: 'ON',  group: 'Smart Plugs' })
+    rows.push({ target: { type: 'kasa', host: dev.host, action: 'off' }, label, action: 'OFF', group: 'Smart Plugs' })
+  }
+  rows.push({ target: { type: 'estop' }, label: 'E-STOP', action: 'CONFIRM', group: 'Emergency' })
+  registerTargets(rows)
+}, { immediate: true })
+
+// The one hint still drawn on the panel — see the note by .estop-keybind.
+const estopKey = computed(() => keyForTarget.value[targetId({ type: 'estop' })])
+
+function onKeydown(evt) {
+  // The pad build cannot command the stand — same reason every control in this
+  // template is :disabled there.
+  if (readOnly) return
+  // A held key must not machine-gun a valve.
+  if (evt.repeat) return
+
+  const el = evt.target
+  if (el && (['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) || el.isContentEditable)) return
+
+  // A dialog owns the keyboard while it is up: the E-STOP confirmation and the
+  // variable-control popover here, and — via the shared .modal-overlay class —
+  // the settings and about modals, whose overlay is focused programmatically
+  // but whose keydowns still bubble to window. Settings in particular must be
+  // able to capture a key for rebinding without also firing it.
+  if (showEstopConfirm.value || openVariableEditor.value) return
+  if (document.querySelector('.modal-overlay')) return
+
+  const binding = resolve(buildKeyCombo(evt))
+  if (!binding) return
+  evt.preventDefault()
+
+  // The requested state is commanded outright, never derived from the current
+  // one. Pressing OPEN on an already-open valve re-asserts it, which is the
+  // harmless half of the trade that makes the keys unambiguous.
+  switch (binding.type) {
+    case 'valve':
+      if (!isValveEnabled(binding.id) || isControlPending(binding.id)) return
+      onValveToggle(binding.id, binding.action === 'open')
+      break
+    case 'aux':
+      if (isAuxPending(binding.key)) return
+      onAuxToggle(binding.key, binding.action === 'close')   // close = energised
+      break
+    case 'variable':
+      if (isAuxPending(binding.key)) return
+      toggleVariableEditor(binding.key)
+      break
+    case 'kasa': {
+      const dev = kasaDevices.value.find((d) => d.host === binding.host)
+      if (dev) setKasaState(dev.host, binding.action === 'on')
+      break
+    }
+    // Opens the confirmation dialog only — a keystroke never sends an E-STOP.
+    case 'estop':
+      showEstopConfirm.value = true
+      break
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
@@ -661,7 +761,10 @@ async function onAuxToggle(controlName, newEnergised) {
     </PidDiagram>
 
     <!-- ── E-STOP button (fixed top-right) ── -->
-    <button v-if="!readOnly" class="estop-btn" @click="showEstopConfirm = true">E-STOP</button>
+    <button v-if="!readOnly" class="estop-btn" @click="showEstopConfirm = true">
+      E-STOP
+      <span v-if="estopKey" class="estop-keybind">[{{ estopKey }}]</span>
+    </button>
 
     <!-- ── E-STOP confirmation dialog ── -->
     <Teleport to="body">
@@ -754,6 +857,18 @@ async function onAuxToggle(controlName, newEnergised) {
   align-items: center;
   justify-content: space-between;
   gap: 4px;
+}
+
+/* ── Keyboard shortcut hint ── */
+/* Only E-STOP carries one. The cards deliberately do not: at card scale the
+   hint is unreadable, and with separate open/close keys there is no single
+   key to print on a card anyway. Settings is where bindings are read. */
+
+.estop-keybind {
+  font-size: 9px;
+  color: inherit;
+  letter-spacing: normal;
+  opacity: 0.75;
 }
 
 /* ── Locked state ── */
