@@ -27,11 +27,15 @@ const emit = defineEmits(["confirm", "dismiss"]);
 const overlayRef = ref(null);
 const bodyRef = ref(null);
 
-// Declared ahead of the immediate watcher below, which reads and writes both
-// synchronously during setup — before either would exist if declared in their
-// more natural spot near the "device joined mid-review" watcher further down.
+// Declared ahead of the immediate watcher below, which reads and writes all
+// three synchronously during setup — before any would exist if declared in
+// their more natural spot nearer where each is otherwise used. A `const`/`let`
+// referenced by an immediate watcher's callback before its own declaration
+// line has run is a TDZ crash, not just a stale read: watch() runs its
+// callback synchronously here, ahead of every later statement in this block.
 let seenDevices = new Set();
 const justAdded = ref(new Set());
+const confirmingDismiss = ref(false);
 
 watch(
   () => props.isOpen,
@@ -51,12 +55,41 @@ watch(
     // aimed at the wrong section.
     seenDevices = new Set(props.devices);
     justAdded.value = new Set();
+    confirmingDismiss.value = false;
   },
   { immediate: true },
 );
 
 const mismatched = computed(() => props.rows.filter((r) => !r.matched));
 const allMatched = computed(() => props.rows.length > 0 && mismatched.value.length === 0);
+
+// ── Dismissing with mismatches still outstanding ─────────────────────────────
+// Esc and the X button do not dismiss directly — they ask first, but only when
+// there is something to lose. Nothing stands between the operator and closing
+// once every switch already agrees with the device; the confirmation exists
+// for the bypass, not for the click. (Declared above, with seenDevices.)
+
+function requestDismiss() {
+  if (mismatched.value.length === 0) {
+    emit('dismiss', []);
+    return;
+  }
+  confirmingDismiss.value = true;
+}
+
+function cancelDismiss() {
+  confirmingDismiss.value = false;
+}
+
+function proceedDismiss() {
+  emit('dismiss', mismatched.value.map((r) => r.key));
+  confirmingDismiss.value = false;
+}
+
+// A switch fixed while the prompt sits open drops out of the count this
+// confirmation is about. Once none are left there is nothing left to bypass,
+// so the question answers itself rather than lingering on stale numbers.
+watch(allMatched, (matched) => { if (matched) confirmingDismiss.value = false; });
 
 const heading = computed(() => {
   if (props.devices.length === 0) return 'Switches still out of sync';
@@ -99,6 +132,11 @@ watch(
     justAdded.value = new Set(added);
     clearTimeout(_clearTimer);
     _clearTimer = setTimeout(() => { justAdded.value = new Set(); }, 4000);
+    // A newly-registered device's switches start unmatched, so a dismiss
+    // confirmation already on screen is now asking about a smaller mismatch
+    // than the one actually on the table. Back out rather than let "Dismiss
+    // anyway" bypass a device the operator has not even seen yet.
+    confirmingDismiss.value = false;
 
     nextTick(() => {
       const el = bodyRef.value?.querySelector(`[data-sync-group="${CSS.escape(added[0])}"]`);
@@ -119,11 +157,13 @@ const addedRowCount = computed(() =>
     <div v-if="isOpen"
          ref="overlayRef"
          class="modal-overlay"
-         @keydown.esc="emit('dismiss', mismatched.map((r) => r.key))"
+         @keydown.esc="confirmingDismiss ? cancelDismiss() : requestDismiss()"
          tabindex="-1">
       <!-- No @click.self dismiss, unlike the other modals: this one is asking a
            question about the state of the stand, and a stray click on the
-           backdrop is not an answer to it. Esc and the button still close it. -->
+           backdrop is not an answer to it. Esc and the button still close it
+           — subject, while anything is still mismatched, to the confirmation
+           in the footer below rather than closing outright. -->
       <div class="modal-container">
         <div class="modal-header">
           <div class="modal-header-title">
@@ -144,7 +184,7 @@ const addedRowCount = computed(() =>
           <button
             class="modal-close-btn"
             title="Dismiss without syncing"
-            @click="emit('dismiss', mismatched.map((r) => r.key))"
+            @click="requestDismiss"
           >
             <i class="pi pi-times" />
           </button>
@@ -198,7 +238,19 @@ const addedRowCount = computed(() =>
           </template>
         </div>
 
-        <div class="modal-footer">
+        <div v-if="confirmingDismiss" class="modal-footer confirm-footer">
+          <span class="sync-status">
+            <i class="pi pi-exclamation-triangle" />
+            {{ mismatched.length }} switch{{ mismatched.length === 1 ? '' : 'es' }}
+            will not match the device. Dismiss anyway?
+          </span>
+          <span class="confirm-footer-actions">
+            <button class="sync-back-btn" @click="cancelDismiss">Keep working</button>
+            <button class="sync-dismiss-btn" @click="proceedDismiss">Dismiss anyway</button>
+          </span>
+        </div>
+
+        <div v-else class="modal-footer">
           <span class="sync-status" :class="{ ok: allMatched }">
             <template v-if="allMatched">All switches match the device.</template>
             <template v-else>
@@ -446,12 +498,67 @@ const addedRowCount = computed(() =>
 }
 
 .sync-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 0.75rem;
   color: #f39c12;
 }
 
 .sync-status.ok {
   color: #2ecc71;
+}
+
+/* Replaces the normal footer while a dismiss is pending confirmation, rather
+   than stacking a second overlay on top of this one — the mismatched rows
+   are still the relevant context, so keeping them on screen behind an
+   unchanged body says more than hiding them behind a fresh dialog would. */
+.confirm-footer .sync-status {
+  color: #f39c12;
+  font-weight: 700;
+}
+
+.confirm-footer-actions {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+
+.sync-back-btn {
+  background: none;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.sync-back-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--input-focus-border);
+}
+
+/* Deliberately not styled like .sync-confirm-btn's success green — this is the
+   button that leaves something unresolved, and should not read as the safe or
+   default choice even though it sits on the right where "proceed" usually is. */
+.sync-dismiss-btn {
+  background: rgba(231, 76, 60, 0.12);
+  border: 1px solid #e74c3c;
+  border-radius: 6px;
+  color: #e74c3c;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.sync-dismiss-btn:hover {
+  background: rgba(231, 76, 60, 0.22);
 }
 
 .sync-confirm-btn {
