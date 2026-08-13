@@ -110,13 +110,46 @@ const pendingDevices = ref([])
 // see control_panel.vue.
 const flagged = ref([])
 
+// Device names this client has already accounted for, and the server they were
+// seen on. Session-scoped: a restart gets to ask again, which is right, because
+// a restart is also when a stale position is most likely to have gone unnoticed.
+const _seen = new Set()
+let _seenServer = null
+
+function _queue(deviceName) {
+  if (!pendingDevices.value.includes(deviceName)) {
+    pendingDevices.value = [...pendingDevices.value, deviceName]
+  }
+}
+
 // Called from App.vue's onDeviceRegistered. Every registration counts, rejoins
 // included: a device that dropped and came back may have reset its controls to
 // their defaults, which makes its switches exactly as suspect as a cold connect.
 export function noteDeviceRegistered(deviceName) {
   if (!deviceName) return
-  if (!pendingDevices.value.includes(deviceName)) {
-    pendingDevices.value = [...pendingDevices.value, deviceName]
+  _seen.add(deviceName)
+  _queue(deviceName)
+}
+
+// The other way a device arrives: already registered before this client
+// connected, so it comes down in the /ws/state snapshot and no device.registered
+// delta is ever sent. Its switches are no less suspect for having been missed —
+// more so, if anything, since this client has watched none of its history — so
+// presence counts the same as the event announcing it.
+//
+// Deduplicated against _seen so the routine republishing of the device list
+// (any control update republishes it) does not re-raise a prompt. Scoped to the
+// server, because pointing the app at a different stand makes a familiar device
+// name a different device with its own switches.
+export function noteDevicesPresent(serverIp, deviceNames = []) {
+  if (serverIp !== _seenServer) {
+    _seenServer = serverIp
+    _seen.clear()
+  }
+  for (const name of deviceNames) {
+    if (!name || _seen.has(name)) continue
+    _seen.add(name)
+    _queue(name)
   }
 }
 
