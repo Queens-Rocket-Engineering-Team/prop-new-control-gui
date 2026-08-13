@@ -3,9 +3,12 @@ import { computed, onMounted, onUnmounted, provide, ref, shallowRef, watch } fro
 import { CAPS } from "./lib/platform.js";
 import {
   fetchServerIp,
+  submitIp,
   startRecording,
   stopRecording,
   updateControlStates,
+  localRecordingActive as fetchLocalRecordingActive,
+  setServerSessionLock,
 } from "./lib/desktop.js";
 import { useServerApi, PREVIEW_STREAM_HZ } from "./composables/useServerApi.js";
 import { useStateStream } from "./composables/useStateStream.js";
@@ -54,7 +57,24 @@ provide('pidConfig', pidConfig);
 const testFrequency = ref(parseInt(localStorage.getItem('qret-test-frequency') ?? '', 10) || 190);
 provide('testFrequency', testFrequency);
 
-const { stopStream, setStream, primeStream, setControl, requestStatus, discoverDevices, discoverKasaDevices, controlKasaDevice, sendEstop, setTare: apiSetTare, clearTare: apiClearTare, startAudio, stopAudio, listAudioFiles, audioFileUrl } = useServerApi(server_ip);
+const {
+  stopStream,
+  setStream,
+  primeStream,
+  setControl,
+  requestStatus,
+  discoverDevices,
+  discoverKasaDevices,
+  controlKasaDevice,
+  sendEstop,
+  setTare: apiSetTare,
+  clearTare: apiClearTare,
+  startSession,
+  stopSession,
+  listSessions,
+  getSession,
+  sessionDownloadUrl,
+} = useServerApi(server_ip);
 
 function requestStatusSnapshot(reason = 'manual') {
   if (!canCommand) return Promise.resolve();
@@ -92,13 +112,23 @@ function onDeviceRegistered() {
   resetPrimingBudget();          // no-ops outside the view-only build
 }
 
-const { devices, kasaDevices, commandsById, tares, status: stateStatus } = useStateStream(
-  server_ip,
-  { onDeviceRegistered },
-);
+const {
+  devices,
+  kasaDevices,
+  commandsById,
+  tares,
+  session,
+  sessionWarning,
+  stateVersion,
+  status: stateStatus,
+  resyncState,
+} = useStateStream(server_ip, { onDeviceRegistered });
 provide('devices',      devices);
 provide('kasaDevices',  kasaDevices);
 provide('commandsById', commandsById);
+provide('session',      session);
+provide('sessionWarning', sessionWarning);
+provide('stateStreamStatus', stateStatus);
 
 // ── Tare offsets ─────────────────────────────────────────────────────────────
 // { [sensorName]: offset } — owned by the server, mirrored here from /ws/state.
@@ -128,10 +158,45 @@ provide('clearTare', clearTare);
 
 // ── Test state ───────────────────────────────────────────────────────────────
 
-const testActive    = ref(false);
-const testStartTime = ref(null);
+const testActive = computed(() => session.value !== null);
+const testStartTime = computed(() => {
+  const startedUnix = Number(session.value?.started_unix);
+  return Number.isFinite(startedUnix) ? startedUnix * 1000 : null;
+});
+// The laptop CSV recorder lives in Rust, so only the desktop build has one.
+// Deriving this from CAPS rather than checking for Tauri directly is what makes
+// every guard below — arm, disarm, poll, session lock — fall away on the pad
+// without a second gate at each site.
+const localRecorderAvailable = ref(CAPS.recording);
+const localRecordingActive = ref(false);
+const lifecycleBusy = ref(false);
+const lifecycleError = ref('');
+
+const recordingMode = computed(() => {
+  if (testActive.value && localRecordingActive.value) return 'redundant';
+  if (testActive.value) return 'server-only';
+  if (localRecordingActive.value) return 'local-only';
+  return 'idle';
+});
+
 provide('testActive',    testActive);
 provide('testStartTime', testStartTime);
+provide('localRecorderAvailable', localRecorderAvailable);
+provide('localRecordingActive', localRecordingActive);
+provide('recordingMode', recordingMode);
+provide('lifecycleBusy', lifecycleBusy);
+provide('lifecycleError', lifecycleError);
+
+watch(
+  [() => session.value?.id ?? null, stateStatus],
+  ([sessionId, status]) => {
+    if (!localRecorderAvailable.value || status !== 'connected') return;
+    setServerSessionLock(sessionId).catch((err) => {
+      console.error('[App] set_server_session_lock failed:', err);
+    });
+  },
+  { immediate: true },
+);
 
 // ── Telemetry streams (display→charts; raw→CSV is ingested on the Rust side) ─
 
@@ -352,11 +417,10 @@ async function setKasaState(host, active) {
 }
 provide('setKasaState', setKasaState);
 
-// ── Audio ─────────────────────────────────────────────────────────────────────
-provide('startAudio',    startAudio);
-provide('stopAudio',     stopAudio);
-provide('listAudioFiles', listAudioFiles);
-provide('audioFileUrl',  audioFileUrl);
+// ── Server-side sessions ──────────────────────────────────────────────────────
+provide('listSessions', listSessions);
+provide('getSession', getSession);
+provide('sessionDownloadUrl', sessionDownloadUrl);
 
 // ── Test lifecycle ────────────────────────────────────────────────────────────
 
@@ -368,39 +432,287 @@ function formatDatetime() {
   return `${date}-${time}`;
 }
 
+function describeError(err) {
+  if (typeof err === 'string') return err;
+  if (err?.message) return String(err.message);
+  try { return JSON.stringify(err); } catch { return String(err); }
+}
+
+const _localRecorderChannel = new BroadcastChannel('qret-local-recorder-state');
+
+async function refreshLocalRecordingStatus() {
+  if (!localRecorderAvailable.value) {
+    localRecordingActive.value = false;
+    return false;
+  }
+  try {
+    localRecordingActive.value = !!(await fetchLocalRecordingActive());
+  } catch (err) {
+    console.error('[App] local_recording_active failed:', err);
+  }
+  return localRecordingActive.value;
+}
+
+function publishLocalRecorderChange() {
+  _localRecorderChannel.postMessage({ type: 'refresh' });
+}
+
+_localRecorderChannel.onmessage = () => {
+  void refreshLocalRecordingStatus();
+};
+
+async function armLocalRecorder() {
+  if (!localRecorderAvailable.value) return;
+  await startRecording(pidConfig.value, formatDatetime());
+  localRecordingActive.value = true;
+  publishLocalRecorderChange();
+  await refreshLocalRecordingStatus();
+}
+
+async function disarmLocalRecorder() {
+  if (!localRecorderAvailable.value) return;
+  await stopRecording();
+  localRecordingActive.value = false;
+  publishLocalRecorderChange();
+  await refreshLocalRecordingStatus();
+}
+
+async function refreshServerSession(reason) {
+  try {
+    await resyncState();
+    return true;
+  } catch (err) {
+    console.warn(`[App] state resync failed (${reason}):`, err);
+    return false;
+  }
+}
+
+// ── Desktop preview stream ───────────────────────────────────────────────────
+// Launch control owns the stand's stream rate outright, so the desktop build
+// simply sets it: the preview rate whenever nothing is recording, the test rate
+// while something is. The pad reaches the same end by a much narrower route —
+// see the priming block above — and must not run any of this, hence the
+// canCommand guard on each entry point rather than one at the call sites.
+
+let previewRestorePending = false;
+let previewRestoreInFlight = false;
+let previewBootstrapTarget = null;
+let previewBootstrapReady = false;
+
+async function maybeRestorePreview() {
+  if (
+    !canCommand ||
+    !previewRestorePending ||
+    previewRestoreInFlight ||
+    testActive.value ||
+    localRecordingActive.value ||
+    !server_ip.value
+  ) return;
+
+  previewRestorePending = false;
+  if (previewBootstrapTarget === server_ip.value) {
+    previewBootstrapTarget = null;
+    previewBootstrapReady = false;
+  }
+  previewRestoreInFlight = true;
+  try {
+    await setStream(PREVIEW_STREAM_HZ);
+  } catch (err) {
+    previewRestorePending = true;
+    lifecycleError.value = `Recorders stopped, but preview could not restart: ${describeError(err)}`;
+  } finally {
+    previewRestoreInFlight = false;
+  }
+}
+
+async function maybeStartIdlePreview() {
+  if (
+    !canCommand ||
+    !previewBootstrapTarget ||
+    !previewBootstrapReady ||
+    previewBootstrapTarget !== server_ip.value ||
+    stateVersion.value < 0 ||
+    lifecycleBusy.value ||
+    testActive.value ||
+    localRecordingActive.value
+  ) return;
+
+  const target = previewBootstrapTarget;
+  previewBootstrapTarget = null;
+  previewBootstrapReady = false;
+  try {
+    await setStream(PREVIEW_STREAM_HZ);
+  } catch (err) {
+    if (server_ip.value === target) previewBootstrapTarget = target;
+    if (server_ip.value === target) previewBootstrapReady = true;
+    console.error('[App] preview STREAM failed:', err);
+  }
+}
+
+async function restoreTestStreamForPartialStop() {
+  if (!canCommand) return;
+  if (!server_ip.value || (!testActive.value && !localRecordingActive.value)) return;
+  try {
+    await setStream(testFrequency.value);
+  } catch (err) {
+    lifecycleError.value = `A recorder is still active and the test stream could not restart: ${describeError(err)}`;
+  }
+}
+
 async function startTest() {
   if (!canCommand) return;
-  if (testActive.value) return;
+  if (lifecycleBusy.value || testActive.value || localRecordingActive.value) return;
+  lifecycleBusy.value = true;
+  lifecycleError.value = '';
+  previewRestorePending = false;
+  previewBootstrapTarget = null;
+  previewBootstrapReady = false;
   try {
     await stopStream();
     await setStream(testFrequency.value);
-    await startRecording(pidConfig.value, formatDatetime());
-    testActive.value    = true;
-    testStartTime.value = Date.now();
+    await armLocalRecorder();
+
+    try {
+      await startSession(pidConfig.value);
+    } catch (err) {
+      lifecycleError.value = localRecordingActive.value
+        ? `Server session failed; laptop CSV recording continues: ${describeError(err)}`
+        : `Server session failed: ${describeError(err)}`;
+      const serverStateConfirmed = await refreshServerSession('failed-start');
+      if (
+        serverStateConfirmed &&
+        !testActive.value &&
+        !localRecordingActive.value &&
+        server_ip.value
+      ) {
+        try { await setStream(PREVIEW_STREAM_HZ); } catch { /* keep the server-session error */ }
+      }
+      return;
+    }
+    if (!(await refreshServerSession('start'))) {
+      lifecycleError.value = 'Server session start returned, but live recording state could not be confirmed.';
+    }
   } catch (err) {
     console.error('[App] startTest failed:', err);
+    lifecycleError.value = `Test start failed: ${describeError(err)}`;
+    if (!testActive.value && !localRecordingActive.value && server_ip.value) {
+      try { await setStream(PREVIEW_STREAM_HZ); } catch { /* keep the original start error */ }
+    }
+  } finally {
+    lifecycleBusy.value = false;
   }
 }
 
 async function stopTest() {
   if (!canCommand) return;
-  if (!testActive.value) return;
-  testActive.value    = false;
-  testStartTime.value = null;
+  if (lifecycleBusy.value || (!testActive.value && !localRecordingActive.value)) return;
+  lifecycleBusy.value = true;
+  lifecycleError.value = '';
+  previewRestorePending = true;
+  const failures = [];
+
+  try { await stopStream(); } catch (err) {
+    failures.push(`device STOP: ${describeError(err)}`);
+  }
+  try { await disarmLocalRecorder(); } catch (err) {
+    failures.push(`laptop CSV: ${describeError(err)}`);
+  }
+  try { await stopSession(); } catch (err) {
+    failures.push(`server session: ${describeError(err)}`);
+  }
+
+  await refreshLocalRecordingStatus();
+  await refreshServerSession('stop');
+
+  if (failures.length) lifecycleError.value = `Stop incomplete — ${failures.join('; ')}`;
+  if (testActive.value || localRecordingActive.value) {
+    await restoreTestStreamForPartialStop();
+  } else {
+    await maybeRestorePreview();
+  }
+  lifecycleBusy.value = false;
+  await maybeRestorePreview();
+}
+
+async function retryServerSession() {
+  if (!canCommand) return;
+  if (lifecycleBusy.value || testActive.value || !localRecordingActive.value) return;
+  lifecycleBusy.value = true;
+  lifecycleError.value = '';
+  try {
+    await startSession(pidConfig.value);
+    await refreshServerSession('retry-start');
+  } catch (err) {
+    lifecycleError.value = `Server session retry failed; laptop CSV recording continues: ${describeError(err)}`;
+  } finally {
+    lifecycleBusy.value = false;
+  }
+}
+
+async function startLocalBackup() {
+  if (!canCommand) return;
+  if (
+    lifecycleBusy.value ||
+    !localRecorderAvailable.value ||
+    !testActive.value ||
+    localRecordingActive.value
+  ) return;
+  lifecycleBusy.value = true;
+  lifecycleError.value = '';
+  previewRestorePending = false;
+  previewBootstrapTarget = null;
+  previewBootstrapReady = false;
   try {
     await stopStream();
-    await stopRecording();
+    await setStream(testFrequency.value);
+    await armLocalRecorder();
   } catch (err) {
-    console.error('[App] stopTest failed:', err);
+    lifecycleError.value = `Laptop backup failed: ${describeError(err)}`;
+    await restoreTestStreamForPartialStop();
+  } finally {
+    lifecycleBusy.value = false;
   }
-  // Restart preview stream after test ends
-  if (server_ip.value) {
-    try { await setStream(PREVIEW_STREAM_HZ); } catch { /* ignore */ }
+}
+
+async function stopLocalBackup() {
+  if (!canCommand) return;
+  if (lifecycleBusy.value || !localRecordingActive.value) return;
+  lifecycleBusy.value = true;
+  lifecycleError.value = '';
+  const failures = [];
+  previewRestorePending = !testActive.value;
+
+  if (!testActive.value) {
+    try { await stopStream(); } catch (err) {
+      failures.push(`device STOP: ${describeError(err)}`);
+    }
   }
+  try { await disarmLocalRecorder(); } catch (err) {
+    failures.push(`laptop CSV: ${describeError(err)}`);
+  }
+  await refreshLocalRecordingStatus();
+
+  if (failures.length) lifecycleError.value = `Laptop stop incomplete — ${failures.join('; ')}`;
+  if (localRecordingActive.value) await restoreTestStreamForPartialStop();
+  lifecycleBusy.value = false;
+  await maybeRestorePreview();
 }
 
 provide('startTest', startTest);
 provide('stopTest',  stopTest);
+provide('retryServerSession', retryServerSession);
+provide('startLocalBackup', startLocalBackup);
+provide('stopLocalBackup', stopLocalBackup);
+
+watch([session, localRecordingActive], () => {
+  if (localRecorderAvailable.value) void refreshLocalRecordingStatus();
+  if (!lifecycleBusy.value) void maybeRestorePreview();
+  if (!lifecycleBusy.value) void maybeStartIdlePreview();
+});
+
+watch(stateVersion, () => {
+  if (!lifecycleBusy.value) void maybeStartIdlePreview();
+});
 
 // Panels bind this to :disabled so a control that cannot act also cannot be
 // pressed — a live-looking button that silently fails is worse than a dead one.
@@ -427,21 +739,20 @@ watch(server_ip, async (ip) => {
     return;
   }
 
-  // Stop any active test when IP changes
-  if (testActive.value) {
-    await stopTest();
-  } else {
-    // Stop any preview stream running on the old IP
-    try { await stopStream(); } catch { /* ignore */ }
-  }
+  previewBootstrapTarget = ip || null;
+  previewBootstrapReady = false;
 
   if (!ip) return;
 
-  // Start 30 Hz preview stream so data is visible before a test begins.
-  // The /ws/state snapshot will arrive automatically when the socket connects.
-  try { await setStream(PREVIEW_STREAM_HZ); } catch (err) {
-    console.error('[App] preview STREAM failed:', err);
-  }
+  // Resolve authoritative recording state before touching stream rate. This is
+  // essential when a new monitor window opens during an existing session.
+  await Promise.all([
+    refreshServerSession('connect'),
+    refreshLocalRecordingStatus(),
+  ]);
+  if (server_ip.value !== ip) return;
+  previewBootstrapReady = true;
+  await maybeStartIdlePreview();
   requestStatusSnapshot('connect');
   startStatusRefresh();
 });
@@ -457,6 +768,10 @@ watch(server_ip, (ip) => {
 
 _ipChannel.onmessage = (e) => {
   if (server_ip.value === e.data) return;
+  if (localRecordingActive.value || (testActive.value && stateStatus.value === 'connected')) {
+    lifecycleError.value = 'Stop active recording before changing the server.';
+    return;
+  }
   _receivingBroadcast = true;
   server_ip.value = e.data;
   _receivingBroadcast = false;
@@ -482,53 +797,36 @@ _settingsChannel.onmessage = (e) => {
   // darkMode messages are handled by settings_modal.vue's own channel instance
 };
 
-// ── Test state sync across windows via BroadcastChannel ──────────────────────
-// Each window runs its own App.vue instance with its own testActive/testStartTime
-// refs. startTest()/stopTest() perform the actual backend calls (idempotent, so
-// harmless if triggered from more than one window); this channel just keeps every
-// window's Start/Stop Test button and timer in sync with whichever window acted.
-
-const _testChannel = new BroadcastChannel('qret-test-state');
-let _receivingTestBroadcast = false;
-
-watch([testActive, testStartTime], ([active, startTime]) => {
-  if (_receivingTestBroadcast) return;
-  _testChannel.postMessage({ active, startTime });
-});
-
-_testChannel.onmessage = (e) => {
-  const { active, startTime } = e.data;
-  if (testActive.value === active && testStartTime.value === startTime) return;
-  _receivingTestBroadcast = true;
-  testActive.value    = active;
-  testStartTime.value = startTime;
-  _receivingTestBroadcast = false;
-};
-
 // ── Settings ─────────────────────────────────────────────────────────────────
 
-function get_ip(new_ip) {
+async function get_ip(new_ip) {
+  if (localRecordingActive.value || (testActive.value && stateStatus.value === 'connected')) {
+    lifecycleError.value = 'Stop active recording before changing the server.';
+    return;
+  }
+  // Rust owns the persisted IP and refuses to move it while it holds a session
+  // lock, so a rejection here is authoritative — surface it rather than
+  // switching anyway. No-ops on the web build, which never persists an IP.
+  try {
+    await submitIp(new_ip);
+  } catch (err) {
+    lifecycleError.value = `Server change blocked: ${describeError(err)}`;
+    return;
+  }
   server_ip.value = new_ip;
 }
 
 const settingsOpen = ref(false);
 const aboutOpen    = ref(false);
-let _unlistenTares = null;
-
-onMounted(async () => {
-  try {
-    _unlistenTares = await listen('tares-updated', (event) => {
-      applyTaresSnapshot(event.payload);
-    });
-    applyTaresSnapshot(await invoke('get_tares'));
-  } catch (err) {
-    console.error('[App] tare sync setup failed:', err);
-  }
-});
 
 onMounted(() => {
   // Tares need no bootstrap: the /ws/state snapshot that arrives on connect
   // carries the full map, and tare.updated/tare.cleared deltas keep it current.
+  void refreshLocalRecordingStatus();
+  // Unconditional, unlike the recorder poll above: on desktop this reads the IP
+  // Rust persisted, and on web it is how the address is derived from the URL
+  // that served the page. Gating it on the local recorder would leave the pad
+  // with no server at all.
   fetchServerIp()
     .then((ip) => { if (ip) server_ip.value = ip; })
     .catch(() => {});
@@ -539,7 +837,7 @@ onUnmounted(() => {
   stopStreamPriming();
   _ipChannel.close();
   _settingsChannel.close();
-  _testChannel.close();
+  _localRecorderChannel.close();
 });
 </script>
 
@@ -568,6 +866,8 @@ onUnmounted(() => {
       :pid-config="pidConfig"
       :test-frequency="testFrequency"
       :test-active="testActive"
+      :server-session-active-connected="testActive && stateStatus === 'connected'"
+      :local-recording-active="localRecordingActive"
       @close="settingsOpen = false"
       @update-ip="get_ip"
       @update-pid-config="pidConfig = $event"

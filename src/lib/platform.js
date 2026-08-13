@@ -104,10 +104,13 @@ export const CAPS = {
 /** Panels the current build exposes, in nav order. */
 export function availablePanels() {
   if (mode() === "desktop") {
-    return ["control", "graph", "camera", "devices", "debug", "flight"]
+    return ["control", "graph", "camera", "sessions", "devices", "debug", "flight"]
   }
   // Pad build: pressures, device health and charts. Camera is deliberately out
   // (multiple WebRTC streams would hammer both the iPad and the wifi link the
   // test depends on), and Flight's basemap has no offline tiles in a browser.
+  // Sessions is out for the same reason as Camera: browsing the archive is
+  // launch control's job, and a session ZIP is large enough that pulling one
+  // would compete with the telemetry the test depends on.
   return ["control", "graph", "devices"]
 }

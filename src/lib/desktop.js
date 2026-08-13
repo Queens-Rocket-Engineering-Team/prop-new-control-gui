@@ -65,19 +65,21 @@ export async function fetchServerIp() {
 
 export async function submitIp(newIp) {
   if (!isWeb()) return call("submit_ip", { newIp })
-  // No-op on web, and not merely because the picker is hidden: opening the
-  // settings modal syncs ipMode from the current IP, which trips the watcher
-  // that lands here. Persisting from that path is exactly the stale override
-  // this build avoids.
+  // No-op on web rather than an error: App.vue calls this from get_ip on every
+  // IP change, and persisting there is exactly the stale override this build
+  // avoids. Returning quietly keeps that one call site build-agnostic.
 }
 
 // Tares are not wrapped here: they are server state reached over the HTTP API
 // (useServerApi), not a Rust command, so there is nothing Tauri-specific to
 // bridge. What the pad may do with them is gated by CAPS.tares at the call site.
 
-// ── Recording ────────────────────────────────────────────────────────────────
-// Unreachable from the web build (Start/Stop Test is hidden), but it rejects
-// rather than silently succeeding so a future caller fails loudly.
+// ── Local CSV recording ──────────────────────────────────────────────────────
+// The laptop-side CSV recorder, which runs *alongside* the server's recording
+// session as a redundant copy. Unreachable from the web build (Start/Stop Test
+// is hidden, and CAPS.recording gates every caller in App.vue), but the two
+// start/stop calls reject rather than silently succeeding so a future caller
+// fails loudly instead of believing it armed a recorder that does not exist.
 
 export async function updateControlStates({ valveStates, auxiliaryStates, kasaStates }) {
   if (!CAPS.recording) return
@@ -94,33 +96,39 @@ export async function stopRecording() {
   return call("stop_recording")
 }
 
-// ── Camera recordings ────────────────────────────────────────────────────────
+// Queried rather than assumed: a second desktop window opening mid-test has to
+// discover that the recorder is already armed. Web has no recorder, and false
+// is the honest answer there — not an error, because App.vue polls this on
+// every session change in both builds.
+export async function localRecordingActive() {
+  if (!CAPS.recording) return false
+  return call("local_recording_active")
+}
 
-export async function fetchCameraRecordingDir() {
+// Tells Rust which server session the local CSV belongs to, so the two halves
+// of a redundant recording can be matched up afterwards. Nothing to lock
+// without a local recorder, hence the silent no-op.
+export async function setServerSessionLock(sessionId) {
+  if (!CAPS.recording) return
+  return call("set_server_session_lock", { sessionId })
+}
+
+// ── Session downloads ────────────────────────────────────────────────────────
+
+export async function fetchSessionDownloadDir() {
   if (!CAPS.fileSave) return ""
-  return call("fetch_camera_recording_dir")
+  return call("fetch_session_download_dir")
 }
 
-export async function setCameraRecordingDir(newDir) {
+export async function setSessionDownloadDir(newDir) {
   if (!CAPS.fileSave) return
-  return call("set_camera_recording_dir", { newDir })
+  return call("set_session_download_dir", { newDir })
 }
 
-// Desktop writes to the configured recordings directory; the browser has no
-// such concept, so hand the bytes to the download manager instead.
-export async function saveDownloadedCameraRecording(filename, bytes) {
-  if (!CAPS.fileSave) {
-    const url = URL.createObjectURL(new Blob([bytes], { type: "video/mp4" }))
-    try {
-      const anchor = document.createElement("a")
-      anchor.href = url
-      anchor.download = filename
-      anchor.click()
-    } finally {
-      // Revoking synchronously can cancel the download in some browsers.
-      setTimeout(() => URL.revokeObjectURL(url), 60_000)
-    }
-    return filename
-  }
-  return call("save_downloaded_camera_recording", { filename, data: bytes })
+// Streams the session ZIP to the configured directory on disk. No web fallback
+// here on purpose: sessions_panel.vue already branches to a plain browser
+// download, which is the right answer in a browser and needs no bridge.
+export async function downloadSessionZip(sessionId) {
+  if (!CAPS.fileSave) throw new UnsupportedOnWebError("Saving a session archive")
+  return call("download_session_zip", { sessionId })
 }

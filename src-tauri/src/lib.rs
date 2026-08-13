@@ -1,14 +1,23 @@
+use futures_util::StreamExt;
+use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::net::Ipv4Addr;
+use std::path::{Path, PathBuf};
 use std::string::String;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    LazyLock, Mutex,
+};
+use std::time::Duration;
 use tauri::Manager;
+use tokio::io::AsyncWriteExt;
 
 mod telemetry_raw;
 
 static IP_ADDRESS: Mutex<String> = Mutex::new(String::new());
+static ACTIVE_SERVER_SESSION: Mutex<Option<String>> = Mutex::new(None);
 
 /// Latest known unit for each sensor name, as reported on the raw telemetry
 /// stream. Used to annotate CSV column headers, e.g. "PT101 [PSI]".
@@ -31,13 +40,16 @@ fn sensor_unit(name: &str) -> Option<String> {
     SENSOR_UNITS.lock().unwrap().get(name).cloned()
 }
 
-// Default camera recording directory set to Videos folder, can be changed
-static CAMERA_RECORDING_DIR: LazyLock<Mutex<String>> = LazyLock::new(|| {
-    let default_dir = dirs::video_dir()
+// Session archives default to the operator's Downloads folder and can be changed
+// from the settings modal.
+static SESSION_DOWNLOAD_DIR: LazyLock<Mutex<String>> = LazyLock::new(|| {
+    let default_dir = dirs::download_dir()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_default();
     Mutex::new(default_dir)
 });
+
+static SESSION_DOWNLOAD_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
 async fn fetch_server_ip() -> String {
@@ -45,10 +57,39 @@ async fn fetch_server_ip() -> String {
 }
 
 #[tauri::command]
-async fn submit_ip(new_ip: String) {
-    let mut ip = IP_ADDRESS.lock().unwrap();
+async fn submit_ip(new_ip: String) -> Result<(), String> {
+    let current_ip = IP_ADDRESS.lock().map_err(|e| e.to_string())?.clone();
+    if current_ip != new_ip {
+        let active_session = ACTIVE_SERVER_SESSION
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone();
+        let local_recording = RECORDER
+            .lock()
+            .map_err(|e| e.to_string())?
+            .recorder
+            .is_some();
+        if let Some(session_id) = active_session {
+            return Err(format!(
+                "server IP is locked while session {session_id} is recording"
+            ));
+        }
+        if local_recording {
+            return Err("server IP is locked while the laptop CSV recorder is armed".to_string());
+        }
+    }
+
+    let mut ip = IP_ADDRESS.lock().map_err(|e| e.to_string())?;
     println!("New IP Submitted: {}", new_ip);
     *ip = new_ip;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_server_session_lock(session_id: Option<String>) -> Result<(), String> {
+    let mut active = ACTIVE_SERVER_SESSION.lock().map_err(|e| e.to_string())?;
+    *active = session_id.filter(|value| !value.trim().is_empty());
+    Ok(())
 }
 
 // ── CSV recorder ─────────────────────────────────────────────────────────────
@@ -73,7 +114,15 @@ struct CsvRecorder {
     header_written: bool,
 }
 
-static RECORDER: Mutex<Option<CsvRecorder>> = Mutex::new(None);
+struct RecorderState {
+    recorder: Option<CsvRecorder>,
+    path: Option<PathBuf>,
+}
+
+static RECORDER: Mutex<RecorderState> = Mutex::new(RecorderState {
+    recorder: None,
+    path: None,
+});
 
 fn data_dir() -> PathBuf {
     std::env::current_dir()
@@ -212,13 +261,15 @@ fn flush_pending(recorder: &mut CsvRecorder) -> std::io::Result<()> {
 fn start_recording(mode: String, datetime: String) -> Result<String, String> {
     let mut guard = RECORDER.lock().map_err(|e| e.to_string())?;
 
-    // Close any previous recording cleanly
-    if let Some(mut r) = guard.take() {
-        if !r.header_written && !r.pending.is_empty() {
-            let _ = flush_pending(&mut r);
-        } else {
-            let _ = r.writer.flush();
-        }
+    // Every monitor hosts its own App.vue and may invoke this command at nearly
+    // the same time. The process-global lock makes repeated starts idempotent:
+    // the first caller creates the CSV and all later callers receive its path.
+    if guard.recorder.is_some() {
+        return guard
+            .path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .ok_or_else(|| "recorder is active but its path is unavailable".to_string());
     }
 
     let dir = data_dir();
@@ -230,7 +281,7 @@ fn start_recording(mode: String, datetime: String) -> Result<String, String> {
     let path      = dir.join(&filename);
     let file      = File::create(&path).map_err(|e| e.to_string())?;
 
-    *guard = Some(CsvRecorder {
+    guard.recorder = Some(CsvRecorder {
         writer:         BufWriter::new(file),
         columns:        Vec::new(),
         valve_columns:  Vec::new(),
@@ -240,10 +291,19 @@ fn start_recording(mode: String, datetime: String) -> Result<String, String> {
         pending:        Vec::new(),
         header_written: false,
     });
+    guard.path = Some(path.clone());
 
     println!("[Recorder] started → {}", path.display());
     telemetry_raw::start();
     Ok(path.to_string_lossy().to_string())
+}
+
+/// Report whether this HELM process currently has its independent CSV backup
+/// armed. This is deliberately separate from the server-side session state.
+#[tauri::command]
+fn local_recording_active() -> Result<bool, String> {
+    let guard = RECORDER.lock().map_err(|e| e.to_string())?;
+    Ok(guard.recorder.is_some())
 }
 
 /// Append one row of sensor readings, sourced from the raw telemetry
@@ -262,7 +322,7 @@ pub(crate) fn record_batch(
     kasa_states: HashMap<String, u8>,
 ) -> Result<(), String> {
     let mut guard = RECORDER.lock().map_err(|e| e.to_string())?;
-    let recorder  = match guard.as_mut() {
+    let recorder  = match guard.recorder.as_mut() {
         Some(r) => r,
         None    => return Ok(()),  // no recording in progress — silently skip
     };
@@ -327,9 +387,10 @@ pub(crate) fn record_batch(
 /// If called before the header buffer filled, writes whatever has been collected.
 #[tauri::command]
 fn stop_recording() -> Result<(), String> {
-    telemetry_raw::stop();
     let mut guard = RECORDER.lock().map_err(|e| e.to_string())?;
-    if let Some(mut r) = guard.take() {
+    telemetry_raw::stop();
+    guard.path = None;
+    if let Some(mut r) = guard.recorder.take() {
         if !r.header_written && !r.pending.is_empty() {
             flush_pending(&mut r).map_err(|e| e.to_string())?;
         } else {
@@ -341,37 +402,355 @@ fn stop_recording() -> Result<(), String> {
 }
 
 #[tauri::command]
-// returns the current camera recording directory
-async fn fetch_camera_recording_dir() -> String {
-    let gaurded_dir = CAMERA_RECORDING_DIR.lock().unwrap();
-    gaurded_dir.to_string()
+async fn fetch_session_download_dir() -> Result<String, String> {
+    let guarded_dir = SESSION_DOWNLOAD_DIR.lock().map_err(|e| e.to_string())?;
+    Ok(guarded_dir.to_string())
 }
 
 #[tauri::command]
-// stores the inputted string in CAMERA_RECORDING_DIR for later use
-async fn set_camera_recording_dir(new_dir: String) {
-    let mut gaurded_dir = CAMERA_RECORDING_DIR.lock().unwrap();
-    println!("New Camera Recording Directory Submitted: {}", new_dir);
-    *gaurded_dir = String::from(new_dir);
+async fn set_session_download_dir(new_dir: String) -> Result<(), String> {
+    let normalized = if new_dir.trim().is_empty() {
+        dirs::download_dir()
+            .map(|path| path.to_string_lossy().to_string())
+            .ok_or_else(|| "the system Downloads directory is unavailable".to_string())?
+    } else {
+        new_dir.trim().to_string()
+    };
+
+    let mut guarded_dir = SESSION_DOWNLOAD_DIR.lock().map_err(|e| e.to_string())?;
+    println!("New Session Download Directory Submitted: {}", normalized);
+    *guarded_dir = normalized;
+    Ok(())
 }
 
-fn camera_recording_path(filename: &str) -> Result<PathBuf, String> {
-    let videos_dir = PathBuf::from(CAMERA_RECORDING_DIR.lock().unwrap().to_string());
-    fs::create_dir_all(&videos_dir).map_err(|e| e.to_string())?;
-    Ok(videos_dir.join(filename))
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct SessionDownloadError {
+    kind: String,
+    status: Option<u16>,
+    message: String,
 }
 
-#[tauri::command]
-async fn save_downloaded_camera_recording(filename: String, data: Vec<u8>) -> Result<String, String> {
-    let path = camera_recording_path(&filename)?;
-    let mut file = OpenOptions::new()
-        .create(true)
+impl SessionDownloadError {
+    fn new(kind: &str, status: Option<u16>, message: impl Into<String>) -> Self {
+        Self {
+            kind: kind.to_string(),
+            status,
+            message: message.into(),
+        }
+    }
+
+    fn filesystem(action: &str, error: impl std::fmt::Display) -> Self {
+        Self::new("filesystem", None, format!("{action}: {error}"))
+    }
+}
+
+#[derive(Debug)]
+struct SessionDownloadGuard;
+
+impl SessionDownloadGuard {
+    fn acquire() -> Result<Self, SessionDownloadError> {
+        SESSION_DOWNLOAD_IN_PROGRESS
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                SessionDownloadError::new(
+                    "download_in_progress",
+                    None,
+                    "another session download is already in progress",
+                )
+            })?;
+        Ok(Self)
+    }
+}
+
+impl Drop for SessionDownloadGuard {
+    fn drop(&mut self) {
+        SESSION_DOWNLOAD_IN_PROGRESS.store(false, Ordering::Release);
+    }
+}
+
+fn validate_session_id(session_id: &str) -> Result<(), SessionDownloadError> {
+    let valid_length = !session_id.is_empty() && session_id.len() <= 255;
+    let valid_characters = session_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+
+    if valid_length && valid_characters {
+        Ok(())
+    } else {
+        Err(SessionDownloadError::new(
+            "invalid_session_id",
+            None,
+            "session id must be 1-255 ASCII letters, numbers, hyphens, or underscores",
+        ))
+    }
+}
+
+fn session_download_url(
+    server: &str,
+    port: u16,
+    session_id: &str,
+) -> Result<String, SessionDownloadError> {
+    validate_session_id(session_id)?;
+
+    if server != "localhost" && server.parse::<Ipv4Addr>().is_err() {
+        return Err(SessionDownloadError::new(
+            "invalid_server",
+            None,
+            "the configured server must be localhost or an IPv4 address",
+        ));
+    }
+
+    Ok(format!(
+        "http://{server}:{port}/v1/sessions/{session_id}/download"
+    ))
+}
+
+async fn create_partial_file(
+    directory: &Path,
+    session_id: &str,
+) -> Result<(PathBuf, tokio::fs::File), SessionDownloadError> {
+    for suffix in 0_u32.. {
+        let suffix = if suffix == 0 {
+            String::new()
+        } else {
+            format!("-{suffix}")
+        };
+        let filename = format!(".{session_id}.{}{}.zip.part", std::process::id(), suffix);
+        let path = directory.join(filename);
+        match tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .await
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(SessionDownloadError::filesystem(
+                    "failed to create the partial download",
+                    error,
+                ))
+            }
+        }
+    }
+
+    unreachable!("u32 suffix space exhausted while creating a partial file")
+}
+
+async fn promote_without_clobbering(
+    partial_path: &Path,
+    directory: &Path,
+    session_id: &str,
+) -> Result<PathBuf, SessionDownloadError> {
+    for copy_number in 1_u32.. {
+        let filename = if copy_number == 1 {
+            format!("{session_id}.zip")
+        } else {
+            format!("{session_id}-{copy_number}.zip")
+        };
+        let final_path = directory.join(filename);
+
+        // A hard link is an atomic create-if-absent operation on both Windows
+        // and Unix. Unlike rename on Unix, it can never replace an existing ZIP.
+        match tokio::fs::hard_link(partial_path, &final_path).await {
+            Ok(()) => return Ok(final_path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(link_error) => match copy_without_clobbering(partial_path, &final_path).await {
+                Ok(true) => return Ok(final_path),
+                Ok(false) => continue,
+                Err(copy_error) => {
+                    return Err(SessionDownloadError::new(
+                        "filesystem",
+                        None,
+                        format!(
+                            "failed to promote the completed session archive (hard link: {link_error}; fallback: {})",
+                            copy_error.message
+                        ),
+                    ))
+                }
+            }
+        }
+    }
+
+    unreachable!("u32 suffix space exhausted while naming a session archive")
+}
+
+async fn copy_without_clobbering(
+    source_path: &Path,
+    final_path: &Path,
+) -> Result<bool, SessionDownloadError> {
+    let mut destination = match tokio::fs::OpenOptions::new()
+        .create_new(true)
         .write(true)
-        .truncate(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
+        .open(final_path)
+        .await
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => {
+            return Err(SessionDownloadError::filesystem(
+                "failed to reserve the session archive filename",
+                error,
+            ))
+        }
+    };
 
-    file.write_all(&data).map_err(|e| e.to_string())?;
+    let result = async {
+        let mut source = tokio::fs::File::open(source_path).await.map_err(|error| {
+            SessionDownloadError::filesystem("failed to reopen the completed download", error)
+        })?;
+        tokio::io::copy(&mut source, &mut destination)
+            .await
+            .map_err(|error| {
+                SessionDownloadError::filesystem(
+                    "failed to copy the completed session archive",
+                    error,
+                )
+            })?;
+        destination.flush().await.map_err(|error| {
+            SessionDownloadError::filesystem("failed to flush the session archive", error)
+        })?;
+        destination.sync_all().await.map_err(|error| {
+            SessionDownloadError::filesystem("failed to sync the session archive", error)
+        })?;
+        Ok(true)
+    }
+    .await;
+
+    if result.is_err() {
+        drop(destination);
+        let _ = tokio::fs::remove_file(final_path).await;
+    }
+    result
+}
+
+async fn download_session_zip_to(
+    server: &str,
+    port: u16,
+    session_id: &str,
+    directory: &Path,
+) -> Result<PathBuf, SessionDownloadError> {
+    let url = session_download_url(server, port, session_id)?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| {
+            SessionDownloadError::new(
+                "client",
+                None,
+                format!("failed to configure the download client: {error}"),
+            )
+        })?;
+
+    let response = client.get(url).send().await.map_err(|error| {
+        SessionDownloadError::new(
+            "network",
+            None,
+            format!("failed to start the session download: {error}"),
+        )
+    })?;
+    let status = response.status();
+    if status == reqwest::StatusCode::CONFLICT {
+        return Err(SessionDownloadError::new(
+            "session_active",
+            Some(status.as_u16()),
+            "the session is still recording and cannot be downloaded yet",
+        ));
+    }
+    if !status.is_success() {
+        return Err(SessionDownloadError::new(
+            "http_status",
+            Some(status.as_u16()),
+            format!("session download failed with HTTP {status}"),
+        ));
+    }
+
+    tokio::fs::create_dir_all(directory)
+        .await
+        .map_err(|error| {
+            SessionDownloadError::filesystem("failed to create the download directory", error)
+        })?;
+    let (partial_path, mut file) = create_partial_file(directory, session_id).await?;
+
+    let result = async {
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                SessionDownloadError::new(
+                    "network",
+                    None,
+                    format!("session download was interrupted: {error}"),
+                )
+            })?;
+            file.write_all(&chunk).await.map_err(|error| {
+                SessionDownloadError::filesystem("failed to write the session archive", error)
+            })?;
+        }
+        file.flush().await.map_err(|error| {
+            SessionDownloadError::filesystem("failed to flush the session archive", error)
+        })?;
+        file.sync_all().await.map_err(|error| {
+            SessionDownloadError::filesystem("failed to sync the session archive", error)
+        })?;
+        drop(file);
+
+        let final_path = promote_without_clobbering(&partial_path, directory, session_id).await?;
+        if let Err(error) = tokio::fs::remove_file(&partial_path).await {
+            eprintln!(
+                "[Sessions] Download completed at {}, but partial link cleanup failed: {}",
+                final_path.display(),
+                error
+            );
+        }
+        Ok(final_path)
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&partial_path).await;
+    }
+    result
+}
+
+#[tauri::command]
+async fn download_session_zip(session_id: String) -> Result<String, SessionDownloadError> {
+    validate_session_id(&session_id)?;
+
+    let server = IP_ADDRESS
+        .lock()
+        .map_err(|error| {
+            SessionDownloadError::new(
+                "state",
+                None,
+                format!("failed to read the configured server: {error}"),
+            )
+        })?
+        .clone();
+    if server.is_empty() {
+        return Err(SessionDownloadError::new(
+            "server_not_configured",
+            None,
+            "configure a server before downloading a session",
+        ));
+    }
+    let directory = PathBuf::from(
+        SESSION_DOWNLOAD_DIR
+            .lock()
+            .map_err(|error| {
+                SessionDownloadError::new(
+                    "state",
+                    None,
+                    format!("failed to read the session download directory: {error}"),
+                )
+            })?
+            .clone(),
+    );
+
+    let _download_guard = SessionDownloadGuard::acquire()?;
+    let path = download_session_zip_to(&server, 8000, &session_id, &directory).await?;
+
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -488,13 +867,181 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             fetch_server_ip,
             submit_ip,
+            set_server_session_lock,
             start_recording,
             stop_recording,
+            local_recording_active,
             telemetry_raw::update_control_states,
-            fetch_camera_recording_dir,
-            set_camera_recording_dir,
-            save_downloaded_camera_recording,
+            fetch_session_download_dir,
+            set_session_download_dir,
+            download_session_zip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    async fn serve_once(response: Vec<u8>) -> (String, u16, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await;
+            socket.write_all(&response).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        ("127.0.0.1".to_string(), address.port(), task)
+    }
+
+    #[test]
+    fn validates_session_ids_before_building_urls() {
+        assert!(validate_session_id("2026-08-10_143005_hot-fire-3").is_ok());
+        for invalid in ["", "../escape", "has space", "percent%2fslash", "x.zip"] {
+            let error = validate_session_id(invalid).unwrap_err();
+            assert_eq!(error.kind, "invalid_session_id");
+            assert_eq!(error.status, None);
+        }
+    }
+
+    #[test]
+    fn download_error_has_a_stable_serialized_shape() {
+        let error = SessionDownloadError::new("session_active", Some(409), "still recording");
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::json!({
+                "kind": "session_active",
+                "status": 409,
+                "message": "still recording",
+            })
+        );
+    }
+
+    #[test]
+    fn only_one_process_wide_download_guard_can_be_held() {
+        let first = SessionDownloadGuard::acquire().unwrap();
+        let error = SessionDownloadGuard::acquire().unwrap_err();
+        assert_eq!(error.kind, "download_in_progress");
+        drop(first);
+        assert!(SessionDownloadGuard::acquire().is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn active_server_session_locks_the_process_wide_server_ip() {
+        *IP_ADDRESS.lock().unwrap() = "127.0.0.1".to_string();
+        set_server_session_lock(Some("session-1".to_string())).unwrap();
+
+        let error = submit_ip("192.168.1.10".to_string()).await.unwrap_err();
+        assert!(error.contains("session-1"));
+        assert_eq!(server_ip(), "127.0.0.1");
+
+        set_server_session_lock(None).unwrap();
+        submit_ip("192.168.1.10".to_string()).await.unwrap();
+        assert_eq!(server_ip(), "192.168.1.10");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn copy_promotion_fallback_is_no_clobber() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.part");
+        let existing = directory.path().join("existing.zip");
+        let destination = directory.path().join("destination.zip");
+        tokio::fs::write(&source, b"new archive").await.unwrap();
+        tokio::fs::write(&existing, b"existing archive").await.unwrap();
+
+        assert!(!copy_without_clobbering(&source, &existing).await.unwrap());
+        assert_eq!(tokio::fs::read(&existing).await.unwrap(), b"existing archive");
+        assert!(copy_without_clobbering(&source, &destination).await.unwrap());
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"new archive");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn streams_chunked_downloads_without_content_length() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nPK\x03\x04\r\n3\r\nzip\r\n0\r\n\r\n".to_vec();
+        let (server, port, task) = serve_once(response).await;
+        let directory = tempfile::tempdir().unwrap();
+
+        let path = download_session_zip_to(
+            &server,
+            port,
+            "2026-08-10_143005_hot-fire-3",
+            directory.path(),
+        )
+        .await
+        .unwrap();
+
+        task.await.unwrap();
+        assert_eq!(tokio::fs::read(path).await.unwrap(), b"PK\x03\x04zip");
+        assert!(std::fs::read_dir(directory.path())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".part")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn maps_conflict_and_does_not_follow_redirects() {
+        let directory = tempfile::tempdir().unwrap();
+        let conflict =
+            b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+        let (server, port, task) = serve_once(conflict).await;
+        let error = download_session_zip_to(&server, port, "session-1", directory.path())
+            .await
+            .unwrap_err();
+        task.await.unwrap();
+        assert_eq!(error.kind, "session_active");
+        assert_eq!(error.status, Some(409));
+
+        let redirect = b"HTTP/1.1 302 Found\r\nLocation: /unexpected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+        let (server, port, task) = serve_once(redirect).await;
+        let error = download_session_zip_to(&server, port, "session-1", directory.path())
+            .await
+            .unwrap_err();
+        task.await.unwrap();
+        assert_eq!(error.kind, "http_status");
+        assert_eq!(error.status, Some(302));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preserves_existing_zip_and_uses_a_numbered_name() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nnew".to_vec();
+        let (server, port, task) = serve_once(response).await;
+        let directory = tempfile::tempdir().unwrap();
+        let original = directory.path().join("session-1.zip");
+        std::fs::write(&original, b"old").unwrap();
+
+        let path = download_session_zip_to(&server, port, "session-1", directory.path())
+            .await
+            .unwrap();
+
+        task.await.unwrap();
+        assert_eq!(std::fs::read(original).unwrap(), b"old");
+        assert_eq!(path.file_name().unwrap(), "session-1-2.zip");
+        assert_eq!(std::fs::read(path).unwrap(), b"new");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removes_partial_file_after_an_interrupted_response() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nshort".to_vec();
+        let (server, port, task) = serve_once(response).await;
+        let directory = tempfile::tempdir().unwrap();
+
+        let error = download_session_zip_to(&server, port, "session-1", directory.path())
+            .await
+            .unwrap_err();
+
+        task.await.unwrap();
+        assert_eq!(error.kind, "network");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
 }

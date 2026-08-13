@@ -1,10 +1,9 @@
 <script setup>
-import { ref, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { CAPS } from "../lib/platform.js";
 import {
-  fetchCameraRecordingDir,
-  setCameraRecordingDir,
-  submitIp,
+  fetchSessionDownloadDir,
+  setSessionDownloadDir,
 } from "../lib/desktop.js";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
@@ -15,18 +14,23 @@ const props = defineProps({
   pidConfig:     { type: String,  default: 'rocket-launch' },
   testFrequency: { type: Number,  default: 190 },
   testActive:    { type: Boolean, default: false },
+  serverSessionActiveConnected: { type: Boolean, default: false },
+  localRecordingActive: { type: Boolean, default: false },
 });
 
 const emit = defineEmits(["close", "update-ip", "update-pid-config", "update-test-frequency"]);
 
 const ipMode = ref("none");
 const customIp = ref("");
-const cameraRecordingDir = ref("");
+const sessionDownloadDir = ref("");
 const localPidConfig = ref("rocket-launch");
 const localTestFreq = ref(190);
 const overlayRef = ref(null);
+const serverIpLocked = computed(
+  () => props.serverSessionActiveConnected || props.localRecordingActive,
+);
 
-// Choosing a directory to record into only means something where there is a
+// Choosing a directory to download into only means something where there is a
 // disk to write to; the web build hides that section rather than showing a
 // control that does nothing.
 const showDesktopSettings = CAPS.fileSave;
@@ -89,10 +93,10 @@ watch(
       localTestFreq.value  = props.testFrequency || 190;
 
       try {
-        const dir = await fetchCameraRecordingDir();
-        cameraRecordingDir.value = dir || "";
+        const dir = await fetchSessionDownloadDir();
+        sessionDownloadDir.value = dir || "";
       } catch (err) {
-        console.error("Failed to fetch camera recording directory:", err);
+        console.error("Failed to fetch session download directory:", err);
       }
     }
   }
@@ -112,15 +116,19 @@ function isValidIp(ip) {
   return ipv4Pattern.test(ip);
 }
 
+// Emits only — persisting the choice is App.vue's job (get_ip), which is also
+// where it can refuse the change outright if a recording is running. This just
+// declines to emit while locked so the modal cannot start an argument it has
+// no standing to win.
 function applyIp() {
+  if (serverIpLocked.value) return;
+
   if (ipMode.value === "none") {
-    submitIp("");
     emit("update-ip", "");
     return;
   }
   const ip = ipMode.value === "localhost" ? "localhost" : customIp.value.trim();
   if (ipMode.value === "custom" && (!ip || !isValidIp(ip))) return;
-  submitIp(ip);
   emit("update-ip", ip);
 }
 
@@ -134,9 +142,11 @@ watch(customIp, () => {
   }
 });
 
-function applyCameraRecordingDir() {
-  const dir = cameraRecordingDir.value.trim();
-  setCameraRecordingDir(dir);
+function applySessionDownloadDir() {
+  const dir = sessionDownloadDir.value.trim();
+  setSessionDownloadDir(dir).catch((err) => {
+    console.error("Failed to set session download directory:", err);
+  });
 }
 </script>
 
@@ -201,32 +211,35 @@ function applyCameraRecordingDir() {
         <div class="setting-group" v-if="canSelectServer">
           <span class="setting-group-label"><i class="pi pi-server" />Server IP Address</span>
           <label class="option-row">
-            <RadioButton v-model="ipMode" value="localhost" />
+            <RadioButton v-model="ipMode" value="localhost" :disabled="serverIpLocked" />
             <span>Localhost (127.0.0.1)</span>
           </label>
           <label class="option-row">
-            <RadioButton v-model="ipMode" value="custom" />
+            <RadioButton v-model="ipMode" value="custom" :disabled="serverIpLocked" />
             <span class="custom-ip-label">Custom:</span>
             <input
               type="text"
               v-model="customIp"
               placeholder="e.g. 192.168.1.100"
-              :disabled="ipMode !== 'custom'"
+              :disabled="serverIpLocked || ipMode !== 'custom'"
               class="ip-text-input"
-              @click="ipMode = 'custom'"
+              @click="!serverIpLocked && (ipMode = 'custom')"
             />
           </label>
+          <span v-if="serverIpLocked" class="freq-locked-label">
+            locked while a server session or laptop recording is active
+          </span>
         </div>
 
         <div class="setting-group" v-if="showDesktopSettings">
-          <span class="setting-group-label"><i class="pi pi-video" />Camera Recording Directory</span>
+          <span class="setting-group-label"><i class="pi pi-download" />Session Download Directory</span>
           <input
             type="text"
-            v-model="cameraRecordingDir"
+            v-model="sessionDownloadDir"
             class="ip-text-input"
-            placeholder="Defaults to your Videos folder"
-            @blur="applyCameraRecordingDir"
-            @keyup.enter="applyCameraRecordingDir"
+            placeholder="Defaults to your Downloads folder"
+            @blur="applySessionDownloadDir"
+            @keyup.enter="applySessionDownloadDir"
           />
         </div>
       </div>
