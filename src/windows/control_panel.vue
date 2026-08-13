@@ -558,12 +558,41 @@ function rowControlNames(row) {
   return [row.key.slice('aux:'.length)]
 }
 
+// name → owning device, so a row can be labelled with whose registration it
+// answers. A second device registering mid-review otherwise adds rows that
+// look identical to the first device's — nothing marks them as new, so an
+// operator scrolled deep into a long valve list has no reason to notice the
+// list grew under them while Confirm stays mysteriously disabled.
+const controlDeviceOf = computed(() => {
+  const map = new Map()
+  for (const dev of devices.value) {
+    for (const ctrl of (dev.controls ?? [])) map.set(ctrl.name, dev.name)
+  }
+  return map
+})
+
+// Attributed to whichever pending device owns the row, preferring queue order
+// so a row touched by more than one device's controls (rare, but the fuzzy
+// P&ID match does not forbid it) lands under the one that has been waiting
+// longest rather than splitting across two sections.
+function deviceGroupFor(row) {
+  const names = rowControlNames(row)
+  for (const dev of pendingDevices.value) {
+    if (names.some((n) => controlDeviceOf.value.get(n) === dev)) return dev
+  }
+  return ''
+}
+
 // A registration prompts for that device's controls; the review chip reopens
-// with whatever was left unreconciled.
+// with whatever was left unreconciled. Only the first case attributes rows to
+// a device — grouping a handful of leftover mismatches of unrelated origin
+// would suggest a relationship between them that is not there.
 const syncRows = computed(() => {
   if (pendingDevices.value.length > 0) {
     const names = pendingControlNames.value
-    return allSyncRows.value.filter((row) => rowControlNames(row).some((n) => names.has(n)))
+    return allSyncRows.value
+      .filter((row) => rowControlNames(row).some((n) => names.has(n)))
+      .map((row) => ({ ...row, group: deviceGroupFor(row) }))
   }
   if (reviewOpen.value) {
     return allSyncRows.value.filter((row) => flagged.value.includes(row.key))

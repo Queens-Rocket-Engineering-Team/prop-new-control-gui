@@ -6,14 +6,16 @@
 // This component renders them and decides nothing except when Confirm is
 // allowed — which is only once every row agrees.
 
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import KeyField from "./key_field.vue";
 
 const props = defineProps({
   isOpen: Boolean,
   /**
-   * [{ key, label, deviceLabel, switchLabel, expected, matched,
+   * [{ key, label, deviceLabel, switchLabel, expected, matched, group,
    *    cells: [{ id, target, action }] }]
+   * `group` is the owning device's name, or '' outside the just-registered
+   * flow (see control_panel.vue) — rows with no meaningful device to group by.
    */
   rows: { type: Array, default: () => [] },
   /** Device names that raised this prompt; empty when reopened for review. */
@@ -23,10 +25,34 @@ const props = defineProps({
 const emit = defineEmits(["confirm", "dismiss"]);
 
 const overlayRef = ref(null);
+const bodyRef = ref(null);
+
+// Declared ahead of the immediate watcher below, which reads and writes both
+// synchronously during setup — before either would exist if declared in their
+// more natural spot near the "device joined mid-review" watcher further down.
+let seenDevices = new Set();
+const justAdded = ref(new Set());
 
 watch(
   () => props.isOpen,
-  (open) => { if (open) nextTick(() => overlayRef.value?.focus()); }
+  (open) => {
+    if (!open) return
+    nextTick(() => overlayRef.value?.focus());
+    // Establishes the baseline for the "device joined mid-review" watcher
+    // below: everything present at open is not a later addition, even if two
+    // registrations landed close enough together to open together.
+    //
+    // immediate: true matters here beyond the usual reason. This component can
+    // mount already open — a device can already be pending the moment the
+    // control panel first renders it — which is a mount, not a false→true
+    // transition. Without immediate the baseline would stay empty through that
+    // case, and the first devices update afterward would misread the device
+    // already on screen as a fresh arrival: wrong banner, and a flash/scroll
+    // aimed at the wrong section.
+    seenDevices = new Set(props.devices);
+    justAdded.value = new Set();
+  },
+  { immediate: true },
 );
 
 const mismatched = computed(() => props.rows.filter((r) => !r.matched));
@@ -37,6 +63,55 @@ const heading = computed(() => {
   if (props.devices.length === 1) return `${props.devices[0]} connected`;
   return `${props.devices.length} devices connected`;
 });
+
+// ── Rows from a device that registered while this was already open ──────────
+// Grouped by device so a second registration's rows read as a distinct,
+// labelled addition rather than blending anonymously into the first device's
+// list — otherwise an operator scrolled deep into a long valve list has no
+// reason to notice the list grew under them while Confirm stays disabled.
+//
+// A header is worth showing only once there is more than one device to tell
+// apart; a lone registration would just repeat the name already in the
+// heading above.
+const groups = computed(() => {
+  const list = [];
+  for (const row of props.rows) {
+    const name = row.group || '';
+    let group = list.find((g) => g.name === name);
+    if (!group) list.push((group = { name, rows: [] }));
+    group.rows.push(row);
+  }
+  return list;
+});
+
+const showGroupLabels = computed(() => groups.value.filter((g) => g.name).length > 1);
+
+let _clearTimer = null;
+
+watch(
+  () => props.devices,
+  (names) => {
+    if (!props.isOpen) return;
+    const added = names.filter((n) => !seenDevices.has(n));
+    seenDevices = new Set(names);
+    if (added.length === 0) return;
+
+    justAdded.value = new Set(added);
+    clearTimeout(_clearTimer);
+    _clearTimer = setTimeout(() => { justAdded.value = new Set(); }, 4000);
+
+    nextTick(() => {
+      const el = bodyRef.value?.querySelector(`[data-sync-group="${CSS.escape(added[0])}"]`);
+      el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  }
+);
+
+onUnmounted(() => clearTimeout(_clearTimer));
+
+const addedRowCount = computed(() =>
+  props.rows.filter((r) => justAdded.value.has(r.group)).length
+);
 </script>
 
 <template>
@@ -59,6 +134,11 @@ const heading = computed(() => {
                 Flip each switch until its position matches the device, then confirm.
                 Switch keys do not command anything while this is open.
               </p>
+              <p v-if="justAdded.size > 0" class="modal-alert">
+                <i class="pi pi-arrow-down" />
+                {{ [...justAdded].join(', ') }} also connected —
+                {{ addedRowCount }} more switch{{ addedRowCount === 1 ? '' : 'es' }} to check.
+              </p>
             </div>
           </div>
           <button
@@ -70,7 +150,7 @@ const heading = computed(() => {
           </button>
         </div>
 
-        <div class="modal-body">
+        <div ref="bodyRef" class="modal-body">
           <div class="sync-row sync-head">
             <span class="sync-name">Control</span>
             <span class="sync-state">Switch</span>
@@ -82,29 +162,40 @@ const heading = computed(() => {
             </span>
           </div>
 
-          <div
-            v-for="row in rows"
-            :key="row.key"
-            class="sync-row"
-            :class="{ matched: row.matched }"
-          >
-            <span class="sync-name" :title="row.label">
-              <i :class="row.matched ? 'pi pi-check-circle' : 'pi pi-circle'" />
-              {{ row.label }}
-            </span>
-            <span class="sync-state" :class="row.matched ? 'state-ok' : 'state-bad'">
-              {{ row.switchLabel }}
-            </span>
-            <span class="sync-state">{{ row.deviceLabel }}</span>
-            <span class="sync-keys">
-              <key-field
-                v-for="cell in row.cells"
-                :key="cell.id"
-                :target="cell.target"
-                :label="`${row.label} — ${cell.action}`"
-              />
-            </span>
-          </div>
+          <template v-for="group in groups" :key="group.name || '__ungrouped__'">
+            <div
+              v-if="showGroupLabels && group.name"
+              class="sync-group-label"
+              :class="{ 'group-new': justAdded.has(group.name) }"
+              :data-sync-group="group.name"
+            >
+              {{ group.name }}
+            </div>
+
+            <div
+              v-for="row in group.rows"
+              :key="row.key"
+              class="sync-row"
+              :class="{ matched: row.matched }"
+            >
+              <span class="sync-name" :title="row.label">
+                <i :class="row.matched ? 'pi pi-check-circle' : 'pi pi-circle'" />
+                {{ row.label }}
+              </span>
+              <span class="sync-state" :class="row.matched ? 'state-ok' : 'state-bad'">
+                {{ row.switchLabel }}
+              </span>
+              <span class="sync-state">{{ row.deviceLabel }}</span>
+              <span class="sync-keys">
+                <key-field
+                  v-for="cell in row.cells"
+                  :key="cell.id"
+                  :target="cell.target"
+                  :label="`${row.label} — ${cell.action}`"
+                />
+              </span>
+            </div>
+          </template>
         </div>
 
         <div class="modal-footer">
@@ -192,6 +283,24 @@ const heading = computed(() => {
   max-width: 46ch;
 }
 
+/* Names the thing that just grew the list, since the list growing is otherwise
+   silent to anyone not looking straight at it. Fades with the row highlight
+   below rather than lingering after the operator has moved on. */
+.modal-alert {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 6px 0 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #f39c12;
+  animation: sync-alert-fade 4s ease-out forwards;
+}
+
+.modal-alert .pi {
+  font-size: 0.7rem;
+}
+
 .modal-close-btn {
   display: flex;
   align-items: center;
@@ -226,6 +335,28 @@ const heading = computed(() => {
   align-items: center;
   gap: 12px;
   padding: 4px 0;
+}
+
+/* Only shown once a second device is in play — see showGroupLabels. Sticky
+   under the column captions so it stays legible while its own rows scroll.
+   The offset is .sync-head's own rendered height — there is no layout API to
+   derive it, so it has to be kept in sync by hand if that row's padding or
+   font-size changes. */
+.sync-group-label {
+  position: sticky;
+  top: 26px;
+  z-index: 1;
+  background: var(--modal-bg);
+  padding: 6px 0 3px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.sync-group-label.group-new {
+  animation: sync-row-flash 4s ease-out;
 }
 
 .sync-head {
@@ -353,5 +484,15 @@ const heading = computed(() => {
 .modal-footer,
 .modal-close-btn {
   transition: var(--theme-transition);
+}
+
+@keyframes sync-row-flash {
+  0%   { background: rgba(243, 156, 18, 0.28); }
+  100% { background: transparent; }
+}
+
+@keyframes sync-alert-fade {
+  0%, 70% { opacity: 1; }
+  100%    { opacity: 0; }
 }
 </style>
