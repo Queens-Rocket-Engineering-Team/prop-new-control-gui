@@ -26,12 +26,24 @@ dirs = "5"
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "handshake"] }
 futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
 tokio = { version = "1.52.3", features = ["rt", "macros", "time", "net", "sync", "fs", "io-util"] }
-reqwest = { version = "0.12", default-features = false, features = ["stream"] }
-
-[dev-dependencies]
-tempfile = "3"
+# Offline map tiles: reads per-launch-site MBTiles (sqlite) for the flight
+# panel. `bundled` compiles SQLite from source so Linux build hosts don't
+# need a system libsqlite3.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# `stream` for the session-zip download; `rustls-tls` for the in-app satellite
+# tile downloader (map_download.rs), which avoids an OpenSSL requirement on
+# Linux build hosts. 0.12 matches the version already locked transitively by tauri.
+# No "http2" feature on purpose: the Esri tile endpoint the downloader hits is
+# HTTP/1.1 only (verified — it rejects an h2 connection), so enabling it would
+# add the h2 dependency and buy nothing.
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
+# RFC3339 timestamps for the map site manifest's fetched_at field.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Match the WebKitGTK binding used by Tauri/Wry. Keep it Linux-only so the
 # native WebKit media configuration below cannot affect Windows or macOS.
 webkit2gtk = { version = "=2.0.1", features = ["v2_38"] }
+
+[dev-dependencies]
+tempfile = "3"

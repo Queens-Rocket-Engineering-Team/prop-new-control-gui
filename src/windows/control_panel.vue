@@ -46,10 +46,31 @@ async function confirmEstop() {
 
 const SVG_URLS = {
   'hot-fire':      '/P&IDs/Hot-Fire-P&ID-26-05-2026.svg',
-  'rocket-launch': '/P&IDs/Rocket-P&ID-01-03-2026.svg',
+  'rocket-launch': '/P&IDs/Rocket-P&ID-06-08-2026-V2.svg',
 }
 
 const svgUrl = computed(() => SVG_URLS[pidConfig.value] ?? SVG_URLS['rocket-launch'])
+
+// Preferred face for cards whose default placement reads badly on a specific
+// P&ID. This only sets the starting side — the overlay layout still relocates
+// a card if that face turns out to be blocked, so a stale hint can't hide a
+// readout. Keyed by P&ID because the same tag sits differently on each drawing.
+const SIDE_HINTS = {
+  'rocket-launch': {
+    'AV-102': 'top',   // directly above its valve
+    'AV-201': 'top',   // the clear band between the two pipe runs
+    'PT-102': 'bottom',
+  },
+}
+
+function sideFor(id, fallback) {
+  return SIDE_HINTS[pidConfig.value]?.[id] ?? fallback
+}
+
+/** Hinted cards are placed first, so neighbours route around them. */
+function isPinned(id) {
+  return SIDE_HINTS[pidConfig.value]?.[id] ? true : null
+}
 
 // ── Dynamic element lists (populated from parsed SVG cells) ──────────────────
 
@@ -103,12 +124,20 @@ function toControlKey(id) {
 // ── Control + sensor indexes (flat maps keyed by normalizeId) ─────────────────
 
 // Flattens all device controls into a Map: normalizeId(name) → control object
-// (with added deviceName for context). Used for fuzzy drawio-ID → server-name matching.
+// (with added deviceName/deviceConnected for context). Used for fuzzy
+// drawio-ID → server-name matching.
+// `deviceConnected` is tri-state on purpose: strictly `false` means the server
+// told us the owning device dropped. An older server that omits `connected`
+// leaves it undefined, which must not read as offline.
 const normalizedControlLookup = computed(() => {
   const map = new Map()
   for (const dev of devices.value) {
     for (const ctrl of (dev.controls ?? [])) {
-      map.set(normalizeId(ctrl.name), { ...ctrl, deviceName: dev.name })
+      map.set(normalizeId(ctrl.name), {
+        ...ctrl,
+        deviceName:      dev.name,
+        deviceConnected: dev.connected,
+      })
     }
   }
   return map
@@ -119,7 +148,7 @@ const controlLookup = computed(() => {
   const map = new Map()
   for (const dev of devices.value) {
     for (const ctrl of (dev.controls ?? [])) {
-      map.set(ctrl.name, ctrl)
+      map.set(ctrl.name, { ...ctrl, deviceConnected: dev.connected })
     }
   }
   return map
@@ -294,9 +323,18 @@ function cancelVariableEditor() {
   openVariableEditor.value = null
 }
 
+// The edit button is disabled once a device drops, but a popover already open
+// when it dropped would otherwise sit there accepting input it can't submit.
+watch(devices, () => {
+  if (openVariableEditor.value && isAuxOffline(openVariableEditor.value)) {
+    openVariableEditor.value = null
+  }
+})
+
 async function submitVariableControl(controlName) {
   const num = Number(variableInput.value)
   if (variableInput.value === '' || Number.isNaN(num)) return
+  if (isAuxOffline(controlName)) { openVariableEditor.value = null; return }
 
   openVariableEditor.value = null
   pending[controlName] = { requested: num }
@@ -309,6 +347,42 @@ async function submitVariableControl(controlName) {
     delete pending[controlName]
     warning[controlName] = { message: String(err), errorCode: null }
   }
+}
+
+// ── Server-reported control status ───────────────────────────────────────────
+// The server publishes two fields per control:
+//   settled         — false while a command is awaiting ACK *or* the device's
+//                     last STATUS report was 'pending' (still actuating).
+//   reported_status — 'confirmed' | 'pending' | 'error' | null (null = no STATUS
+//                     report ever received).
+// While status is 'pending', reported_state is the target being moved toward,
+// not the device's actual state; while it's 'error', reported_state is the last
+// known-good value and must not be shown as current truth.
+
+function isCtrlSettling(ctrl) {
+  return ctrl?.settled === false
+}
+
+function isCtrlErrored(ctrl) {
+  return ctrl?.reported_status === 'error'
+}
+
+// ── Offline (owning device disconnected) ─────────────────────────────────────
+// The server keeps a dropped device's entry so the P&ID can keep showing its
+// last-known control states, but nothing it owns can be commanded until it
+// rejoins — the command would just be rejected. Grey those controls out and
+// lock input rather than letting the operator fire a command that can't land.
+
+function isCtrlOffline(ctrl) {
+  return ctrl?.deviceConnected === false
+}
+
+function isControlOffline(drawioId) {
+  return getMatchingControls(drawioId).some(isCtrlOffline)
+}
+
+function isAuxOffline(controlName) {
+  return isCtrlOffline(controlLookup.value.get(controlName))
 }
 
 // ── Pending / NACK tracking ───────────────────────────────────────────────────
@@ -331,8 +405,12 @@ watch([devices, commandsById], () => {
       const p = pending[ctrl.name]
       if (!p) continue
 
+      // Only clear once the server says the control has settled. While
+      // reported_status is 'pending', reported_state already echoes the value we
+      // requested (it's the target, not the actual state) — clearing on a match
+      // alone would drop the pending indicator mid-actuation.
       const serverState = ctrl.reported_state ?? ctrl.accepted_state
-      if (statesMatch(serverState, p.requested)) {
+      if (!isCtrlSettling(ctrl) && statesMatch(serverState, p.requested)) {
         _clearControl(ctrl.name)
         continue
       }
@@ -359,7 +437,27 @@ watch([serverIp, pidConfig], () => {
   for (const key of Object.keys(warning)) delete warning[key]
 })
 
+// Pending covers both the local optimistic window (command issued, server hasn't
+// echoed anything yet) and the server's own `settled === false`.
 function isControlPending(drawioId) {
+  const ctrls = getMatchingControls(drawioId)
+  for (const ctrl of ctrls) {
+    if (pending[ctrl.name]) return true
+    if (isCtrlSettling(ctrl)) return true
+    if (ctrl.pending_command_id) {
+      const cmd = commandsById.value.get(ctrl.pending_command_id)
+      if (cmd?.state === 'sent') return true
+    }
+  }
+  return false
+}
+
+// Whether to lock the operator out of re-commanding. Deliberately narrower than
+// isControlPending: `settled === false` is server-owned with no client-side
+// escape, so if a device drops mid-actuation it would latch the toggle disabled
+// forever. Only the locally-tracked in-flight command — which self-clears on
+// NACK/timeout — blocks input; `settled` drives the indicator alone.
+function isControlLocked(drawioId) {
   const ctrls = getMatchingControls(drawioId)
   for (const ctrl of ctrls) {
     if (pending[ctrl.name]) return true
@@ -375,7 +473,23 @@ function isControlWarning(drawioId) {
   return getMatchingControls(drawioId).some(ctrl => !!warning[ctrl.name])
 }
 
+function isControlError(drawioId) {
+  return getMatchingControls(drawioId).some(isCtrlErrored)
+}
+
 function isAuxPending(controlName) {
+  if (pending[controlName]) return true
+  const ctrl = controlLookup.value.get(controlName)
+  if (isCtrlSettling(ctrl)) return true
+  if (ctrl?.pending_command_id) {
+    const cmd = commandsById.value.get(ctrl.pending_command_id)
+    if (cmd?.state === 'sent') return true
+  }
+  return false
+}
+
+// See isControlLocked — input lockout deliberately ignores `settled`.
+function isAuxLocked(controlName) {
   if (pending[controlName]) return true
   const ctrl = controlLookup.value.get(controlName)
   if (ctrl?.pending_command_id) {
@@ -389,13 +503,18 @@ function isAuxWarning(controlName) {
   return !!warning[controlName]
 }
 
+function isAuxError(controlName) {
+  return isCtrlErrored(controlLookup.value.get(controlName))
+}
+
 // ── Valve toggle ─────────────────────────────────────────────────────────────
 // Server-authoritative: do NOT mutate displayed state. Show pending while in-flight.
 
 async function onValveToggle(drawioId, newOpenState) {
-  if (!isValveEnabled(drawioId)) return
-  const controls  = getMatchingControls(drawioId)
-  const requested = newOpenState ? 'OPEN' : 'CLOSED'
+  if (!isValveEnabled(drawioId) || isControlOffline(drawioId)) return
+  const controls   = getMatchingControls(drawioId)
+  const requested  = newOpenState ? 'OPEN' : 'CLOSED'
+  const commandArg = newOpenState ? 'OPEN'  : 'CLOSED'
 
   for (const ctrl of controls) {
     pending[ctrl.name] = { requested }
@@ -414,8 +533,10 @@ async function onValveToggle(drawioId, newOpenState) {
 // ── Aux toggle ───────────────────────────────────────────────────────────────
 
 async function onAuxToggle(controlName, newEnergised) {
-  // Relay: energised=true → CLOSED state; energised=false → OPEN
-  const expected = newEnergised ? 'CLOSED' : 'OPEN'
+  if (isAuxOffline(controlName)) return
+  // Relay: energised=true → CLOSE command (CLOSED state); energised=false → OPEN
+  const commandArg = newEnergised ? 'CLOSED' : 'OPEN'
+  const expected   = newEnergised ? 'CLOSED' : 'OPEN'
 
   pending[controlName] = { requested: expected }
   delete warning[controlName]
@@ -722,25 +843,30 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             v-for="ctrl in auxiliaryControls"
             :key="ctrl.key"
             class="aux-row"
+            :class="{ offline: isAuxOffline(ctrl.key) }"
           >
             <span class="aux-label">{{ ctrl.label }}</span>
             <span class="card-badge">{{ ctrl.defaultState }}</span>
             <span
               class="state-indicator"
               :class="
-                isAuxWarning(ctrl.key) ? 'relay-warning' :
+                isAuxOffline(ctrl.key) ? 'relay-offline' :
                 isAuxPending(ctrl.key) ? 'relay-pending' :
+                isAuxError(ctrl.key)   ? 'relay-error' :
+                isAuxWarning(ctrl.key) ? 'relay-warning' :
                 getAuxDisplayed(ctrl.key) ? 'relay-closed' : 'relay-open'
               "
             >
               <span class="state-led" />
-              <span v-if="isAuxPending(ctrl.key)">PENDING…</span>
+              <span v-if="isAuxOffline(ctrl.key)">{{ getAuxDisplayed(ctrl.key) ? 'CLOSED' : 'OPEN' }}</span>
+              <span v-else-if="isAuxPending(ctrl.key)">PENDING…</span>
+              <span v-else-if="isAuxError(ctrl.key)">ERROR</span>
               <span v-else-if="isAuxWarning(ctrl.key)">WARN</span>
               <span v-else>{{ getAuxDisplayed(ctrl.key) ? 'CLOSED' : 'OPEN' }}</span>
             </span>
             <ToggleSwitch
               :modelValue="getAuxDisplayed(ctrl.key)"
-              :disabled="isAuxPending(ctrl.key) || readOnly"
+              :disabled="isAuxOffline(ctrl.key) || isAuxLocked(ctrl.key) || readOnly"
               @update:modelValue="onAuxToggle(ctrl.key, $event)"
               class="aux-toggle"
             />
@@ -754,26 +880,31 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               v-for="ctrl in variableControls"
               :key="ctrl.key"
               class="aux-row variable-row"
+              :class="{ offline: isAuxOffline(ctrl.key) }"
             >
               <span class="aux-label">{{ ctrl.label }}</span>
               <span class="card-badge">{{ ctrl.defaultState }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
               <span
                 class="state-indicator"
                 :class="{
-                  'relay-warning': isAuxWarning(ctrl.key),
-                  'relay-pending': isAuxPending(ctrl.key),
+                  'relay-offline': isAuxOffline(ctrl.key),
+                  'relay-pending': isAuxPending(ctrl.key) && !isAuxOffline(ctrl.key),
+                  'relay-error':   isAuxError(ctrl.key)   && !isAuxPending(ctrl.key) && !isAuxOffline(ctrl.key),
+                  'relay-warning': isAuxWarning(ctrl.key) && !isAuxError(ctrl.key) && !isAuxPending(ctrl.key) && !isAuxOffline(ctrl.key),
                 }"
               >
                 <span class="state-led" />
-                <span v-if="isAuxWarning(ctrl.key)">WARN</span>
+                <span v-if="isAuxOffline(ctrl.key)">{{ getVariableValue(ctrl.key) }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
                 <span v-else-if="isAuxPending(ctrl.key)">PENDING…</span>
+                <span v-else-if="isAuxError(ctrl.key)">ERROR</span>
+                <span v-else-if="isAuxWarning(ctrl.key)">WARN</span>
                 <span v-else>{{ getVariableValue(ctrl.key) }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
               </span>
               <button
                 class="variable-edit-btn"
-                :disabled="isAuxPending(ctrl.key) || readOnly"
+                :disabled="isAuxOffline(ctrl.key) || isAuxLocked(ctrl.key) || readOnly"
                 @click="toggleVariableEditor(ctrl.key)"
-                :title="readOnly ? 'Controls are issued from launch control' : 'Set value'"
+                :title="readOnly ? 'Controls are issued from launch control' : isAuxOffline(ctrl.key) ? 'Device offline' : 'Set value'"
               >
                 <i class="pi pi-pencil" />
               </button>
@@ -817,15 +948,19 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               v-for="dev in kasaDevices"
               :key="dev.host"
               class="aux-row"
+              :class="{ offline: dev.connected === false }"
             >
               <span class="aux-label">{{ dev.alias || dev.host }}</span>
-              <span class="state-indicator" :class="dev.active ? 'relay-closed' : 'relay-open'">
+              <span
+                class="state-indicator"
+                :class="dev.connected === false ? 'relay-offline' : dev.active ? 'relay-closed' : 'relay-open'"
+              >
                 <span class="state-led" />
                 {{ dev.active ? 'ON' : 'OFF' }}
               </span>
               <ToggleSwitch
                 :modelValue="dev.active"
-                :disabled="readOnly"
+                :disabled="dev.connected === false || readOnly"
                 @update:modelValue="setKasaState(dev.host, $event)"
                 class="aux-toggle"
               />
@@ -837,7 +972,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <div
           v-for="id in valves"
           :key="id"
-          :style="{ ...positionBeside(id, 'bottom', -10), marginLeft: '-50px' }"
+          :style="positionBeside(id, sideFor(id, 'bottom'), 8)"
+          :data-pid-cell="id"
+          :data-pid-pinned="isPinned(id)"
           class="pid-overlay"
         >
           <div
@@ -845,20 +982,24 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             :class="{
               open:    getDisplayedOpen(id),
               locked:  !isValveEnabled(id),
-              pending: isControlPending(id),
-              warning: isControlWarning(id),
+              offline: isControlOffline(id),
+              pending: isControlPending(id) && !isControlOffline(id),
+              warning: isControlWarning(id) && !isControlOffline(id),
+              error:   isControlError(id)   && !isControlOffline(id),
             }"
           >
             <div class="card-id">
               {{ id }}
               <span v-if="!isValveEnabled(id)" class="lock-badge">NO CTRL</span>
+              <span v-else-if="isControlOffline(id)" class="offline-badge">OFFLINE</span>
+              <span v-else-if="isControlError(id)" class="err-badge">ERR</span>
               <span v-else-if="isControlWarning(id)" class="warn-badge">WARN</span>
             </div>
             <div class="valve-card-body">
               <div class="valve-toggle-col">
                 <ToggleSwitch
                   :modelValue="getDisplayedOpen(id)"
-                  :disabled="!isValveEnabled(id) || isControlPending(id) || readOnly"
+                  :disabled="!isValveEnabled(id) || isControlOffline(id) || isControlLocked(id) || readOnly"
                   @update:modelValue="onValveToggle(id, $event)"
                 />
               </div>
@@ -869,16 +1010,24 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                 </div>
                 <div class="card-row">
                   <span class="card-detail">State</span>
+                  <!-- Offline wins over every other status: a dropped device's
+                       PENDING/ERROR/WARN is frozen at whatever it was when the
+                       link died, so only the last-known state is worth showing
+                       (greyed, to read as stale rather than current truth). -->
                   <span
                     class="state-indicator"
                     :class="{
-                      open:          getDisplayedOpen(id) && !isControlPending(id) && !isControlWarning(id),
-                      'ctrl-pending': isControlPending(id),
-                      'ctrl-warning': isControlWarning(id),
+                      open:          getDisplayedOpen(id) && !isControlOffline(id) && !isControlPending(id) && !isControlWarning(id) && !isControlError(id),
+                      'ctrl-offline': isControlOffline(id),
+                      'ctrl-pending': isControlPending(id) && !isControlOffline(id),
+                      'ctrl-error':   isControlError(id) && !isControlPending(id) && !isControlOffline(id),
+                      'ctrl-warning': isControlWarning(id) && !isControlError(id) && !isControlOffline(id),
                     }"
                   >
                     <span class="state-led" />
-                    <span v-if="isControlPending(id)">PENDING…</span>
+                    <span v-if="isControlOffline(id)">{{ getDisplayedOpen(id) ? 'OPEN' : 'CLOSED' }}</span>
+                    <span v-else-if="isControlPending(id)">PENDING…</span>
+                    <span v-else-if="isControlError(id)">ERROR</span>
                     <span v-else-if="isControlWarning(id)">WARN</span>
                     <span v-else>{{ getDisplayedOpen(id) ? 'OPEN' : 'CLOSED' }}</span>
                   </span>
@@ -892,7 +1041,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <div
           v-for="sensor in sensors"
           :key="sensor.id"
-          :style="{ ...positionBeside(sensor.id, 'bottom', -15), marginLeft: '-50px' }"
+          :style="positionBeside(sensor.id, sideFor(sensor.id, 'bottom'), 8)"
+          :data-pid-cell="sensor.id"
+          :data-pid-pinned="isPinned(sensor.id)"
           class="pid-overlay"
         >
           <div class="sensor-card" :class="{ locked: !isSensorEnabled(sensor.id) }">
@@ -911,7 +1062,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <div
           v-for="id in mvs"
           :key="id"
-          :style="{ ...positionBeside(id, 'bottom', -10), marginLeft: '-60px' }"
+          :style="positionBeside(id, sideFor(id, 'bottom'), 8)"
+          :data-pid-cell="id"
           class="pid-overlay"
         >
           <div class="info-card">{{ id }}</div>
@@ -921,7 +1073,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <div
           v-for="id in tanks"
           :key="id"
-          :style="{ ...positionBeside(id, 'right', -55)}"
+          :style="positionOf(id)"
+          :data-pid-cell="id"
           class="pid-overlay"
         >
           <div class="info-card">{{ id }}</div>
@@ -931,7 +1084,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <div
           v-for="id in regulators"
           :key="id"
-          :style="{ ...positionBeside(id, 'right', -40), marginTop: '-15px' }"
+          :style="positionBeside(id, sideFor(id, 'right'), 8)"
+          :data-pid-cell="id"
           class="pid-overlay"
         >
           <div class="info-card">{{ id }}</div>
@@ -1138,8 +1292,47 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   box-shadow: 0 0 5px rgba(231, 76, 60, 0.4);
 }
 
+/* ── Error state — device reported a fault applying this control.
+   Distinct from .warning (a transient, self-clearing NACK/timeout): this
+   persists until the server clears reported_status, so it pulses to read as
+   "needs attention" rather than "still working". ── */
+
+.valve-card.error {
+  border-color: #ff2d20;
+  box-shadow: 0 0 6px rgba(255, 45, 32, 0.55);
+  animation: error-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes error-pulse {
+  0%, 100% { box-shadow: 0 0 4px  rgba(255, 45, 32, 0.35); }
+  50%      { box-shadow: 0 0 9px  rgba(255, 45, 32, 0.75); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .valve-card.error { animation: none; }
+}
+
+/* ── Offline state — the owning device disconnected.
+   Greyed like .locked (both mean "not commandable"), but kept a touch more
+   legible and outlined with a dashed border so the last-known state stays
+   readable and the card reads as stale rather than never-wired. ── */
+
+.valve-card.offline {
+  opacity: 0.55;
+  border-style: dashed;
+  border-color: var(--border-color);
+  box-shadow: none;
+  animation: none;
+}
+
+.aux-row.offline {
+  opacity: 0.55;
+}
+
 .lock-badge,
-.warn-badge {
+.warn-badge,
+.err-badge,
+.offline-badge {
   font-size: 6px;
   font-weight: 600;
   letter-spacing: 0.2px;
@@ -1155,10 +1348,24 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   border: 1px solid var(--border-color);
 }
 
+.offline-badge {
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border: 1px dashed var(--text-muted);
+}
+
 .warn-badge {
   color: #e74c3c;
   background: rgba(231, 76, 60, 0.12);
   border: 1px solid #e74c3c;
+}
+
+/* Solid fill (vs the outlined warn badge) so error reads louder at a glance. */
+.err-badge {
+  color: #fff;
+  background: #ff2d20;
+  border: 1px solid #ff2d20;
+  font-weight: 700;
 }
 
 /* ── Valve card ── */
@@ -1233,6 +1440,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 /* Warning = red */
 .state-indicator.ctrl-warning { color: #e74c3c; }
+.state-indicator.ctrl-error   { color: #ff2d20; font-weight: 700; }
+
+/* Offline = grey, unlit — the state shown is last-known, not live */
+.state-indicator.ctrl-offline,
+.state-indicator.relay-offline { color: var(--text-muted); font-weight: 600; }
 
 .state-led {
   width: 5px;
@@ -1241,6 +1453,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   background: var(--border-accent);
   flex-shrink: 0;
   transition: background 0.2s, box-shadow 0.2s;
+}
+
+.state-indicator.ctrl-offline .state-led,
+.state-indicator.relay-offline .state-led {
+  background: var(--text-muted);
+  box-shadow: none;
+  opacity: 0.6;
+  animation: none;
 }
 
 .state-indicator.open .state-led {
@@ -1256,6 +1476,18 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 .state-indicator.ctrl-warning .state-led {
   background: #e74c3c;
   box-shadow: 0 0 4px rgba(231, 76, 60, 0.5);
+}
+
+.state-indicator.ctrl-error .state-led,
+.state-indicator.relay-error .state-led {
+  background: #ff2d20;
+  box-shadow: 0 0 5px rgba(255, 45, 32, 0.8);
+  animation: error-pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .state-indicator.ctrl-error .state-led,
+  .state-indicator.relay-error .state-led { animation: none; }
 }
 
 /* Relay state — closed = energised = green, open = de-energised = red */
@@ -1276,6 +1508,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   background: #f39c12;
   box-shadow: 0 0 4px rgba(243, 156, 18, 0.6);
 }
+
+.state-indicator.relay-error { color: #ff2d20; font-weight: 700; }
 
 .state-indicator.relay-warning { color: #e74c3c; }
 .state-indicator.relay-warning .state-led {

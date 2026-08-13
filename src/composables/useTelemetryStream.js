@@ -2,6 +2,13 @@ import { ref, computed, watch } from 'vue'
 import { useReconnectingSocket } from './useReconnectingSocket.js'
 
 export const TELEMETRY_WINDOW_SEC = 30
+
+// Selectable rolling-window lengths (seconds).  History retention follows the
+// chosen value, so widening the window fills in over time rather than
+// retroactively — points older than the previous window were already pruned.
+// The minimum stays above STATS_WINDOW_SEC so the rate stats keep a usable span.
+export const TELEMETRY_WINDOW_OPTIONS = [10, 30, 60, 120]
+
 export const TELEMETRY_DISPLAY_HZ = 30
 const DISPLAY_SAMPLE_INTERVAL_SEC = 1 / TELEMETRY_DISPLAY_HZ
 const STATS_WINDOW_SEC = 5
@@ -29,12 +36,21 @@ export function normalizeDownsampleAlgorithm(value) {
   return DOWNSAMPLE_ALGORITHMS.includes(value) ? value : DEFAULT_DOWNSAMPLE_ALGORITHM
 }
 
-function pruneHistory(history, cutoffT) {
+// Reactive snapshots are published at most this often (~15 fps). Charts gain
+// nothing from faster updates, and every publish triggers the full chart
+// re-render cascade, so this caps the render load independently of message rate.
+const MIN_PUBLISH_INTERVAL_MS = 66
+
+// Drop leading entries of the sorted array pair below cutoffT (in place).
+function pruneSeries(ts, vs, cutoffT) {
   let firstKept = 0
-  while (firstKept < history.length && history[firstKept].t < cutoffT) {
+  while (firstKept < ts.length && ts[firstKept] < cutoffT) {
     firstKept += 1
   }
-  if (firstKept > 0) history.splice(0, firstKept)
+  if (firstKept > 0) {
+    ts.splice(0, firstKept)
+    vs.splice(0, firstKept)
+  }
 }
 
 function pruneSortedNumbers(values, cutoff) {
@@ -51,16 +67,6 @@ function rateFromSortedTimes(times) {
   return span > 0 ? (times.length - 1) / span : 0
 }
 
-function uniqueSorted(values) {
-  const result = []
-  for (const value of values) {
-    if (result.length === 0 || result[result.length - 1] !== value) {
-      result.push(value)
-    }
-  }
-  return result
-}
-
 function average(values) {
   return values.length > 0
     ? values.reduce((sum, value) => sum + value, 0) / values.length
@@ -71,21 +77,24 @@ function displayBucket(t) {
   return Math.floor(t / DISPLAY_SAMPLE_INTERVAL_SEC)
 }
 
-function mergeDisplayPoint(info, sourcePoint, plotT) {
+// Merge one point into the sensor's parallel-array history, keeping at most one
+// point per 1/30 s client display bucket so test stream rate cannot speed up
+// plots. `plotT` is client receive time — the charts' x axis.
+function mergeDisplayPoint(info, plotT, value) {
   const bucket = displayBucket(plotT)
   if (bucket < info.lastDisplayBucket) return
 
-  const displayPoint = { t: plotT, sourceT: sourcePoint.t, v: sourcePoint.v }
+  const n = info.ts.length
   if (bucket === info.lastDisplayBucket) {
-    const lastIndex = info.history.length - 1
-    const lastPoint = info.history[lastIndex]
-    if (lastPoint && displayBucket(lastPoint.t) === bucket) {
-      info.history[lastIndex] = displayPoint
+    if (n > 0 && displayBucket(info.ts[n - 1]) === bucket) {
+      info.ts[n - 1] = plotT
+      info.vs[n - 1] = value
     }
     return
   }
 
-  info.history.push(displayPoint)
+  info.ts.push(plotT)
+  info.vs.push(value)
   info.lastDisplayBucket = bucket
 }
 
@@ -98,8 +107,16 @@ function mergeDisplayPoint(info, sourcePoint, plotT) {
  * Rust side for CSV recording — see src-tauri/src/telemetry_raw.rs — so the
  * frontend never opens that socket.
  *
- * The sensorData shape keeps the legacy value/unit/history fields and adds
- * windowStart/windowEnd so charts can render the same fixed rolling timeframe.
+ * Incoming batches are applied to a non-reactive store per message (cheap);
+ * the reactive snapshot — which drives chart re-renders — is published at most
+ * once per animation frame and no more often than MIN_PUBLISH_INTERVAL_MS, so
+ * the socket always drains at network speed regardless of render load.
+ *
+ * Each sensorData entry keeps the legacy value/unit fields; history is exposed
+ * as sorted parallel arrays `ts`/`vs` (client receive time / value) shared with
+ * the internal store — treat them as read-only. `lastSourceT` is the
+ * server-side timestamp of the newest reading. windowStart/windowEnd let
+ * charts render the same fixed rolling timeframe.
  *
  * The downsampling algorithm is chosen per connection and fixed at handshake,
  * so changing it requires reconnecting — folding it into the URL computed lets
@@ -107,18 +124,26 @@ function mergeDisplayPoint(info, sourcePoint, plotT) {
  *
  * @param {import('vue').Ref<string>} serverIp
  * @param {import('vue').Ref<string>} [downsampleAlgorithm]
+ * @param {import('vue').Ref<number>} [windowSec] rolling window to retain and
+ *   publish, in seconds; defaults to TELEMETRY_WINDOW_SEC when omitted.
  * @returns {{
- *   sensorData:      import('vue').Ref<Record<string,object>>,
- *   telemetryStats:  import('vue').Ref<Record<string,number>>,
- *   displayStatus:   import('vue').Ref<string>,
- *   streamAlgorithm: import('vue').Ref<string|null>,
- *   clearSensorData: () => void,
+ *   sensorData:          import('vue').Ref<Record<string,object>>,
+ *   telemetryStats:      import('vue').Ref<Record<string,number>>,
+ *   displayStatus:       import('vue').Ref<string>,
+ *   streamAlgorithm:     import('vue').Ref<string|null>,
+ *   clearSensorData:     () => void,
+ *   setUnchartedStreams: (names: Iterable<string>|null) => void,
  *   msSinceLastTelemetry: () => number,
  * }}
  */
-export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_DOWNSAMPLE_ALGORITHM)) {
+export function useTelemetryStream(
+  serverIp,
+  downsampleAlgorithm = ref(DEFAULT_DOWNSAMPLE_ALGORITHM),
+  windowSec = ref(TELEMETRY_WINDOW_SEC),
+) {
   // ── Non-reactive internal store ────────────────────────────────────────────────
-  // _store[sensorName] = { value: number, unit: string, history: {t,v,sourceT}[], lastSourceT: number, lastDisplayBucket: number }
+  // _store[sensorName] = { value, unit, sensorType, ts: number[], vs: number[],
+  //                        lastSourceT: number|null, lastDisplayBucket: number }
   const _store = {}
   let _latestDisplayT = null
   const _statsStore = {
@@ -127,7 +152,13 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
     incomingPointsPerSensorBatch: [],
   }
 
-  // ── Reactive snapshot (published once per display batch) ──────────────────────
+  // Streams nobody is charting right now: latest value/unit/lastSourceT are
+  // still tracked (readouts, flight track), but history retention is skipped.
+  // Re-charting a stream restarts its history from now, matching the existing
+  // "widening the window fills in over time" behavior.
+  const _uncharted = new Set()
+
+  // ── Reactive snapshot ──────────────────────────────────────────────────────────
   const sensorData = ref({})
   const telemetryStats = ref({
     displayBatchHz: 0,
@@ -175,14 +206,22 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
       const cutoffT = latestPlotT - STATS_WINDOW_SEC
 
       for (const info of Object.values(_store)) {
-        const points = info.history
-          .map((point) => point.t)
-          .filter((t) => t >= cutoffT)
+        const ts = info.ts
+        // Sorted ascending: walk back to the first index inside the window.
+        let i0 = ts.length
+        while (i0 > 0 && ts[i0 - 1] >= cutoffT) i0 -= 1
 
-        if (points.length < 2) continue
+        const count = ts.length - i0
+        if (count < 2) continue
 
-        pointRates.push(rateFromSortedTimes(points))
-        timestampRates.push(rateFromSortedTimes(uniqueSorted(points)))
+        const span = ts[ts.length - 1] - ts[i0]
+        pointRates.push(span > 0 ? (count - 1) / span : 0)
+
+        let unique = 1
+        for (let i = i0 + 1; i < ts.length; i += 1) {
+          if (ts[i] !== ts[i - 1]) unique += 1
+        }
+        timestampRates.push(span > 0 && unique >= 2 ? (unique - 1) / span : 0)
       }
     }
 
@@ -226,10 +265,63 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
   // Wall-clock time of the last display batch off the socket. 0 = none yet.
   let _lastMessageAtMs = 0
 
-  // ── Display stream → sensorData ────────────────────────────────────────────────
+  // ── Coalesced snapshot publishing ──────────────────────────────────────────────
+  let _publishScheduled = false
+  let _lastPublishMs = 0
+
+  function publishSnapshot() {
+    if (_latestDisplayT == null) {
+      publishTelemetryStats()
+      return
+    }
+
+    const span = Number.isFinite(windowSec.value) && windowSec.value > 0
+      ? windowSec.value
+      : TELEMETRY_WINDOW_SEC
+    const windowStart = _latestDisplayT - span
+    for (const info of Object.values(_store)) {
+      pruneSeries(info.ts, info.vs, windowStart)
+    }
+
+    // Wrapper objects only — ts/vs are the live store arrays, not copies.
+    const snap = {}
+    for (const [name, info] of Object.entries(_store)) {
+      snap[name] = {
+        value: info.value,
+        unit: info.unit,
+        sensorType: info.sensorType,
+        ts: info.ts,
+        vs: info.vs,
+        lastSourceT: info.lastSourceT,
+        windowStart,
+        windowEnd: _latestDisplayT,
+      }
+    }
+    sensorData.value = snap
+    publishTelemetryStats()
+  }
+
+  function publishNow() {
+    _publishScheduled = false
+    _lastPublishMs = performance.now()
+    publishSnapshot()
+  }
+
+  function schedulePublish() {
+    if (_publishScheduled) return
+    _publishScheduled = true
+    requestAnimationFrame(() => {
+      const waitMs = MIN_PUBLISH_INTERVAL_MS - (performance.now() - _lastPublishMs)
+      if (waitMs > 0) {
+        setTimeout(() => requestAnimationFrame(publishNow), waitMs)
+      } else {
+        publishNow()
+      }
+    })
+  }
+
+  // ── Display stream → store ─────────────────────────────────────────────────────
   // Each message: { type: 'telemetry.display_batch', readings: [{ sensor_name, unit, sensor_type, points: [{t,v}] }] }
-  // The server may include multiple points per reading; charts keep only the latest
-  // point per 1/30 s client display bucket so test stream rate cannot speed up plots.
   const { status: displayStatus } = useReconnectingSocket(displayUrl, {
     onMessage(event) {
       const receivedAt = performance.now() / 1000
@@ -243,8 +335,8 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
       _lastMessageAtMs = Date.now()
 
       let msg = null
-      try { msg = JSON.parse(event.data) } catch { publishTelemetryStats(); return }
-      if (msg?.type !== 'telemetry.display_batch') { publishTelemetryStats(); return }
+      try { msg = JSON.parse(event.data) } catch { schedulePublish(); return }
+      if (msg?.type !== 'telemetry.display_batch') { schedulePublish(); return }
 
       const reportedAlgorithm = typeof msg.algorithm === 'string' ? msg.algorithm : null
       if (streamAlgorithm.value !== reportedAlgorithm) streamAlgorithm.value = reportedAlgorithm
@@ -252,20 +344,37 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
       let batchPointCount = 0
       let batchSensorCount = 0
       for (const reading of (msg.readings ?? [])) {
-        const name   = reading.sensor_name
+        const name = reading.sensor_name
         if (!name) continue
-        const points = (reading.points ?? [])
-          .map(({ t, v }) => ({ t: Number(t), v: Number(v) }))
-          .filter(({ t, v }) => Number.isFinite(t) && Number.isFinite(v))
-          .sort((a, b) => a.t - b.t)
-        if (points.length === 0) continue
 
-        batchPointCount += points.length
+        // Single allocation-free pass: count finite points and track the
+        // newest one. Only the latest point is merged into history anyway.
+        let latestT = -Infinity
+        let latestV = 0
+        let finiteCount = 0
+        for (const p of (reading.points ?? [])) {
+          const t = Number(p?.t)
+          const v = Number(p?.v)
+          if (!Number.isFinite(t) || !Number.isFinite(v)) continue
+          finiteCount += 1
+          if (t >= latestT) { latestT = t; latestV = v }
+        }
+        if (finiteCount === 0) continue
+
+        batchPointCount += finiteCount
         batchSensorCount += 1
 
         let info = _store[name]
         if (!info) {
-          info = { value: 0, unit: reading.unit ?? '', history: [], lastSourceT: -Infinity, lastDisplayBucket: -Infinity }
+          info = {
+            value: 0,
+            unit: reading.unit ?? '',
+            sensorType: reading.sensor_type ?? '',
+            ts: [],
+            vs: [],
+            lastSourceT: null,
+            lastDisplayBucket: -Infinity,
+          }
           _store[name] = info
         }
 
@@ -274,17 +383,24 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
           statsPoints = []
           _statsStore.incomingPointsBySensor.set(name, statsPoints)
         }
-        for (let i = 0; i < points.length; i += 1) {
+        for (let i = 0; i < finiteCount; i += 1) {
           statsPoints.push(receivedAt)
         }
 
-        const latestPoint = points[points.length - 1]
-        if (latestPoint.t >= info.lastSourceT) {
-          info.value = latestPoint.v
-          info.unit  = reading.unit ?? info.unit
-          info.lastSourceT = latestPoint.t
+        // Latest point of the newest batch, taken unconditionally: batches
+        // arrive ordered over one socket, so a monotonic-timestamp guard here
+        // only risks latching the readout forever if a device clock resets or
+        // a single spiked `t` arrives. The charts never guarded this.
+        info.value = latestV
+        info.unit = reading.unit ?? info.unit
+        // Group key (QLCP sensor group) — only present when the server sends it;
+        // useSensorGroups falls back to the device configs from /ws/state.
+        if (reading.sensor_type) info.sensorType = reading.sensor_type
+        info.lastSourceT = latestT
+
+        if (!_uncharted.has(name)) {
+          mergeDisplayPoint(info, receivedAt, latestV)
         }
-        mergeDisplayPoint(info, latestPoint, receivedAt)
 
         _latestDisplayT = _latestDisplayT == null
           ? receivedAt
@@ -298,31 +414,30 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
         })
       }
 
-      if (_latestDisplayT == null) {
-        publishTelemetryStats()
-        return
-      }
-
-      const windowStart = _latestDisplayT - TELEMETRY_WINDOW_SEC
-      for (const info of Object.values(_store)) {
-        pruneHistory(info.history, windowStart)
-      }
-
-      // Publish a snapshot once per batch (bucket-rate, not per sample — cheap)
-      const snap = {}
-      for (const [name, info] of Object.entries(_store)) {
-        snap[name] = {
-          value: info.value,
-          unit: info.unit,
-          history: info.history.slice(),
-          windowStart,
-          windowEnd: _latestDisplayT,
-        }
-      }
-      sensorData.value = snap
-      publishTelemetryStats()
+      schedulePublish()
     },
   })
+
+  /**
+   * Declare which streams have no chart anywhere in the UI right now. Their
+   * history retention is skipped (and any retained history freed); latest
+   * values keep updating. Pass null/empty to chart everything again.
+   */
+  function setUnchartedStreams(names) {
+    const next = new Set(names ?? [])
+    for (const name of next) {
+      if (!_uncharted.has(name)) {
+        const info = _store[name]
+        if (info) {
+          info.ts.length = 0
+          info.vs.length = 0
+          info.lastDisplayBucket = -Infinity
+        }
+      }
+    }
+    _uncharted.clear()
+    for (const name of next) _uncharted.add(name)
+  }
 
   function clearSensorData() {
     for (const k of Object.keys(_store)) delete _store[k]
@@ -348,5 +463,5 @@ export function useTelemetryStream(serverIp, downsampleAlgorithm = ref(DEFAULT_D
     return _lastMessageAtMs === 0 ? Infinity : Date.now() - _lastMessageAtMs
   }
 
-  return { sensorData, telemetryStats, displayStatus, streamAlgorithm, clearSensorData, msSinceLastTelemetry }
+  return { sensorData, telemetryStats, displayStatus, streamAlgorithm, clearSensorData, setUnchartedStreams, msSinceLastTelemetry }
 }

@@ -13,7 +13,8 @@ import {
 import { noteDeviceRegistered, noteDevicesPresent } from "./composables/useSwitchSync.js";
 import { useServerApi, PREVIEW_STREAM_HZ } from "./composables/useServerApi.js";
 import { useStateStream } from "./composables/useStateStream.js";
-import { useTelemetryStream, normalizeDownsampleAlgorithm } from "./composables/useTelemetryStream.js";
+import { useTelemetryStream, normalizeDownsampleAlgorithm, TELEMETRY_WINDOW_SEC, TELEMETRY_WINDOW_OPTIONS } from "./composables/useTelemetryStream.js";
+import { useFlightTrack } from "./composables/useFlightTrack.js";
 import { useLogStream } from "./composables/useLogStream.js";
 import "primeicons/primeicons.css";
 
@@ -65,6 +66,44 @@ const downsampleAlgorithm = ref(
 );
 provide('downsampleAlgorithm', downsampleAlgorithm);
 
+// Flight map: every downloaded site is shown by default, layered by max zoom
+// (nested high-res boxes draw over wide low-res ones). The persisted state is
+// the *disabled* list (manifest `file` strings) so freshly downloaded sites
+// appear without any bookkeeping.
+function loadDisabledSites() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('qret-map-sites-disabled') ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter((f) => typeof f === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+const mapSitesDisabled = ref(loadDisabledSites());
+provide('mapSitesDisabled', mapSitesDisabled);
+
+// Directory holding manifest.json + the .mbtiles files.
+const mapsDir = ref(localStorage.getItem('qret-maps-dir') || '');
+provide('mapsDir', mapsDir);
+
+// Bumped whenever the set of downloaded maps changes on disk (a delete from
+// settings). The flight panel watches it and rebuilds its layers — neither
+// mapsDir nor mapSitesDisabled changes in that case, so there is nothing else
+// for it to notice.
+const mapsVersion = ref(0);
+provide('mapsVersion', mapsVersion);
+
+// A request to point the flight map at a site: { name, bbox, ts }. The ts makes
+// repeat requests for the same site distinct so the panel re-applies them.
+const mapFlyTo = ref(null);
+provide('mapFlyTo', mapFlyTo);
+
+function flyToSite({ name, bbox }) {
+  if (!Array.isArray(bbox)) return;
+  mapFlyTo.value = { name, bbox, ts: Date.now() };
+  window_content.value = FlightPanel; // otherwise the jump happens off-screen
+  settingsOpen.value = false;
+}
+
 const {
   stopStream,
   setStream,
@@ -111,6 +150,98 @@ function startStatusRefresh() {
   }, STATUS_REFRESH_MS);
 }
 
+// ── Stream re-arm on device rejoin ───────────────────────────────────────────
+// STREAM is a broadcast command with no per-device targeting, so a device that
+// rejoins is never told to stream again and its charts stay blank until
+// something re-issues it (which is why a page refresh "fixed" it — the IP watch
+// below re-broadcasts). The idle-preview bootstrap only fires once per
+// connection, so it does not cover a device that joins mid-session; this does.
+//
+// STOP first, then STREAM: a bare STREAM at the already-active rate is a no-op
+// server-side (confirmed on hardware — re-arming without the STOP did nothing),
+// which is why every path that does restore the stream (startTest, stopTest, IP
+// change) stops it first. The cost is a brief gap for every device, so this is
+// deliberately only triggered by a rejoin, not polled.
+//
+// QLCP supports targeted streams — swap this for a per-device command, with no
+// STOP and no gap, if the server ever exposes one.
+
+const STREAM_PREVIEW_HZ = 30;
+const STREAM_REARM_DEBOUNCE_MS = 500;
+let streamRearmTimer = null;
+let streamRearmInFlight = false;
+let streamRearmQueued   = false;
+
+// Derived rather than tracked in its own ref: the recording lifecycle below
+// owns every other setStream() call, so reading the rate back off that same
+// state is what keeps a re-arm from resurrecting a rate the lifecycle has since
+// moved on from. A server session or a laptop backup runs at the test
+// frequency; an otherwise-connected server sits at the idle preview rate.
+// 0 means nothing should be streaming — including for a client that cannot
+// command: re-arming issues STOP+STREAM, a broadcast that would re-rate the
+// whole stand, exactly what the view-only build must never do. Gating here
+// rather than at each call site covers every consumer of the rate, the silence
+// watchdog included.
+//
+// A computed rather than a plain function because the stream watchdog below
+// watches it as a reactive source. The getter is lazy, so the forward
+// references to the lifecycle state declared further down are safe — nothing
+// reads it until well after setup.
+const currentStreamHz = computed(() => {
+  if (!canCommand || !server_ip.value) return 0;
+  if (testActive.value || localRecordingActive.value) return testFrequency.value;
+  return STREAM_PREVIEW_HZ;
+});
+
+function cancelStreamRearm() {
+  if (streamRearmTimer === null) return;
+  clearTimeout(streamRearmTimer);
+  streamRearmTimer = null;
+}
+
+// A request arriving mid-flight is queued rather than dropped: the device that
+// asked for it may have registered *after* the in-flight round already sent its
+// STREAM, in which case that round did nothing for it and discarding the
+// request would leave it silent for good.
+async function rearmStream(reason) {
+  // Skip while a start/stop transition is in flight — it is already issuing its
+  // own STREAM, and racing it would leave the devices at the wrong rate.
+  if (currentStreamHz.value <= 0 || lifecycleBusy.value) return;
+  if (streamRearmInFlight) {
+    streamRearmQueued = true;
+    return;
+  }
+
+  streamRearmInFlight = true;
+  try {
+    do {
+      streamRearmQueued = false;
+      // Re-read each round: a queued request may have arrived after the
+      // lifecycle moved to a different rate.
+      const hz = currentStreamHz.value;
+      if (hz <= 0) break;
+      console.log(`[App] STREAM re-arm (${reason}) → STOP + ${hz} Hz`);
+      await stopStream();
+      await setStream(hz);
+    } while (streamRearmQueued);
+  } catch (err) {
+    console.error(`[App] STREAM re-arm (${reason}) failed:`, err);
+  } finally {
+    streamRearmInFlight = false;
+    streamRearmQueued   = false;
+  }
+}
+
+// Debounced so several devices rejoining together produce one re-arm.
+function scheduleStreamRearm(reason) {
+  if (currentStreamHz.value <= 0) return;
+  cancelStreamRearm();
+  streamRearmTimer = setTimeout(() => {
+    streamRearmTimer = null;
+    rearmStream(reason);
+  }, STREAM_REARM_DEBOUNCE_MS);
+}
+
 // ── State stream (/ws/state → devices, kasa, commands) ──────────────────────
 
 // A device that just joined has never been told to stream, so however far
@@ -122,6 +253,11 @@ function onDeviceRegistered(deviceName) {
   // switches are wherever they were left. The control panel prompts the
   // operator to reconcile the two — see useSwitchSync.js.
   noteDeviceRegistered(deviceName);
+  // STREAM is a broadcast with no per-device targeting, so a device that joins
+  // after the rate was set is never told to stream. No-ops in the view-only
+  // build via currentStreamHz, which reports 0 for a client that cannot
+  // command — priming above is that build's one narrow exception.
+  scheduleStreamRearm('device registered');
 }
 
 const {
@@ -150,6 +286,13 @@ provide('commandsById', commandsById);
 provide('session',      session);
 provide('sessionWarning', sessionWarning);
 provide('stateStreamStatus', stateStatus);
+
+// A device that rejoined while the state socket was down arrives in the resync
+// snapshot rather than as a `device.registered` delta, so re-arm on reconnect
+// too. No-ops before a server IP is set, where the derived rate is still 0.
+watch(stateStatus, (status, previous) => {
+  if (status === 'connected' && previous !== 'connected') scheduleStreamRearm('state resync');
+});
 
 // ── Tare offsets ─────────────────────────────────────────────────────────────
 // { [sensorName]: offset } — owned by the server, mirrored here from /ws/state.
@@ -221,11 +364,144 @@ watch(
 
 // ── Telemetry streams (display→charts; raw→CSV is ingested on the Rust side) ─
 
-const { sensorData, telemetryStats, streamAlgorithm, clearSensorData, msSinceLastTelemetry } =
-  useTelemetryStream(server_ip, downsampleAlgorithm);
+// Rolling window shown on the charts. Owned here rather than in the graph panel
+// because it also drives how much history the stream retains — the panel writes
+// to it through the provided ref.
+const TELEMETRY_WINDOW_KEY = 'qret-telemetry-window-sec';
+
+function loadTelemetryWindow() {
+  const stored = Number(localStorage.getItem(TELEMETRY_WINDOW_KEY));
+  return TELEMETRY_WINDOW_OPTIONS.includes(stored) ? stored : TELEMETRY_WINDOW_SEC;
+}
+
+const telemetryWindowSec = ref(loadTelemetryWindow());
+provide('telemetryWindowSec', telemetryWindowSec);
+watch(telemetryWindowSec, (sec) => localStorage.setItem(TELEMETRY_WINDOW_KEY, String(sec)));
+
+const { sensorData, telemetryStats, streamAlgorithm, clearSensorData, setUnchartedStreams, msSinceLastTelemetry } =
+  useTelemetryStream(server_ip, downsampleAlgorithm, telemetryWindowSec);
 provide('sensorData', sensorData);
 provide('telemetryStats', telemetryStats);
 provide('streamAlgorithm', streamAlgorithm);
+provide('setUnchartedStreams', setUnchartedStreams);
+
+// ── Stream supervision ───────────────────────────────────────────────────────
+// STREAM is broadcast-only — QLCP exposes no per-device targeting (the server's
+// StreamCommand schema carries nothing but frequency_hz) — so a device that is
+// not ready to act on the broadcast when it goes out stays silent indefinitely,
+// and nothing in the protocol reports that it happened.
+//
+// The re-arm above is a single fire-and-forget attempt 500 ms after
+// `device.registered`. That is enough for a device the server already knows,
+// which is ready the moment it re-registers, but not for one connecting for the
+// first time: its registration and its readiness to stream are further apart,
+// the lone broadcast lands in that gap, and the device never streams.
+//
+// So don't trust the re-arm — verify it. A connected device that produces no
+// telemetry gets another re-arm, up to a bounded number of attempts. This also
+// covers devices arriving in a state.snapshot rather than as a delta, which the
+// `device.registered` hook never sees. Verifying costs no commands: a device
+// that is streaming is confirmed on its first check and left alone afterwards.
+
+const STREAM_VERIFY_MS = 2_500;
+const STREAM_VERIFY_MAX_ATTEMPTS = 3;
+
+// deviceName → { verified: boolean, attempts: number, marker: number|null, timer }
+// An entry (verified or not) suppresses re-arming; it is dropped when the device
+// disconnects or streaming stops, so a rejoin is verified afresh.
+const streamWatchdogs = new Map();
+
+function deviceSensorNames(dev) {
+  return (dev?.sensors ?? [])
+    .map((sensor) => String(sensor?.name ?? '').trim())
+    .filter(Boolean);
+}
+
+// Chart-independent liveness marker. The ts/vs history is deliberately not
+// retained for streams nobody is charting (see setUnchartedStreams), so a hidden
+// stream would read as silent; `lastSourceT` — the device's own timestamp on the
+// newest reading — keeps updating either way. It is a device clock, not
+// comparable with any local time, so liveness means "advanced since last look".
+// null = no telemetry has ever arrived for this device.
+function deviceStreamMarker(dev) {
+  let marker = null;
+  for (const name of deviceSensorNames(dev)) {
+    const sourceT = sensorData.value[name]?.lastSourceT;
+    if (typeof sourceT !== 'number') continue;
+    marker = marker === null ? sourceT : Math.max(marker, sourceT);
+  }
+  return marker;
+}
+
+function clearStreamWatchdog(deviceName) {
+  const watchdog = streamWatchdogs.get(deviceName);
+  if (!watchdog) return;
+  if (watchdog.timer !== null) clearTimeout(watchdog.timer);
+  streamWatchdogs.delete(deviceName);
+}
+
+function clearAllStreamWatchdogs() {
+  for (const deviceName of [...streamWatchdogs.keys()]) clearStreamWatchdog(deviceName);
+}
+
+function armStreamWatchdog(deviceName, dev) {
+  if (streamWatchdogs.has(deviceName)) return;
+  const watchdog = {
+    verified: false,
+    attempts: 0,
+    marker:   deviceStreamMarker(dev),
+    timer:    null,
+  };
+  streamWatchdogs.set(deviceName, watchdog);
+
+  function check() {
+    watchdog.timer = null;
+    const current = devices.value.find((d) => d.name === deviceName);
+
+    // Gone, dropped, or nothing is meant to be streaming — stop supervising.
+    if (!current || current.connected === false || currentStreamHz.value <= 0) {
+      clearStreamWatchdog(deviceName);
+      return;
+    }
+
+    const marker = deviceStreamMarker(current);
+    if (marker !== null && marker !== watchdog.marker) {
+      watchdog.verified = true;   // streaming; keep the slot so we stop checking
+      return;
+    }
+
+    if (watchdog.attempts >= STREAM_VERIFY_MAX_ATTEMPTS) {
+      console.warn(
+        `[App] ${deviceName} still silent after ${watchdog.attempts} STREAM re-arms — giving up`
+      );
+      return;
+    }
+
+    watchdog.attempts += 1;
+    watchdog.marker    = marker;
+    rearmStream(`${deviceName} silent (attempt ${watchdog.attempts})`);
+    watchdog.timer = setTimeout(check, STREAM_VERIFY_MS);
+  }
+
+  watchdog.timer = setTimeout(check, STREAM_VERIFY_MS);
+}
+
+watch([devices, currentStreamHz], () => {
+  if (currentStreamHz.value <= 0) {
+    clearAllStreamWatchdogs();   // nothing should be streaming — no silence to detect
+    return;
+  }
+
+  for (const dev of devices.value) {
+    if (dev.connected === false) {
+      clearStreamWatchdog(dev.name);
+      continue;
+    }
+    // Control-only boards publish no telemetry — there is nothing to verify.
+    if (deviceSensorNames(dev).length === 0) continue;
+    armStreamWatchdog(dev.name, dev);
+  }
+});
 
 // ── View-only stream priming ─────────────────────────────────────────────────
 // The view-only build cannot command the stand, but it also cannot show
@@ -337,6 +613,11 @@ async function maybePrimeStream() {
   scheduleNextPrime();
 }
 
+// Unpruned GPS trail for the flight panel (sensorData history only spans the
+// rolling telemetry window; the trail must span the whole flight).
+const flightTrack = useFlightTrack(sensorData, { testActive });
+provide('flightTrack', flightTrack);
+
 // ── Control state bits → Rust (used by the raw-telemetry CSV recorder) ───────
 // The raw /ws/telemetry/raw stream is consumed entirely in Rust and only
 // carries sensor readings, so valve/auxiliary/kasa state bits — derived here
@@ -345,12 +626,30 @@ async function maybePrimeStream() {
 
 function _normalizeId(id) { return id.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() }
 
+// Only log states the device has actually confirmed. The server's
+// reported_status tells us which those are:
+//   'confirmed' — reported_state is the device's real current state → log it.
+//   'pending'   — reported_state is the target being actuated toward, not the
+//                 actual state → unknown, don't log.
+//   'error'     — device faulted; reported_state is a stale last-known-good
+//                 value → unknown, don't log.
+//   null        — no STATUS report ever received; accepted_state is only what
+//                 the server accepted, never device-confirmed → unknown.
+// Controls omitted here are written as an empty cell by the Rust recorder, not
+// as 0 — see flush_pending()/record_batch() in src-tauri/src/lib.rs.
+// A control with no reported_status field at all predates this server contract;
+// fall back to the old behaviour so an older server still records something.
+function isConfirmedState(ctrl) {
+  return ctrl.reported_status === undefined || ctrl.reported_status === 'confirmed';
+}
+
 function pushControlStates() {
   if (!CAPS.recording) return;   // no Rust-side CSV recorder to feed
   const valveStateBits     = {};
   const auxiliaryStateBits = {};
   for (const dev of devices.value) {
     for (const c of (dev.controls ?? [])) {
+      if (!isConfirmedState(c)) continue;
       const st = c.reported_state ?? c.accepted_state;
       if (!st) continue;
       if (_normalizeId(c.name).startsWith('av')) {
@@ -749,6 +1048,9 @@ provide('readOnly', !canCommand);
 watch(server_ip, async (ip) => {
   stopStatusRefresh();
   stopStreamPriming();
+  // A re-arm queued for the previous server would fire against the new one.
+  cancelStreamRearm();
+  clearAllStreamWatchdogs();   // devices belong to the old server
 
   clearSensorData();
   clearLogs();
@@ -819,6 +1121,23 @@ watch(downsampleAlgorithm, (algorithm) => {
   _settingsChannel.postMessage({ type: 'downsampleAlgorithm', value: algorithm });
 });
 
+watch(mapSitesDisabled, (files) => {
+  localStorage.setItem('qret-map-sites-disabled', JSON.stringify(files));
+  _settingsChannel.postMessage({ type: 'mapSitesDisabled', value: [...files] });
+});
+
+// A map was deleted: refresh this window's layers and tell the others, whose
+// own manifests are now stale too.
+function onMapsChanged() {
+  mapsVersion.value++;
+  _settingsChannel.postMessage({ type: 'mapsChanged' });
+}
+
+watch(mapsDir, (dir) => {
+  localStorage.setItem('qret-maps-dir', dir);
+  _settingsChannel.postMessage({ type: 'mapsDir', value: dir });
+});
+
 _settingsChannel.onmessage = (e) => {
   if (e.data.type === 'pidConfig')     pidConfig.value     = e.data.value;
   if (e.data.type === 'testFrequency') testFrequency.value = e.data.value;
@@ -827,7 +1146,45 @@ _settingsChannel.onmessage = (e) => {
   if (e.data.type === 'downsampleAlgorithm') {
     downsampleAlgorithm.value = normalizeDownsampleAlgorithm(e.data.value);
   }
+  if (e.data.type === 'mapSitesDisabled') mapSitesDisabled.value = e.data.value;
+  if (e.data.type === 'mapsDir')       mapsDir.value       = e.data.value;
+  if (e.data.type === 'mapsChanged')   mapsVersion.value++;
   // darkMode messages are handled by settings_modal.vue's own channel instance
+};
+
+// Keep the Rust tile server pointed at the maps directory. The tile scheme
+// opens per-site MBTiles lazily, so no per-site setup call is needed.
+// Idempotent, so multiple windows racing through this watcher is harmless
+// (same rationale as the test-state sync below).
+watch(mapsDir, async (dir) => {
+  try {
+    if (dir) await invoke('set_maps_dir', { newDir: dir });
+  } catch (err) {
+    console.error('[App] maps dir setup failed:', err);
+  }
+}, { immediate: true });
+
+// ── Test state sync across windows via BroadcastChannel ──────────────────────
+// Each window runs its own App.vue instance with its own testActive/testStartTime
+// refs. startTest()/stopTest() perform the actual backend calls (idempotent, so
+// harmless if triggered from more than one window); this channel just keeps every
+// window's Start/Stop Test button and timer in sync with whichever window acted.
+
+const _testChannel = new BroadcastChannel('qret-test-state');
+let _receivingTestBroadcast = false;
+
+watch([testActive, testStartTime], ([active, startTime]) => {
+  if (_receivingTestBroadcast) return;
+  _testChannel.postMessage({ active, startTime });
+});
+
+_testChannel.onmessage = (e) => {
+  const { active, startTime } = e.data;
+  if (testActive.value === active && testStartTime.value === startTime) return;
+  _receivingTestBroadcast = true;
+  testActive.value    = active;
+  testStartTime.value = startTime;
+  _receivingTestBroadcast = false;
 };
 
 // ── Settings ─────────────────────────────────────────────────────────────────
@@ -868,6 +1225,8 @@ onMounted(() => {
 onUnmounted(() => {
   stopStatusRefresh();
   stopStreamPriming();
+  cancelStreamRearm();
+  clearAllStreamWatchdogs();
   _ipChannel.close();
   _settingsChannel.close();
   _localRecorderChannel.close();
@@ -887,8 +1246,9 @@ onUnmounted(() => {
         @resize="onNavResize"
       ></nav-bar>
 
-      <!-- KeepAlive preserves CameraPanel's WebRTC streams across SPA navigation -->
-      <KeepAlive include="CameraPanel">
+      <!-- KeepAlive preserves CameraPanel's WebRTC streams and FlightPanel's
+           map (WebGL context + viewport) across SPA navigation -->
+      <KeepAlive include="CameraPanel,FlightPanel">
         <component :is="window_content" class="swap-container"></component>
       </KeepAlive>
     </div>
@@ -902,11 +1262,17 @@ onUnmounted(() => {
       :test-active="testActive"
       :server-session-active-connected="testActive && stateStatus === 'connected'"
       :local-recording-active="localRecordingActive"
+      :map-sites-disabled="mapSitesDisabled"
+      :maps-dir="mapsDir"
       @close="settingsOpen = false"
       @update-ip="get_ip"
       @update-pid-config="pidConfig = $event"
       @update-test-frequency="testFrequency = $event"
       @update-downsample-algorithm="downsampleAlgorithm = $event"
+      @update-map-sites-disabled="mapSitesDisabled = $event"
+      @update-maps-dir="mapsDir = $event"
+      @fly-to-site="flyToSite"
+      @maps-changed="onMapsChanged"
     ></settings-modal>
 
     <about-modal

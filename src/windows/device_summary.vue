@@ -2,6 +2,7 @@
 import { ref, inject, computed, onUnmounted } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 import { CAPS } from '../lib/platform.js'
+import { groupMeta } from '../composables/useSensorGroups.js'
 
 const devices     = inject('devices',     ref([]))
 const sensorData  = inject('sensorData',  ref({}))
@@ -122,32 +123,21 @@ function getControls(dev) {
     })
 }
 
-// Category display metadata (keyed by sensor.type from the server)
-const CATEGORY_LABELS = {
-  thermocouple:        'Thermocouple',
-  pressure_transducer: 'Pressure Transducer',
-  load_cell:           'Load Cell',
-  current_sensor:      'Current Sensor',
-  resistance_sensor:   'Resistance Sensor',
-}
-
-const CATEGORY_ORDER = {
-  pressure_transducer: 0,
-  thermocouple:        1,
-  load_cell:           2,
-  current_sensor:      3,
-  resistance_sensor:   4,
-}
-
-// Sensors come from dev.sensors[] (array with {id,name,type,unit})
+// Sensors come from dev.sensors[] (array with {id,name,sensor_type,unit}); the
+// sensor_type is the QLCP sensor group — see useSensorGroups.js for the registry.
 function getSensors(dev) {
   return (dev.sensors ?? [])
-    .map(s => ({
-      name:  s.name,
-      type:  CATEGORY_LABELS[s.sensor_type ?? s.type] ?? s.sensor_type ?? s.type ?? '—',
-      unit:  s.unit ?? '',
-      order: CATEGORY_ORDER[s.sensor_type ?? s.type] ?? 99,
-    }))
+    .map(s => {
+      const group = String(s.sensor_type ?? s.type ?? '').trim()
+      const meta  = group ? groupMeta(group) : null
+      return {
+        name:  s.name,
+        type:  meta?.label ?? '—',
+        color: meta?.color ?? 'transparent',
+        unit:  s.unit ?? '',
+        order: meta?.order ?? 99,
+      }
+    })
     .sort((a, b) => {
       const byCategory = a.order - b.order
       return byCategory !== 0 ? byCategory : a.name.localeCompare(b.name)
@@ -257,7 +247,10 @@ function getSensors(dev) {
                 <tbody>
                   <tr v-for="sensor in getSensors(dev)" :key="sensor.name">
                     <td class="name-cell">{{ sensor.name }}</td>
-                    <td>{{ sensor.type }}</td>
+                    <td class="type-cell">
+                      <span class="group-dot" :style="{ background: sensor.color }" />
+                      {{ sensor.type }}
+                    </td>
                     <td class="reading-val" :class="{ 'reading-live': getLiveReading(sensor.name).value !== '—' }">
                       {{ getLiveReading(sensor.name).value }}
                     </td>
@@ -538,6 +531,19 @@ function getSensors(dev) {
   font-weight: 600;
   font-family: monospace;
   color: var(--text-primary);
+}
+
+.type-cell {
+  white-space: nowrap;
+}
+
+.group-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: middle;
 }
 
 .mono {
