@@ -114,21 +114,22 @@ export async function setServerSessionLock(sessionId) {
 }
 
 // ── Session downloads ────────────────────────────────────────────────────────
+// The destination is no longer configurable: archives land in a fixed folder
+// under the app's local data directory, and the panel offers a button to reveal
+// it instead of a path field to mistype.
 
-export async function fetchSessionDownloadDir() {
-  if (!CAPS.fileSave) return ""
-  return call("fetch_session_download_dir")
-}
-
-export async function setSessionDownloadDir(newDir) {
-  if (!CAPS.fileSave) return
-  return call("set_session_download_dir", { newDir })
-}
-
-// Streams the session ZIP to the configured directory on disk. No web fallback
-// here on purpose: sessions_panel.vue already branches to a plain browser
-// download, which is the right answer in a browser and needs no bridge.
+// Streams the session ZIP to that folder. No web fallback here on purpose:
+// sessions_panel.vue already branches to a plain browser download, which is the
+// right answer in a browser and needs no bridge.
 export async function downloadSessionZip(sessionId) {
   if (!CAPS.fileSave) throw new UnsupportedOnWebError("Saving a session archive")
   return call("download_session_zip", { sessionId })
+}
+
+// Reveals that folder in the system file manager. A browser cannot open one —
+// and has no such folder to open, since its downloads go wherever the browser
+// puts them — so the button is hidden on web rather than failing on click.
+export async function openSessionsDir() {
+  if (!CAPS.fileSave) throw new UnsupportedOnWebError("Opening the sessions folder")
+  return call("open_sessions_dir")
 }

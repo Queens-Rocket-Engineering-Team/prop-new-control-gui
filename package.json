@@ -10,7 +10,8 @@
     "build:web": "vite build --mode web",
     "preview": "vite preview",
     "tauri": "tauri",
-    "icon": "tauri icon app-icon.svg"
+    "icon": "tauri icon app-icon.svg",
+    "flatpak:prepare": "./flatpak/generate-flatpak-sources.sh"
   },
   "dependencies": {
     "@fontsource/inter": "^5.2.8",

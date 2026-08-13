@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=HELM
+Exec=HELM
+Icon=org.qret.helm
+Type=Application
+Categories=Utility;Development;
+Terminal=false
+StartupNotify=true
+StartupWMClass=HELM
