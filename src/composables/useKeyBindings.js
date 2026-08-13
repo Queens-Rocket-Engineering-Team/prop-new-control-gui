@@ -47,21 +47,25 @@ const ACTIONS = {
   kasa:  ['on', 'off'],
 }
 
-export function targetId(target) {
-  const type = target?.type
-  if (!type) return ''
-  const actions = ACTIONS[type]
-  if (actions) {
-    if (!actions.includes(target.action)) return ''   // stateless binding — reject
-    switch (type) {
-      case 'valve': return `valve:${target.id}:${target.action}`
-      case 'aux':   return `aux:${target.key}:${target.action}`
-      case 'kasa':  return `kasa:${target.host}:${target.action}`
-    }
+/** The control a target belongs to, ignoring which state it commands. */
+export function controlKey(target) {
+  switch (target?.type) {
+    case 'valve':    return `valve:${target.id}`
+    case 'aux':      return `aux:${target.key}`
+    case 'kasa':     return `kasa:${target.host}`
+    case 'variable': return `variable:${target.key}`
+    case 'estop':    return 'estop'
+    default:         return ''
   }
-  if (type === 'variable') return `variable:${target.key}`
-  if (type === 'estop')    return 'estop'
-  return ''
+}
+
+export function targetId(target) {
+  const control = controlKey(target)
+  if (!control) return ''
+  const actions = ACTIONS[target.type]
+  if (!actions) return control                          // stateless by design
+  if (!actions.includes(target.action)) return ''       // actuator without a state — reject
+  return `${control}:${target.action}`
 }
 
 // Fallback display name and action caption, used for a stored binding whose
@@ -184,25 +188,44 @@ function resolve(combo) {
 }
 
 /**
- * Rows for the settings editor: every registered control, followed by any
- * binding whose control is not currently registered — otherwise a shortcut left
- * over from another P&ID would keep firing with no row to clear it from.
+ * Rows for the settings editor — one per *control*, with a cell per state it
+ * can be commanded into. Two keys per actuator would otherwise mean two rows
+ * repeating the same name; collapsing them here lets the editor lay out a grid
+ * with the state as a column heading, and keeps that shaping out of the modal.
+ *
+ * Registered controls come first, then any binding whose control is not
+ * currently registered — otherwise a shortcut left over from another P&ID would
+ * keep firing with no row to clear it from.
  */
-const editableTargets = computed(() => {
-  const rows = targets.value.map((t) => ({ ...t, id: targetId(t.target) }))
-  const known = new Set(rows.map((r) => r.id))
+const editableControls = computed(() => {
+  const rows = []
+  const byControl = new Map()
+
+  const rowFor = (target, label, group) => {
+    const id = controlKey(target)
+    let row = byControl.get(id)
+    if (!row) {
+      row = { id, label, group, cells: [] }
+      byControl.set(id, row)
+      rows.push(row)
+    }
+    return row
+  }
+
+  for (const t of targets.value) {
+    const row = rowFor(t.target, t.label, t.group)
+    const id = targetId(t.target)
+    row.cells.push({ id, target: t.target, action: t.action, combo: keyForTarget.value[id] ?? '' })
+  }
+
   for (const target of Object.values(bindings.value)) {
     const id = targetId(target)
-    if (!id || known.has(id)) continue
-    known.add(id)
-    rows.push({
-      target,
-      id,
-      label:  derivedLabel(target),
-      action: derivedAction(target),
-      group:  'Unavailable',
-    })
+    if (!id) continue
+    const row = rowFor(target, derivedLabel(target), 'Unavailable')
+    if (row.cells.some((c) => c.id === id)) continue
+    row.cells.push({ id, target, action: derivedAction(target), combo: keyForTarget.value[id] ?? '' })
   }
+
   return rows
 })
 
@@ -232,7 +255,7 @@ export function useKeyBindings() {
   return {
     bindings,
     keyForTarget,
-    editableTargets,
+    editableControls,
     registerTargets,
     setBinding,
     clearBinding,

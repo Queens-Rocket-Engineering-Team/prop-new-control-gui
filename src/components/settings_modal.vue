@@ -134,37 +134,41 @@ watch(customIp, () => {
 // time anyone opens this modal. All binding logic lives in the composable — this
 // is just the editor.
 
-const { editableTargets, keyForTarget, setBinding, clearBinding } = useKeyBindings();
+const { editableControls, setBinding, clearBinding } = useKeyBindings();
 
 // Sectioned in registration order so the editor reads like the control panel.
+// Each section carries its own column captions — OPEN/CLOSE for valves, ON/OFF
+// for plugs — taken from its widest row, so the states are named once at the
+// top instead of on every line. Sections whose controls have a single binding
+// (variable controls, E-STOP) get no caption row: there is no column to
+// distinguish.
 const bindingGroups = computed(() => {
   const groups = [];
-  for (const row of editableTargets.value) {
+  for (const row of editableControls.value) {
     const name = row.group || 'Controls';
     let group = groups.find((g) => g.name === name);
-    if (!group) groups.push((group = { name, rows: [] }));
+    if (!group) groups.push((group = { name, rows: [], columns: [] }));
     group.rows.push(row);
+    if (row.cells.length > group.columns.length) {
+      group.columns = row.cells.map((c) => c.action);
+    }
   }
   return groups;
 });
-
-function comboFor(row) {
-  return keyForTarget.value[row.id] ?? '';
-}
 
 // The input is readonly and its keydowns are captured, not typed: whatever
 // combo is pressed becomes the binding. Backspace/delete clears it instead.
 // Tab and escape are left alone so the modal can still be navigated and
 // dismissed while a row has focus; setBinding rejects the rest of the reserved
 // keys itself.
-function captureKey(row, event) {
+function captureKey(cell, event) {
   if (event.key === 'Tab' || event.key === 'Escape') return;
   event.preventDefault();
   if (event.key === 'Backspace' || event.key === 'Delete') {
-    clearBinding(row.target);
+    clearBinding(cell.target);
     return;
   }
-  setBinding(row.target, buildKeyCombo(event));
+  setBinding(cell.target, buildKeyCombo(event));
 }
 </script>
 
@@ -235,25 +239,23 @@ function captureKey(row, event) {
           <div v-else class="binding-list">
             <template v-for="group in bindingGroups" :key="group.name">
               <div class="binding-group-label">{{ group.name }}</div>
-              <div v-for="row in group.rows" :key="row.id" class="option-row binding-row">
-                <span class="binding-label">{{ row.label }}</span>
-                <span v-if="row.action" class="binding-action">{{ row.action }}</span>
+              <div v-if="group.columns.length > 1" class="binding-row binding-head">
+                <span class="binding-label" />
+                <span v-for="col in group.columns" :key="col" class="binding-col">{{ col }}</span>
+              </div>
+              <div v-for="row in group.rows" :key="row.id" class="binding-row">
+                <span class="binding-label" :title="row.label">{{ row.label }}</span>
                 <input
+                  v-for="cell in row.cells"
+                  :key="cell.id"
                   type="text"
                   readonly
                   class="ip-text-input binding-input"
-                  :value="comboFor(row)"
-                  placeholder="unbound"
-                  @keydown="captureKey(row, $event)"
+                  :class="{ bound: cell.combo }"
+                  :value="cell.combo"
+                  :title="`${row.label} — ${cell.action}`"
+                  @keydown="captureKey(cell, $event)"
                 />
-                <button
-                  class="binding-clear-btn"
-                  title="Clear"
-                  :disabled="!comboFor(row)"
-                  @click="clearBinding(row.target)"
-                >
-                  <i class="pi pi-times" />
-                </button>
               </div>
             </template>
           </div>
@@ -515,17 +517,18 @@ label.option-row:hover {
   margin-top: 0;
 }
 
+/* One row per control, one field per state — the state is named once in the
+   caption row above rather than on every line. */
 .binding-row {
+  display: flex;
+  align-items: center;
   gap: 6px;
-  cursor: default;
-}
-
-.binding-row:hover {
-  background: none;
+  padding: 2px 0;
 }
 
 .binding-label {
   flex: 1;
+  min-width: 0;
   font-size: 0.85rem;
   color: var(--text-primary);
   overflow: hidden;
@@ -533,51 +536,33 @@ label.option-row:hover {
   white-space: nowrap;
 }
 
-/* The state this key commands. Fixed-width so the key fields line up down the
-   column and an unbound half of a pair is obvious at a glance. */
-.binding-action {
+.binding-head {
+  padding-bottom: 1px;
+}
+
+.binding-col {
   flex: none;
-  width: 52px;
+  width: 78px;
   font-size: 0.62rem;
   font-weight: 700;
   letter-spacing: 0.05em;
   color: var(--text-muted);
-  text-align: right;
+  text-align: center;
 }
 
 .binding-input {
   flex: none;
-  width: 96px;
+  width: 78px;
   text-align: center;
   cursor: pointer;
   text-transform: lowercase;
 }
 
-.binding-clear-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  flex: none;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  color: var(--text-secondary);
-  font-size: 0.7rem;
-  cursor: pointer;
-  padding: 0;
-}
-
-.binding-clear-btn:hover:not(:disabled) {
-  color: var(--text-primary);
-  border-color: var(--border-color);
-  background: var(--bg-secondary);
-}
-
-.binding-clear-btn:disabled {
-  opacity: 0.25;
-  cursor: default;
+/* An unbound field is legible but recessive, so a half-bound pair reads as a
+   gap in the column rather than as two equal-looking fields. */
+.binding-input:not(.bound) {
+  color: var(--text-muted);
+  border-style: dashed;
 }
 
 .binding-hint,
