@@ -5,23 +5,32 @@ import { useKeyBindings } from "../composables/useKeyBindings.js";
 import KeybindsModal from "./keybinds_modal.vue";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
+import { DEFAULT_DOWNSAMPLE_ALGORITHM } from '../composables/useTelemetryStream.js';
 
 const props = defineProps({
   isOpen:        Boolean,
   currentIp:     String,
   pidConfig:     { type: String,  default: 'rocket-launch' },
   testFrequency: { type: Number,  default: 190 },
+  downsampleAlgorithm: { type: String, default: DEFAULT_DOWNSAMPLE_ALGORITHM },
   testActive:    { type: Boolean, default: false },
   serverSessionActiveConnected: { type: Boolean, default: false },
   localRecordingActive: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["close", "update-ip", "update-pid-config", "update-test-frequency"]);
+const emit = defineEmits([
+  "close",
+  "update-ip",
+  "update-pid-config",
+  "update-test-frequency",
+  "update-downsample-algorithm",
+]);
 
 const ipMode = ref("none");
 const customIp = ref("");
 const localPidConfig = ref("rocket-launch");
 const localTestFreq = ref(190);
+const localDownsample = ref(DEFAULT_DOWNSAMPLE_ALGORITHM);
 const overlayRef = ref(null);
 const serverIpLocked = computed(
   () => props.serverSessionActiveConnected || props.localRecordingActive,
@@ -84,6 +93,7 @@ watch(
       }
       localPidConfig.value = props.pidConfig || "rocket-launch";
       localTestFreq.value  = props.testFrequency || 190;
+      localDownsample.value = props.downsampleAlgorithm || DEFAULT_DOWNSAMPLE_ALGORITHM;
     }
   }
 );
@@ -95,6 +105,13 @@ watch(localPidConfig, (cfg) => {
 watch(localTestFreq, (hz) => {
   const n = Math.max(1, Math.round(Number(hz)))
   if (isFinite(n) && n !== props.testFrequency) emit("update-test-frequency", n)
+});
+
+// Reopening the modal reseeds localDownsample from the prop, which would echo
+// the value straight back — guard so only real operator changes reconnect the
+// telemetry socket.
+watch(localDownsample, (algorithm) => {
+  if (algorithm !== props.downsampleAlgorithm) emit("update-downsample-algorithm", algorithm)
 });
 
 function isValidIp(ip) {
@@ -195,6 +212,25 @@ const boundCount = computed(() => Object.keys(bindings.value).length);
             <span v-if="props.testActive" class="freq-locked-label">locked during test</span>
           </div>
         </div>
+        <!-- Not gated on readOnly: which downsampler the server runs for *this*
+             client's display socket is a per-client view preference, like the
+             P&ID picker above, and changes nothing about the stand. -->
+        <div class="setting-group">
+          <span class="setting-group-label"><i class="pi pi-chart-line" />Graph Downsampling</span>
+          <label class="option-row" for="ds-m4">
+            <RadioButton v-model="localDownsample" value="m4" inputId="ds-m4" />
+            <span>Peak-preserving (M4)</span>
+          </label>
+          <label class="option-row" for="ds-decimation">
+            <RadioButton v-model="localDownsample" value="decimation" inputId="ds-decimation" />
+            <span>Evenly spaced (decimation)</span>
+          </label>
+          <span class="setting-hint">
+            M4 keeps spikes; decimation looks smoother but can miss brief transients.
+            Changing this reconnects the telemetry stream.
+          </span>
+        </div>
+
         <!-- Hidden in the pad build for the same reason as the frequency above:
              that client cannot command the stand, so a shortcut for doing so
              would be a control that looks live and does nothing. -->
@@ -449,6 +485,12 @@ label.option-row:hover {
   color: var(--text-muted);
   font-style: italic;
   margin-left: 4px;
+}
+
+.setting-hint {
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: var(--text-muted);
 }
 
 /* Keybinding editor */
