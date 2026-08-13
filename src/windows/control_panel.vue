@@ -3,6 +3,7 @@ import { ref, inject, computed, reactive, watch } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 import PidDiagram from '../components/PidDiagram.vue'
 import { useServerApi } from '../composables/useServerApi.js'
+import { CAPS } from '../lib/platform.js'
 
 const serverIp     = inject('serverIp',     ref(''))
 const devices      = inject('devices',      ref([]))
@@ -14,6 +15,11 @@ const setKasaState = inject('setKasaState', () => {})
 const requestStatusSnapshot = inject('requestStatusSnapshot', () => Promise.resolve())
 
 const { setControl, sendEstop } = useServerApi(serverIp)
+
+// The view-only build renders live state but cannot act on it. Controls are
+// disabled rather than hidden so the pad still sees what exists and what it is
+// doing — a control that looks live and silently fails is worse than a dead one.
+const readOnly = !CAPS.commands
 
 // ── Emergency stop ───────────────────────────────────────────────────────────
 
@@ -454,7 +460,7 @@ async function onAuxToggle(controlName, newEnergised) {
             </span>
             <ToggleSwitch
               :modelValue="getAuxDisplayed(ctrl.key)"
-              :disabled="isAuxPending(ctrl.key)"
+              :disabled="isAuxPending(ctrl.key) || readOnly"
               @update:modelValue="onAuxToggle(ctrl.key, $event)"
               class="aux-toggle"
             />
@@ -485,9 +491,9 @@ async function onAuxToggle(controlName, newEnergised) {
               </span>
               <button
                 class="variable-edit-btn"
-                :disabled="isAuxPending(ctrl.key)"
+                :disabled="isAuxPending(ctrl.key) || readOnly"
                 @click="toggleVariableEditor(ctrl.key)"
-                title="Set value"
+                :title="readOnly ? 'Controls are issued from launch control' : 'Set value'"
               >
                 <i class="pi pi-pencil" />
               </button>
@@ -539,6 +545,7 @@ async function onAuxToggle(controlName, newEnergised) {
               </span>
               <ToggleSwitch
                 :modelValue="dev.active"
+                :disabled="readOnly"
                 @update:modelValue="setKasaState(dev.host, $event)"
                 class="aux-toggle"
               />
@@ -571,7 +578,7 @@ async function onAuxToggle(controlName, newEnergised) {
               <div class="valve-toggle-col">
                 <ToggleSwitch
                   :modelValue="getDisplayedOpen(id)"
-                  :disabled="!isValveEnabled(id) || isControlPending(id)"
+                  :disabled="!isValveEnabled(id) || isControlPending(id) || readOnly"
                   @update:modelValue="onValveToggle(id, $event)"
                 />
               </div>
@@ -654,7 +661,7 @@ async function onAuxToggle(controlName, newEnergised) {
     </PidDiagram>
 
     <!-- ── E-STOP button (fixed top-right) ── -->
-    <button class="estop-btn" @click="showEstopConfirm = true">E-STOP</button>
+    <button v-if="!readOnly" class="estop-btn" @click="showEstopConfirm = true">E-STOP</button>
 
     <!-- ── E-STOP confirmation dialog ── -->
     <Teleport to="body">
@@ -693,6 +700,36 @@ async function onAuxToggle(controlName, newEnergised) {
 }
 
 /* ── Popup card shared base ── */
+
+/* Overlay cards are sized in fixed px while the P&ID itself scales to fit its
+   container, so on a tablet they eat a far larger share of the diagram than they
+   do on a desktop monitor. One variable drives every card type; 1 leaves desktop
+   untouched.
+   `zoom` — not `transform: scale()` — is what shrinks them: zoom changes a card's
+   *used layout size*, so the collision pass in usePidOverlay measures and reserves
+   the smaller box. A transform is visual only, and the solver would keep spacing
+   cards as if they were still full size. It has to stay on the card rather than on
+   .pid-overlay: the wrapper carries JS-computed left/top in px, which zoom would
+   scale along with everything else and throw the anchoring off. */
+#control-panel {
+  --pid-card-scale: 1;
+}
+
+/* iPad Pro 12.9" landscape (1366) and most laptops below it. */
+@media (max-width: 1400px) {
+  #control-panel { --pid-card-scale: 0.85; }
+}
+
+/* iPad 10.2"/11" landscape (1024–1194) and anything narrower. */
+@media (max-width: 1200px) {
+  #control-panel { --pid-card-scale: 0.72; }
+}
+
+.valve-card,
+.sensor-card,
+.info-card {
+  zoom: var(--pid-card-scale);
+}
 
 .valve-card,
 .sensor-card {
@@ -1147,6 +1184,27 @@ async function onAuxToggle(controlName, newEnergised) {
 .variable-cancel-btn:hover {
   background: var(--bg-surface);
   color: var(--text-primary);
+}
+
+/* ── View-only banner (web build; sits where E-STOP does on desktop) ── */
+
+.view-only-banner {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  user-select: none;
 }
 
 /* ── E-STOP button ── */

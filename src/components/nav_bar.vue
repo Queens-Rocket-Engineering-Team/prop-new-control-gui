@@ -1,7 +1,7 @@
 <script setup>
-import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
-import Button from 'primevue/button'
-import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { ref, computed, watch, inject, onMounted, onUnmounted } from "vue";
+import Button from "primevue/button";
+import { CAPS, availablePanels, isWeb } from "../lib/platform.js";
 
 import logoUrl from '../../app-icon.svg'
 import { normalizeSessionComponents } from '../utils/session.js'
@@ -15,37 +15,137 @@ import FlightPanel from '../windows/flight_panel.vue'
 import DeviceSummaryPanel from '../windows/device_summary.vue'
 import SessionsPanel from '../windows/sessions_panel.vue'
 
-const emit = defineEmits(['navigate', 'open-settings', 'open-about', 'resize'])
+// Which panels this build exposes, in nav order. Driven by platform.js so
+// re-enabling a panel for the pad is a one-line change there.
+const PANELS = {
+  control:  { label: "Control",     component: ControlPanel },
+  graph:    { label: "Data",        component: GraphPanel },
+  camera:   { label: "Camera View", component: CameraPanel },
+  sessions: { label: "Sessions",    component: SessionsPanel },
+  devices:  { label: "Devices",     component: DeviceSummaryPanel },
+  debug:    { label: "Debug",       component: DebugPanel },
+  flight:   { label: "Flight",      component: FlightPanel },
+};
 
-const COLLAPSE_THRESHOLD = 130
-const MIN_WIDTH = 52
-const DEFAULT_WIDTH = 180
+const navPanels = availablePanels().map((key) => ({ key, ...PANELS[key] }));
 
-const navbarWidth = ref(DEFAULT_WIDTH)
-const isCollapsed = ref(false)
+const canCommand    = CAPS.commands;
+const canAddWindows = CAPS.nativeWindows;
 
-watch(navbarWidth, (width) => emit('resize', width))
-onMounted(() => emit('resize', navbarWidth.value))
+const emit = defineEmits(["navigate", "open-settings", "open-about", "resize"]);
+
+// ── Responsive sizing ───────────────────────────────────────────────────────
+//
+// A fixed 180px sidebar is fine on a monitor and ruinous on a phone, where it
+// eats half the viewport before the panel gets a pixel. Three tiers:
+//
+//   desktop — 180px, in flow, drag-resizable (unchanged).
+//   tablet  — 140px, in flow. Enough for the labels, less stolen from the P&ID.
+//   phone   — starts as an icon rail; expanding floats it *over* the panel as a
+//             drawer rather than squeezing it, so the content keeps full width.
+//
+// Breakpoints are matchMedia rather than CSS-only because the width has to be
+// reported up to App.vue, which owns the grid column.
+
+// The tablet/phone widths are tighter than a naive scale-down because the type
+// shrinks too (see --nav-scale in the styles) — the same labels fit in less.
+const COLLAPSE_THRESHOLD = 100;  // below TABLET_WIDTH, so a small drag can't snap it shut
+const MIN_WIDTH          = 52;   // desktop/tablet icon rail
+const PHONE_RAIL         = 56;   // clears the 34px tap-target floor plus padding
+const DEFAULT_WIDTH      = 180;
+const TABLET_WIDTH       = 128;
+const DRAWER_WIDTH       = 190;
+
+const PHONE_QUERY  = "(max-width: 700px)";
+const TABLET_QUERY = "(max-width: 1200px)";
+
+/**
+ * Reactive matchMedia, torn down with the component.
+ *
+ * Also re-reads on window resize: the MediaQueryList's `change` event is not
+ * dependable in every embedding (an iframe resized by attribute updates
+ * `mql.matches` without ever dispatching `change`), and a nav stuck in the
+ * wrong tier after a rotation is worse than one redundant read.
+ */
+function useMedia(query) {
+  const mql     = window.matchMedia(query);
+  const matches = ref(mql.matches);
+  const sync    = () => { matches.value = mql.matches; };
+  mql.addEventListener("change", sync);
+  window.addEventListener("resize", sync);
+  onUnmounted(() => {
+    mql.removeEventListener("change", sync);
+    window.removeEventListener("resize", sync);
+  });
+  return matches;
+}
+
+const isPhone  = useMedia(PHONE_QUERY);
+const isTablet = useMedia(TABLET_QUERY);
+
+const collapsedWidth = () => (isPhone.value ? PHONE_RAIL : MIN_WIDTH);
+const expandedWidth  = () => {
+  if (isPhone.value)  return DRAWER_WIDTH;
+  if (isTablet.value) return TABLET_WIDTH;
+  return DEFAULT_WIDTH;
+};
+
+const navbarWidth = ref(0);
+const isCollapsed = ref(false);
+
+function applyDefaults() {
+  isCollapsed.value = isPhone.value;
+  navbarWidth.value = isPhone.value ? collapsedWidth() : expandedWidth();
+}
+applyDefaults();
+
+function collapse() {
+  isCollapsed.value = true;
+  navbarWidth.value = collapsedWidth();
+}
+
+// What App.vue reserves in the grid. On a phone the open drawer is positioned
+// over the panel, so the column stays at the rail — widening it would defeat
+// the point of the drawer.
+const gridWidth = computed(() =>
+  isPhone.value ? collapsedWidth() : navbarWidth.value
+);
+
+watch(gridWidth, (w) => emit("resize", w));
+onMounted(() => emit("resize", gridWidth.value));
+
+// Rotating a tablet or resizing a browser window can cross a tier; re-derive
+// rather than stranding a 210px drawer in a desktop layout.
+watch([isPhone, isTablet], applyDefaults);
+
+// ── Resize drag ─────────────────────────────────────────────────────────────
+//
+// Pointer events, not mouse events, so the handle also works under touch and
+// stylus on a tablet. It is hidden entirely on phones, where the drawer toggle
+// is the only sensible control.
 
 let isResizing = false
 let resizeStartX = 0
 let resizeStartWidth = 0
 
-function onResizeStart(event) {
-  isResizing = true
-  resizeStartX = event.clientX
-  resizeStartWidth = navbarWidth.value
-  document.addEventListener('mousemove', onResizeMove)
-  document.addEventListener('mouseup', onResizeEnd)
-  event.preventDefault()
+function onResizeStart(e) {
+  isResizing      = true;
+  resizeStartX    = e.clientX;
+  resizeStartWidth = navbarWidth.value;
+  e.currentTarget.setPointerCapture?.(e.pointerId);
+  document.addEventListener("pointermove",   onResizeMove);
+  document.addEventListener("pointerup",     onResizeEnd);
+  document.addEventListener("pointercancel", onResizeEnd);
+  e.preventDefault();
 }
 
-function onResizeMove(event) {
-  if (!isResizing) return
-  const newWidth = Math.max(MIN_WIDTH, resizeStartWidth + (event.clientX - resizeStartX))
+function onResizeMove(e) {
+  if (!isResizing) return;
+  const min      = collapsedWidth();
+  const newWidth = Math.max(min, resizeStartWidth + (e.clientX - resizeStartX));
   if (newWidth < COLLAPSE_THRESHOLD) {
-    isCollapsed.value = true
-    navbarWidth.value = MIN_WIDTH
+    isCollapsed.value  = true;
+    navbarWidth.value  = min;
   } else {
     isCollapsed.value = false
     navbarWidth.value = newWidth
@@ -53,19 +153,40 @@ function onResizeMove(event) {
 }
 
 function onResizeEnd() {
-  isResizing = false
-  document.removeEventListener('mousemove', onResizeMove)
-  document.removeEventListener('mouseup', onResizeEnd)
+  isResizing = false;
+  document.removeEventListener("pointermove",   onResizeMove);
+  document.removeEventListener("pointerup",     onResizeEnd);
+  document.removeEventListener("pointercancel", onResizeEnd);
 }
 
-let extraWindowCount = 0
+onUnmounted(() => {
+  document.removeEventListener("pointermove",   onResizeMove);
+  document.removeEventListener("pointerup",     onResizeEnd);
+  document.removeEventListener("pointercancel", onResizeEnd);
+  if (timerInterval !== null) clearInterval(timerInterval);
+});
 
-function addWindow() {
-  extraWindowCount += 1
-  const label = `extra-${extraWindowCount}`
+// ── Extra window spawning ─────────────────────────────────────────────────────
+
+let _extraWindowCount = 0;
+
+// Desktop only — the control is hidden in the web build (see canAddWindows).
+// A browser tab is not a second window in any useful sense: the pad client is
+// view-only, so a duplicate tab just doubles the telemetry subscription over
+// the wifi link the test depends on and gives the engineer nothing new. The
+// BroadcastChannel sync in App.vue keeps server IP, settings and test state
+// consistent across the native windows this does spawn.
+//
+// The import is lazy for the same reason desktop.js exists: a static
+// @tauri-apps import here would be evaluated in the web bundle too.
+async function addWindow() {
+  _extraWindowCount++;
+
+  const label = `extra-${_extraWindowCount}`;
+  const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
   const win = new WebviewWindow(label, {
     url: '/',
-    title: `prop-control-gui — Window ${extraWindowCount + 1}`,
+    title: `prop-control-gui — Window ${_extraWindowCount + 1}`,
     width: 1280,
     height: 800,
   })
@@ -74,15 +195,78 @@ function addWindow() {
   })
 }
 
-function toggleCollapse() {
-  if (isCollapsed.value) {
-    isCollapsed.value = false
-    navbarWidth.value = DEFAULT_WIDTH
-  } else {
-    isCollapsed.value = true
-    navbarWidth.value = MIN_WIDTH
+// ── Full screen ──────────────────────────────────────────────────────────────
+//
+// Chrome's address bar and gesture strip cost a serious slice of a phone's
+// height, on panels that are mostly diagram. The desktop build owns a real
+// window and needs no such control, so this is web-only.
+//
+// Feature-detected rather than assumed: iOS exposes no element fullscreen — and
+// Chrome on iOS is WebKit underneath, so it inherits that — meaning the button
+// hides itself there instead of failing on tap. `fullscreenEnabled` is also
+// false when embedded without an allowfullscreen grant, which is the same
+// answer for the same reason.
+const canFullscreen = isWeb() && Boolean(document.fullscreenEnabled);
+const isFullscreen  = ref(false);
+
+// Fullscreen can end without touching this button — Esc, the back gesture, a
+// task switch — so the icon follows the browser rather than our own last
+// action, which would otherwise get stuck showing "exit".
+function syncFullscreen() {
+  isFullscreen.value = Boolean(document.fullscreenElement);
+}
+
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await document.documentElement.requestFullscreen({ navigationUI: "hide" });
+  } catch (err) {
+    // Rejects if the gesture was not user-initiated, or the platform refuses.
+    console.error("[NavBar] fullscreen toggle failed:", err);
   }
 }
+
+onMounted(() => document.addEventListener("fullscreenchange", syncFullscreen));
+onUnmounted(() => document.removeEventListener("fullscreenchange", syncFullscreen));
+
+// iPadOS paints its own exit-fullscreen control over the top-left of the page.
+// It is browser UI, not content: a page cannot hide, restyle or reposition it,
+// and `navigationUI: "hide"` is only a hint that WebKit ignores. Our button row
+// sits exactly underneath it.
+//
+// So move ours rather than trying to dodge a fixed offset — bottom of the
+// sidebar clears the overlay whatever size it turns out to be, and costs
+// nothing on the platforms that draw no overlay because they never get here.
+//
+// iPadOS reports itself as a Mac, so touch points are the reliable tell.
+const isAppleTouch =
+  /iP(hone|ad|od)/.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+const controlsAtBottom = computed(() => isFullscreen.value && isAppleTouch);
+
+function toggleCollapse() {
+  if (isCollapsed.value) {
+    isCollapsed.value = false;
+    navbarWidth.value = expandedWidth();
+  } else {
+    collapse();
+  }
+}
+
+// On a phone the drawer covers the panel, so leaving it open after a tap would
+// hide the very thing the tap asked for.
+function onNavigate(component) {
+  emit("navigate", component);
+  if (isPhone.value) collapse();
+}
+
+function onOpenSettings() {
+  emit("open-settings");
+  if (isPhone.value) collapse();
+}
+
+// ── Recording status and controls ────────────────────────────────────────────
 
 // Recording state is supplied by App. Safe defaults keep this component usable
 // in previews and isolated component tests.
@@ -271,7 +455,23 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div id="navbar" :style="{ width: navbarWidth + 'px' }">
+  <!-- Tapping outside the phone drawer closes it — on a small screen there is
+       no spare chrome to reach for, so the panel itself is the dismiss target.
+       Teleported because #navbar is a grid item: left as a sibling root it
+       would claim a grid column of its own and shove the layout sideways. -->
+  <Teleport to="body">
+    <div
+      v-if="isPhone && !isCollapsed"
+      class="nav-backdrop"
+      @click="collapse"
+    ></div>
+  </Teleport>
+
+  <div
+    id="navbar"
+    :class="{ 'nav-phone': isPhone, 'nav-open': !isCollapsed, 'fs-controls-bottom': controlsAtBottom }"
+    :style="{ width: navbarWidth + 'px' }"
+  >
     <div id="menu-buttons" :class="{ collapsed: isCollapsed }">
       <button id="helm-button" type="button" title="About HELM" aria-label="About HELM" @click="emit('open-about')">
         <img :src="logoUrl" alt="" aria-hidden="true" class="helm-icon" />
@@ -279,14 +479,34 @@ onUnmounted(() => {
       <button id="menu-button" type="button" title="Toggle menu" aria-label="Toggle menu" @click="toggleCollapse">
         <i class="pi pi-bars" aria-hidden="true" />
       </button>
-      <button id="gear-button" type="button" title="Settings" aria-label="Settings" @click="emit('open-settings')">
+      <button id="gear-button" type="button" title="Settings" aria-label="Settings" @click="onOpenSettings">
         <i class="pi pi-cog" aria-hidden="true" />
       </button>
-      <button id="screens-button" type="button" title="Add window" aria-label="Add window" @click="addWindow">
+      <button
+        v-if="canAddWindows"
+        id="screens-button"
+        type="button"
+        title="Add window"
+        aria-label="Add window"
+        @click="addWindow"
+      >
         <i class="pi pi-plus-circle" aria-hidden="true" />
+      </button>
+      <button
+        v-if="canFullscreen"
+        id="fullscreen-button"
+        type="button"
+        :title="isFullscreen ? 'Exit full screen' : 'Full screen'"
+        :aria-label="isFullscreen ? 'Exit full screen' : 'Full screen'"
+        @click="toggleFullscreen"
+      >
+        <i :class="isFullscreen ? 'pi pi-window-minimize' : 'pi pi-window-maximize'" aria-hidden="true" />
       </button>
     </div>
 
+    <!-- Collapsed rail. The status light stays in both builds — knowing whether
+         the run is on the record is exactly what the pad is here to see — but
+         the recovery actions are launch control's, so they are gated. -->
     <div v-if="isCollapsed" class="collapsed-recording-controls">
       <div
         class="collapsed-recording-status"
@@ -301,7 +521,7 @@ onUnmounted(() => {
       </div>
 
       <button
-        v-if="recordingMode === 'local-only'"
+        v-if="canCommand && recordingMode === 'local-only'"
         class="collapsed-recovery-action"
         type="button"
         title="Retry the server session"
@@ -312,7 +532,7 @@ onUnmounted(() => {
         <i class="pi pi-refresh" />
       </button>
       <button
-        v-if="recordingMode === 'server-only' && localRecorderAvailable"
+        v-if="canCommand && recordingMode === 'server-only' && localRecorderAvailable"
         class="collapsed-recovery-action"
         type="button"
         title="Start the laptop CSV backup"
@@ -330,20 +550,38 @@ onUnmounted(() => {
 
     <div id="collapse" v-show="!isCollapsed">
       <div id="nav-upper">
-        <Button label="Control" @click="emit('navigate', ControlPanel)" />
-        <Button label="Data" @click="emit('navigate', GraphPanel)" />
-        <Button label="Camera View" @click="emit('navigate', CameraPanel)" />
-        <Button label="Sessions" @click="emit('navigate', SessionsPanel)" />
-        <Button label="Devices" @click="emit('navigate', DeviceSummaryPanel)" />
-        <Button label="Debug" @click="emit('navigate', DebugPanel)" />
-        <Button label="Flight" @click="emit('navigate', FlightPanel)" />
+        <Button
+          v-for="panel in navPanels"
+          :key="panel.key"
+          :label="panel.label"
+          @click="onNavigate(panel.component)"
+        />
       </div>
 
       <div id="nav-lower">
         <ServerBar :server-ip="serverIp" />
 
+        <!-- Status is for everyone; the buttons are not. Starting or stopping a
+             test broadcasts STREAM/STOP to the whole stand and drives the local
+             CSV recorder, so those are launch control's alone — but whether the
+             run is being recorded, and whether a component is unhealthy, is
+             precisely what the pad needs to know without asking over radio. -->
         <section class="recording-control">
+          <div
+            v-if="!canCommand"
+            class="recording-status"
+            :class="`aggregate-${aggregateState}`"
+            :title="aggregateTitle"
+            :aria-label="aggregateTitle"
+            role="status"
+          >
+            <span class="aggregate-led" />
+            <span class="recording-action-label">{{ modeLabel }}</span>
+            <span v-if="testActive" class="recording-elapsed">{{ formatElapsed(elapsed) }}</span>
+            <i class="pi pi-eye view-only-icon" title="Commands are issued from launch control" />
+          </div>
           <button
+            v-else
             class="recording-action"
             type="button"
             :class="`aggregate-${aggregateState}`"
@@ -385,7 +623,7 @@ onUnmounted(() => {
           </div>
 
           <button
-            v-if="recordingMode === 'local-only'"
+            v-if="canCommand && recordingMode === 'local-only'"
             class="recovery-btn"
             type="button"
             title="Retry the server session while keeping the laptop CSV recorder running"
@@ -396,7 +634,7 @@ onUnmounted(() => {
             Retry server
           </button>
           <button
-            v-if="recordingMode === 'server-only' && localRecorderAvailable"
+            v-if="canCommand && recordingMode === 'server-only' && localRecorderAvailable"
             class="recovery-btn"
             type="button"
             title="Start the laptop CSV backup for this running server session"
@@ -410,17 +648,30 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="nav-resize-handle" @mousedown="onResizeStart" />
+    <!-- Dragging to resize has no meaning at phone width, where the nav is
+         either a rail or a full-height drawer. -->
+    <div
+      v-if="!isPhone"
+      class="nav-resize-handle"
+      @pointerdown="onResizeStart"
+    ></div>
   </div>
 </template>
 
 <style scoped>
+/* Everything inside the nav is sized in `em` off this one font-size, so the
+   whole sidebar — labels, icons, padding, the server bar — shrinks together
+   with the viewport instead of keeping desktop-sized type in a 140px column.
+   Only --nav-scale changes per tier. */
 #navbar {
+  --nav-scale: 1;
+  font-size: calc(14px * var(--nav-scale));
+
   position: relative;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: 10px;
+  padding: 0.7em;
   text-align: left;
   background-color: var(--bg-primary);
   border: var(--border-color) 2px solid;
@@ -428,34 +679,58 @@ onUnmounted(() => {
   border-radius: 10px 0 0 10px;
 }
 
+@media (max-width: 1200px) {
+  #navbar { --nav-scale: 0.9; }
+}
+
+@media (max-width: 700px) {
+  #navbar { --nav-scale: 0.85; }
+}
+
+/* Scoped to #nav-upper rather than the whole nav: the recording widget and the
+   icon row are buttons too, and a blanket width:100% deforms them. */
 #nav-upper :deep(button) {
   width: 100%;
-  margin: 2pt 0;
+  margin-top: 0.15em;
+  margin-bottom: 0.15em;
+  font-size: 0.95em;
+  padding: 0.55em 0.8em;
 }
 
 #menu-buttons {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
+  gap: 0.45em;
+  margin-bottom: 0.3em;
 }
 
 #menu-buttons.collapsed {
   flex-direction: column;
   align-items: stretch;
-  gap: 6px;
+  gap: 0.45em;
+}
+
+/* See controlsAtBottom in the script: iPadOS overlays its own exit-fullscreen
+   button on the top-left while fullscreen, right on top of this row, and the
+   page has no way to move or hide it. Ours moves instead. `order` rather than a
+   padding guess, because the overlay's size is not ours to know. */
+#navbar.fs-controls-bottom #menu-buttons {
+  order: 2;
+  margin-top: 0.3em;
+  margin-bottom: 0;
 }
 
 #helm-button,
 #menu-button,
 #gear-button,
-#screens-button {
+#screens-button,
+#fullscreen-button {
   display: flex;
   flex: none;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 2.15em;
+  height: 2.15em;
   padding: 0;
   color: var(--text-secondary);
   background: transparent;
@@ -465,20 +740,53 @@ onUnmounted(() => {
   transition: var(--theme-transition);
 }
 
-#menu-button i,
-#gear-button i,
-#screens-button i {
-  font-size: 24px;
+#menu-buttons .pi {
+  font-size: 1.7em;
+}
+
+/* Four icon buttons have to share the sidebar once the fullscreen control is
+   present, and the tablet tier is the tightest fit by a distance: a 128px
+   sidebar leaves ~110px of content, while four buttons at desktop size want
+   ~125px — so the last one clipped off the edge. Shrink the buttons and close
+   the gaps here rather than losing one.
+   `wrap` is a backstop, not the mechanism: if a fifth button ever lands, it
+   drops to a second row instead of silently disappearing under overflow:hidden. */
+@media (max-width: 1200px) {
+  #menu-buttons {
+    gap: 0.28em;
+    flex-wrap: wrap;
+  }
+
+  #helm-button,
+  #menu-button,
+  #gear-button,
+  #screens-button,
+  #fullscreen-button {
+    width: 1.9em;
+    height: 1.9em;
+  }
+
+  #menu-buttons .pi {
+    font-size: 1.45em;
+  }
+
+  .helm-icon {
+    width: 1.6em;
+    height: 1.6em;
+  }
 }
 
 #menu-button:hover,
 #gear-button:hover,
-#screens-button:hover { color: var(--text-primary); }
+#screens-button:hover,
+#fullscreen-button:hover { color: var(--text-primary); }
 
+/* The About button is an image, so it dims rather than recolouring on hover.
+   Sized in em with its siblings so it tracks --nav-scale on phone and tablet. */
 .helm-icon {
+  width: 1.85em;
+  height: 1.85em;
   display: block;
-  width: 26px;
-  height: 26px;
   opacity: 0.85;
 }
 
@@ -487,7 +795,8 @@ onUnmounted(() => {
 #helm-button:focus-visible,
 #menu-button:focus-visible,
 #gear-button:focus-visible,
-#screens-button:focus-visible {
+#screens-button:focus-visible,
+#fullscreen-button:focus-visible {
   outline: 2px solid var(--border-accent);
   outline-offset: 1px;
 }
@@ -497,17 +806,19 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  width: 30px;
+  width: 2.15em;
   margin-top: auto;
 }
 
+/* Sized in em with the icon buttons above so the rail scales as one on tablet
+   and phone rather than leaving a desktop-sized chip below shrunken icons. */
 #navbar .collapsed-recording-status,
 #navbar .collapsed-recovery-action {
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
+  width: 2.15em;
   margin: 0;
   padding: 0;
   color: var(--text-secondary);
@@ -518,11 +829,11 @@ onUnmounted(() => {
 }
 
 #navbar .collapsed-recording-status {
-  height: 30px;
+  height: 2.15em;
 }
 
 #navbar .collapsed-recovery-action {
-  height: 26px;
+  height: 1.85em;
   color: #f39c12;
   cursor: pointer;
   font-size: 0.72rem;
@@ -575,10 +886,10 @@ onUnmounted(() => {
 #nav-lower {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding-top: 8px;
-  margin-top: 8px;
+  gap: 0.45em;
+  padding-top: 0.6em;
   border-top: 1px solid var(--border-color);
+  margin-top: 0.6em;
 }
 
 .recording-control {
@@ -588,22 +899,29 @@ onUnmounted(() => {
   min-width: 0;
 }
 
-.recording-action {
+/* Same four columns — LED, label, elapsed, trailing icon — whether this is the
+   button launch control presses or the read-only chip the pad sees, so the two
+   builds line up identically and only the interaction differs. */
+.recording-action,
+.recording-status {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 5px;
+  gap: 0.36em;
   width: 100%;
-  min-height: 34px;
+  min-height: 2.4em;
   margin: 0;
-  padding: 5px 7px;
+  padding: 0.36em 0.5em;
   color: var(--text-primary);
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: 6px;
-  cursor: pointer;
   font-family: inherit;
   text-align: left;
+}
+
+.recording-action {
+  cursor: pointer;
 }
 
 .recording-action:hover:not(:disabled) {
@@ -770,6 +1088,14 @@ onUnmounted(() => {
   clip-path: inset(50%);
 }
 
+/* Marks the status chip as deliberately inert in the view-only build, so the
+   absent Start/Stop reads as a decision rather than a missing control. */
+.view-only-icon {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+/* Drag handle */
 .nav-resize-handle {
   position: absolute;
   z-index: 10;
@@ -781,5 +1107,66 @@ onUnmounted(() => {
 }
 
 .nav-resize-handle:hover,
-.nav-resize-handle:active { background: rgba(45, 88, 104, 0.45); }
+.nav-resize-handle:active {
+  background: rgba(45, 88, 104, 0.45);
+}
+
+/* Without this a touch-drag on the handle scrolls the page instead of
+   resizing — the browser claims the gesture before pointermove arrives. */
+.nav-resize-handle {
+  touch-action: none;
+}
+
+/* ── Phone ──────────────────────────────────────────────────────────────────
+   App.vue holds the grid column at the rail width (see gridWidth), while the
+   open drawer is simply wider than its column and overflows across the panel.
+   The nav deliberately stays *in flow* — taking it out with position:fixed
+   drops it as a grid item, and the panel then slides up into column 1. The
+   z-index is what puts the overflow on top rather than under the panel. */
+
+#navbar.nav-phone {
+  z-index: 1000;
+  border-radius: 0;
+  border-left: none;
+}
+
+#navbar.nav-phone.nav-open {
+  box-shadow: 4px 0 16px rgba(0, 0, 0, 0.4);
+}
+
+.nav-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+@media (max-width: 700px) {
+  /* Type keeps scaling down with --nav-scale, but a *tap target* has a hard
+     floor no matter how small the labels get — 2.15em would land near 25px
+     here, which is not reliably hittable with a thumb. PHONE_RAIL is sized to
+     clear this inside #navbar's padding. */
+  #menu-button,
+  #gear-button,
+  #screens-button,
+  #fullscreen-button {
+    min-width: 34px;
+    min-height: 34px;
+  }
+
+  #nav-upper :deep(button),
+  .recording-action,
+  .recording-status {
+    min-height: 34px;
+  }
+}
+
+#navbar,
+#helm-button,
+#menu-button,
+#gear-button,
+#screens-button,
+#fullscreen-button {
+  transition: var(--theme-transition);
+}
 </style>

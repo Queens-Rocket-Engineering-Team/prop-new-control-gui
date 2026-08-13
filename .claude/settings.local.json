@@ -23,7 +23,19 @@
       "Bash(git rm *)",
       "Bash(\"/c/Program Files/Google/Chrome/Application/chrome.exe\" --headless --disable-gpu --hide-scrollbars --window-size=900,650 --virtual-time-budget=9000 --dump-dom \"http://localhost:4291/measure.html\")",
       "Bash(\"/c/Program Files/Google/Chrome/Application/chrome.exe\" --headless --disable-gpu --virtual-time-budget=9000 --dump-dom \"http://localhost:4291/sampler.html\")",
-      "Bash(curl -sf http://localhost:1420)"
+      "Bash(curl -sf http://localhost:1420)",
+      "PowerShell(node \"C:\\\\Users\\\\noahw\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--code-qret-prop-new-control-gui\\\\928078cb-6262-4188-833b-57b7c319560b\\\\scratchpad\\\\mock-qlcp.mjs\")",
+      "PowerShell(Get-NetTCPConnection *)",
+      "PowerShell(try { $o = Invoke-RestMethod -Uri \"http://127.0.0.1:8000/openapi.json\" -TimeoutSec 5; $o.paths.PSObject.Properties.Name } catch { \"ERR: $\\($_.Exception.Message\\)\" })",
+      "PowerShell(ConvertTo-Json *)",
+      "PowerShell($o = Invoke-RestMethod -Uri \"http://127.0.0.1:8000/openapi.json\" -TimeoutSec 5; foreach \\($n in @\\('StreamCommand','StopCommand','GetSingleCommand','ControlCommand'\\)\\) { \"==== $n ====\"; $o.components.schemas.$n | ConvertTo-Json -Depth 8 })",
+      "PowerShell($s = Invoke-RestMethod -Uri \"http://127.0.0.1:8000/v1/state\" -TimeoutSec 5; \"TOP KEYS: \" + \\($s.PSObject.Properties.Name -join \", \"\\); \"DEVICE COUNT: \" + @\\($s.devices\\).Count; if \\(@\\($s.devices\\).Count -gt 0\\) { $d = @\\($s.devices\\)[0]; \"DEVICE KEYS: \" + \\($d.PSObject.Properties.Name -join \", \"\\); $d | ConvertTo-Json -Depth 3 | Select-Object -First 60 })",
+      "PowerShell(node \"C:\\\\Users\\\\noahw\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--code-qret-prop-new-control-gui\\\\928078cb-6262-4188-833b-57b7c319560b\\\\scratchpad\\\\ws-probe.mjs\" /ws/telemetry/display 4)",
+      "Bash(netstat -ano)",
+      "Bash(npm run *)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(git add *)",
+      "Bash(GIT_EDITOR=true git rebase --continue)"
     ]
   }
 }

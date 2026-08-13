@@ -92,15 +92,18 @@ onUnmounted(() => {
 
 <style scoped>
 /* ── Server status indicator — inline element (embedded in nav bar) ── */
+/* Sized in `em` so it tracks the nav bar's --nav-scale rather than staying at
+   desktop size inside a shrunken sidebar. 0.79em ≈ the original 11px at the
+   nav's 14px root. */
 #server-indicator {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 0.5em;
   background-color: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: 6px;
-  padding: 5px 10px;
-  font-size: 11px;
+  padding: 0.36em 0.7em;
+  font-size: 0.79em;
   user-select: none;
   width: 100%;
   box-sizing: border-box;
@@ -112,8 +115,8 @@ onUnmounted(() => {
 }
 
 .led-dot {
-  width: 10px;
-  height: 10px;
+  width: 0.9em;
+  height: 0.9em;
   border-radius: 50%;
   flex-shrink: 0;
 }

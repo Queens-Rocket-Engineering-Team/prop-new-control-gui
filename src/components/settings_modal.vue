@@ -1,5 +1,6 @@
 <script setup>
 import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { CAPS } from "../lib/platform.js";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
 
@@ -23,6 +24,13 @@ const overlayRef = ref(null);
 const serverIpLocked = computed(
   () => props.serverSessionActiveConnected || props.localRecordingActive,
 );
+
+// The web build is served by the host it talks to, so it has no server to pick.
+const canSelectServer = CAPS.serverSelection;
+// Gates only the settings that issue commands — currently the stream frequency,
+// which re-rates the whole stand. Deliberately not the P&ID picker: that just
+// selects which diagram this client draws. See the template.
+const readOnly = !CAPS.commands;
 
 // ── Dark mode — persisted in localStorage, synced across windows ──────────────
 // localStorage is shared across all Tauri windows (same WebView2 data dir),
@@ -92,6 +100,10 @@ function isValidIp(ip) {
   return ipv4Pattern.test(ip);
 }
 
+// Emits only — persisting the choice is App.vue's job (get_ip), which is also
+// where it can refuse the change outright if a recording is running. This just
+// declines to emit while locked so the modal cannot start an argument it has
+// no standing to win.
 function applyIp() {
   if (serverIpLocked.value) return;
 
@@ -141,6 +153,10 @@ watch(customIp, () => {
             <i class="pi pi-moon" :style="{color: darkMode ? '#f39c12' : 'var(--text-secondary)'}"></i>
           </div>
         </div>
+        <!-- Not gated: this picks which P&ID the client draws, which is a
+             per-client view preference (localStorage + a same-browser
+             BroadcastChannel), not a command. An engineer at the pad needs it
+             to look at the stand they are standing next to. -->
         <div class="setting-group">
           <span class="setting-group-label"><i class="pi pi-sliders-h" />Test Configuration</span>
           <label class="option-row" for="cfg-hot-fire">
@@ -152,7 +168,7 @@ watch(customIp, () => {
             <span>Rocket Launch</span>
           </label>
         </div>
-        <div class="setting-group">
+        <div class="setting-group" v-if="!readOnly">
           <span class="setting-group-label"><i class="pi pi-wave-pulse" />Test Stream Frequency</span>
           <div class="option-row freq-row">
             <input
@@ -167,7 +183,9 @@ watch(customIp, () => {
             <span v-if="props.testActive" class="freq-locked-label">locked during test</span>
           </div>
         </div>
-        <div class="setting-group">
+        <!-- The pad reaches the server by loading this page from it, so there is
+             nothing here for it to decide — see CAPS.serverSelection. -->
+        <div class="setting-group" v-if="canSelectServer">
           <span class="setting-group-label"><i class="pi pi-server" />Server IP Address</span>
           <label class="option-row">
             <RadioButton v-model="ipMode" value="localhost" :disabled="serverIpLocked" />

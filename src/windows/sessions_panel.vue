@@ -1,6 +1,7 @@
 <script setup>
 import { computed, inject, onActivated, onMounted, onUnmounted, ref, watch } from 'vue'
-import { invoke, isTauri } from '@tauri-apps/api/core'
+import { isTauri } from '../lib/platform.js'
+import { downloadSessionZip, openSessionsDir } from '../lib/desktop.js'
 
 import { normalizeSessionComponents } from '../utils/session.js'
 
@@ -220,7 +221,7 @@ async function downloadSession(item) {
   downloadError.value = ''
   try {
     if (isTauri()) {
-      const result = await invoke('download_session_zip', { sessionId: item.id })
+      const result = await downloadSessionZip(item.id)
       const savedPath = typeof result === 'string'
         ? result
         : result?.path ?? result?.saved_path ?? result?.message
@@ -245,7 +246,7 @@ async function openSessionsFolder() {
   openingSessionsFolder.value = true
   downloadError.value = ''
   try {
-    const path = await invoke('open_sessions_dir')
+    const path = await openSessionsDir()
     showDownloadMessage(
       'Opened sessions folder',
       path ? `Opened ${path}` : 'Opened sessions folder',
