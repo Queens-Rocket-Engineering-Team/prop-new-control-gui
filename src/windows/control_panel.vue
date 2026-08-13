@@ -1,65 +1,60 @@
 <script setup>
-import { ref, inject, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, inject, computed, reactive, watch } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 import PidDiagram from '../components/PidDiagram.vue'
 import { useServerApi } from '../composables/useServerApi.js'
-import { useKeyBindings } from '../composables/useKeyBindings.js'
+import { CAPS } from '../lib/platform.js'
 
-const serverIp        = inject('serverIp',        ref(''))
-const serverConfig    = inject('serverConfig',    ref(null))
-const pidConfig       = inject('pidConfig',       ref('rocket-launch'))
-const sensorData      = inject('sensorData',      ref({}))
-const tares           = inject('tares',           ref({}))
-const kasaDevices     = inject('kasaDevices',     ref([]))
-const setKasaState    = inject('setKasaState',    () => {})
-const valveStates     = inject('valveStates',     ref({}))
-const auxiliaryStates = inject('auxiliaryStates', ref({}))
-const valveStatusByControl = inject('valveStatusByControl', ref({}))
-const { sendCommand, fetchStatus } = useServerApi(serverIp)
+const serverIp     = inject('serverIp',     ref(''))
+const devices      = inject('devices',      ref([]))
+const commandsById = inject('commandsById', ref(new Map()))
+const pidConfig    = inject('pidConfig',    ref('rocket-launch'))
+const sensorData   = inject('sensorData',   ref({}))
+const kasaDevices  = inject('kasaDevices',  ref([]))
+const setKasaState = inject('setKasaState', () => {})
+const requestStatusSnapshot = inject('requestStatusSnapshot', () => Promise.resolve())
 
-// keybinding helpers are managed centrally; rebuild defaults when our
-// control lists change and expose the map/lookup for rendering and input.
-const { controlKeyMap, idToKey, buildDefaultBindings } = useKeyBindings();
+const { setControl, sendEstop } = useServerApi(serverIp)
 
-// Helper to build a normalized key combination string from a KeyboardEvent
-function buildKeyCombo(event) {
-  const parts = [];
-  if (event.ctrlKey) parts.push('ctrl');
-  if (event.altKey) parts.push('alt');
-  if (event.shiftKey) parts.push('shift');
-  if (event.metaKey) parts.push('meta');
-  const key = event.key.toLowerCase();
-  if (key && !['control', 'alt', 'shift', 'meta'].includes(key)) {
-    parts.push(key);
+// The view-only build renders live state but cannot act on it. Controls are
+// disabled rather than hidden so the pad still sees what exists and what it is
+// doing — a control that looks live and silently fails is worse than a dead one.
+const readOnly = !CAPS.commands
+
+// ── Emergency stop ───────────────────────────────────────────────────────────
+
+const showEstopConfirm = ref(false)
+const estopPending     = ref(false)
+
+async function confirmEstop() {
+  estopPending.value = true
+  try {
+    await sendEstop()
+    await requestStatusSnapshot('estop')
+  } catch (err) {
+    console.error('[ControlPanel] ESTOP failed:', err)
+  } finally {
+    estopPending.value     = false
+    showEstopConfirm.value = false
   }
-  return parts.join('+');
 }
 
-
-// ── SVG URL mapping (the only static config needed) ─────────────────────────
+// ── SVG URL mapping ──────────────────────────────────────────────────────────
 
 const SVG_URLS = {
-  'hot-fire':      '/P&IDs/Hot-Fire-P&ID-01-03-2026.svg',
+  'hot-fire':      '/P&IDs/Hot-Fire-P&ID-26-05-2026.svg',
   'rocket-launch': '/P&IDs/Rocket-P&ID-01-03-2026.svg',
 }
 
 const svgUrl = computed(() => SVG_URLS[pidConfig.value] ?? SVG_URLS['rocket-launch'])
 
 // ── Dynamic element lists (populated from parsed SVG cells) ──────────────────
-// Categorised by ID prefix/pattern:
-//   AV-*         → actuated valve toggle cards
-//   PT-*         → pressure transducer sensor cards  (unit: psi)
-//   TC-*         → thermocouple sensor cards          (unit: °C)
-//   LC-*         → load-cell sensor cards             (unit: kg)
-//   MV-*         → manual valve info cards (below element)
-//   *TANK*       → tank info cards         (centred on element)
-//   REGULATOR-*  → regulator info cards    (right of element)
 
-const valves     = ref([])           // [id, ...]
-const sensors    = ref([])           // [{ id, unit }, ...]
-const mvs        = ref([])           // [id, ...]
-const tanks      = ref([])           // [id, ...]
-const regulators = ref([])           // [id, ...]
+const valves     = ref([])    // drawio IDs starting with AV
+const sensors    = ref([])    // [{ id, unit }, ...]
+const mvs        = ref([])
+const tanks      = ref([])
+const regulators = ref([])
 
 function onCellsParsed(cells) {
   const newValves = [], newSensors = [], newMvs = [], newTanks = [], newRegs = []
@@ -80,116 +75,114 @@ function onCellsParsed(cells) {
   mvs.value        = newMvs
   tanks.value      = newTanks
   regulators.value = newRegs
-
-  // Preserve any user-toggled states; only default-initialise new valve IDs.
-  const s = {}
-  for (const id of newValves) {
-    s[id] = id in valveStates.value ? valveStates.value[id] : false
-  }
-  valveStates.value = s
 }
 
-// Clear stale overlays immediately when the config switches (before the new
-// SVG loads and fires cells-parsed).
 watch(pidConfig, () => {
   valves.value     = []
   sensors.value    = []
   mvs.value        = []
   tanks.value      = []
   regulators.value = []
-  valveStates.value = {}
 })
 
-// ── ID normalization ─────────────────────────────────────────────────────────
+// ── ID normalisation ─────────────────────────────────────────────────────────
 
-// Strip non-alphanumeric, lowercase — for fuzzy matching against server keys.
+// Strip non-alphanumeric, lowercase — for fuzzy matching against server names.
 function normalizeId(id) {
   return id.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()
 }
 
-// Control key sent to the server: strip non-alphanumeric, UPPERCASE.
-// 'AV-DUMP' → 'AVDUMP', 'AV-N2FILL' → 'AVN2FILL'
+// Display label: strip non-alphanumeric, UPPERCASE.
 function toControlKey(id) {
   return id.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()
 }
 
-function getBestMatchingValveIds(statusControlKey) {
-  const statusNorm = normalizeId(statusControlKey)
-  const ids = Object.keys(valveStates.value)
-  const matches = ids
-    .map((id) => ({ id, norm: normalizeId(id) }))
-    .filter(({ norm }) => statusNorm === norm || statusNorm.startsWith(norm))
+// ── Control + sensor indexes (flat maps keyed by normalizeId) ─────────────────
 
-  if (matches.length === 0) return []
-
-  const bestLen = Math.max(...matches.map((m) => m.norm.length))
-  return matches.filter((m) => m.norm.length === bestLen).map((m) => m.id)
-}
-
-// ── Server-enabled controls ──────────────────────────────────────────────────
-
-const enabledControls = computed(() => {
-  const cfg = serverConfig.value
-  if (!cfg) return new Set()
-  const keys = new Set()
-  for (const device of Object.values(cfg.configs)) {
-    for (const key of Object.keys(device.controls ?? {})) {
-      keys.add(normalizeId(key))
+// Flattens all device controls into a Map: normalizeId(name) → control object
+// (with added deviceName for context). Used for fuzzy drawio-ID → server-name matching.
+const normalizedControlLookup = computed(() => {
+  const map = new Map()
+  for (const dev of devices.value) {
+    for (const ctrl of (dev.controls ?? [])) {
+      map.set(normalizeId(ctrl.name), { ...ctrl, deviceName: dev.name })
     }
   }
-  return keys
+  return map
 })
 
-// A valve is enabled if any server control key starts with its normalised form.
-// (handles numbered variants: AVPurge1 / AVPurge2 both match AV-PURGE)
-function isValveEnabled(drawioId) {
-  const norm = normalizeId(drawioId)
-  for (const key of enabledControls.value) {
-    if (key.startsWith(norm)) return true
+// Map: control.name → control object (for direct name lookups)
+const controlLookup = computed(() => {
+  const map = new Map()
+  for (const dev of devices.value) {
+    for (const ctrl of (dev.controls ?? [])) {
+      map.set(ctrl.name, ctrl)
+    }
   }
-  return false
+  return map
+})
+
+// Map: normalizeId(sensor.name) → sensor object
+const normalizedSensorLookup = computed(() => {
+  const map = new Map()
+  for (const dev of devices.value) {
+    for (const s of (dev.sensors ?? [])) {
+      map.set(normalizeId(s.name), s)
+    }
+  }
+  return map
+})
+
+// ── Fuzzy matching: drawio ID → server controls ───────────────────────────────
+// A server control matches a drawio ID when normalizeId(control.name) starts with
+// normalizeId(drawioId). This covers numbered variants:
+//   drawio "AV-PURGE" (norm "avpurge") matches "AVPurge1" (norm "avpurge1") and "AVPurge2".
+// Returns only the longest-matching controls (most specific).
+
+function getMatchingControls(drawioId) {
+  const norm = normalizeId(drawioId)
+  const results = []
+  let bestLen = 0
+  for (const [normKey, ctrl] of normalizedControlLookup.value) {
+    // Variable (numeric) controls render in their own side panel, not as P&ID valve cards.
+    if (isVariableType(ctrl.type)) continue
+    if (normKey.startsWith(norm)) {
+      if (normKey.length > bestLen) bestLen = normKey.length
+      results.push({ normKey, ctrl })
+    }
+  }
+  return results.filter(m => m.normKey.length === bestLen).map(m => m.ctrl)
+}
+
+function isValveEnabled(drawioId) {
+  return getMatchingControls(drawioId).length > 0
 }
 
 function getValveDefaultState(drawioId) {
-  const norm = normalizeId(drawioId)
-  const cfg = serverConfig.value
-  if (!cfg) return '—'
-  for (const device of Object.values(cfg.configs)) {
-    for (const [key, ctrl] of Object.entries(device.controls ?? {})) {
-      if (normalizeId(key).startsWith(norm)) return ctrl.defaultState ?? '—'
-    }
-  }
-  return '—'
+  const ctrls = getMatchingControls(drawioId)
+  return ctrls.length > 0 ? (ctrls[0].default_state ?? '—') : '—'
 }
 
-// ── Server-enabled sensors ───────────────────────────────────────────────────
+// Server-authoritative displayed open state:
+// prefer reported_state from STATUS/control.updated, fall back to accepted_state.
+function getDisplayedOpen(drawioId) {
+  const ctrls = getMatchingControls(drawioId)
+  if (ctrls.length === 0) return false
+  const state = ctrls[0].reported_state ?? ctrls[0].accepted_state
+  return state === 'OPEN'
+}
 
-const enabledSensors = computed(() => {
-  const cfg = serverConfig.value
-  if (!cfg) return new Set()
-  const keys = new Set()
-  for (const device of Object.values(cfg.configs)) {
-    for (const category of Object.values(device.sensorInfo ?? {})) {
-      if (typeof category !== 'object' || Array.isArray(category)) continue
-      for (const key of Object.keys(category)) {
-        keys.add(normalizeId(key))
-      }
-    }
-  }
-  return keys
-})
+// ── Server-enabled sensors ────────────────────────────────────────────────────
 
 function isSensorEnabled(drawioId) {
   const norm = normalizeId(drawioId)
-  for (const key of enabledSensors.value) {
+  for (const [key] of normalizedSensorLookup.value) {
     if (key.startsWith(norm) || norm.startsWith(key)) return true
   }
   return false
 }
 
-// ── Live sensor value lookup ─────────────────────────────────────────────────
-// sensorData keys are camelCase (e.g. "PTN2Supply"); drawio IDs use hyphens
-// (e.g. "PT-N2-SUPPLY"). normalizeId strips all punctuation + lowercases both.
+// ── Live sensor value lookup ──────────────────────────────────────────────────
 
 const normalizedSensorMap = computed(() => {
   const map = {}
@@ -199,41 +192,43 @@ const normalizedSensorMap = computed(() => {
   return map
 })
 
-// Maps normalizeId(sensorName) → tare offset, for O(1) lookup in getLiveValue.
-const normalizedTaresMap = computed(() => {
-  const map = {}
-  for (const [name, offset] of Object.entries(tares.value)) {
-    map[normalizeId(name)] = offset
-  }
-  return map
-})
-
+// Values arrive already tared from the server — never subtract an offset here.
 function getLiveValue(drawioId) {
-  const norm   = normalizeId(drawioId)
-  const info   = normalizedSensorMap.value[norm]
+  const info = normalizedSensorMap.value[normalizeId(drawioId)]
   if (!info) return '—'
-  const offset = normalizedTaresMap.value[norm] ?? 0
-  const v      = info.value - offset
-  const abs    = Math.abs(v)
+  const v   = info.value
+  const abs = Math.abs(v)
   if (abs >= 1000) return v.toFixed(0)
   if (abs >= 10)   return v.toFixed(1)
   return v.toFixed(2)
 }
 
-// ── Auxiliary controls (non-AV controls from server config) ─────────────────
-// Any control whose normalised name does NOT start with 'av' is shown here.
+// ── Variable (non-BOOL) control detection ───────────────────────────────────
+// Controls with type FLOAT32/INT32/etc. carry a numeric value instead of an
+// OPEN/CLOSED state. Treat a missing type as BOOL for backwards compatibility.
+function isVariableType(type) {
+  return !!type && type !== 'BOOL'
+}
+
+// Server state values may come back as either the type that was sent or a
+// string echo (e.g. requested 42.5, reported_state "42.5"). Compare loosely.
+function statesMatch(a, b) {
+  if (a === b) return true
+  const na = Number(a), nb = Number(b)
+  return !Number.isNaN(na) && !Number.isNaN(nb) && na === nb
+}
+
+// ── Auxiliary controls (non-AV, BOOL server controls) ────────────────────────
 
 const auxiliaryControls = computed(() => {
-  const cfg = serverConfig.value
-  if (!cfg) return []
   const result = []
-  for (const device of Object.values(cfg.configs)) {
-    for (const [name, ctrl] of Object.entries(device.controls ?? {})) {
-      if (!normalizeId(name).startsWith('av')) {
+  for (const dev of devices.value) {
+    for (const ctrl of (dev.controls ?? [])) {
+      if (!normalizeId(ctrl.name).startsWith('av') && !isVariableType(ctrl.type)) {
         result.push({
-          key:          name,
-          label:        toControlKey(name),   // e.g. "IgnPrime" → "IGNPRIME"
-          defaultState: ctrl.defaultState ?? '—',
+          key:          ctrl.name,
+          label:        toControlKey(ctrl.name),
+          defaultState: ctrl.default_state ?? '—',
         })
       }
     }
@@ -241,123 +236,193 @@ const auxiliaryControls = computed(() => {
   return result
 })
 
-watch(serverConfig, (cfg) => {
-  if (!cfg) { auxiliaryStates.value = {}; return }
-  // Preserve any user-toggled states; only default-initialise new keys.
-  const s = {}
-  for (const device of Object.values(cfg.configs)) {
-    for (const [name, ctrl] of Object.entries(device.controls ?? {})) {
-      if (!normalizeId(name).startsWith('av')) {
-        // Relay semantics: CLOSED = energised = true, OPEN = de-energised = false
-        s[name] = name in auxiliaryStates.value
-          ? auxiliaryStates.value[name]
-          : (ctrl.defaultState ?? '').toUpperCase() === 'CLOSED'
+// Relay semantics: CLOSED = energised = true; OPEN = de-energised = false.
+function getAuxDisplayed(controlName) {
+  const ctrl = controlLookup.value.get(controlName)
+  if (!ctrl) return false
+  const state = ctrl.reported_state ?? ctrl.accepted_state
+  return state === 'CLOSED'
+}
+
+// ── Variable controls (numeric — isolated from relays/valves) ────────────────
+// Rendered as their own side-panel section, similar to Smart Plugs: a small
+// value box plus an edit icon that opens a popover for numeric input.
+
+const variableControls = computed(() => {
+  const result = []
+  for (const dev of devices.value) {
+    for (const ctrl of (dev.controls ?? [])) {
+      if (isVariableType(ctrl.type)) {
+        result.push({
+          key:          ctrl.name,
+          label:        toControlKey(ctrl.name),
+          type:         ctrl.type,
+          unit:         ctrl.unit ?? '',
+          defaultState: ctrl.default_state ?? '—',
+        })
       }
     }
   }
-  auxiliaryStates.value = s
-}, { immediate: true })
-
-// rebuild default binding map whenever our control lists change
-watch([valves, auxiliaryControls, kasaDevices], () => {
-  buildDefaultBindings(valves.value, auxiliaryControls.value, kasaDevices.value);
-}, { immediate: true });
-
-// onKeydown remains the same but uses the imported `controlKeyMap`
-
-function onKeydown(evt) {
-  if (
-    evt.target &&
-    ['INPUT', 'TEXTAREA', 'SELECT'].includes(evt.target.tagName)
-  )
-    return
-  const combo = buildKeyCombo(evt)
-  const action = controlKeyMap.value[combo]
-  if (!action) return
-  evt.preventDefault()
-  if (action.type === 'valve') {
-    onValveToggle(action.id, !valveStates.value[action.id])
-  } else if (action.type === 'aux') {
-    onAuxToggle(action.key, !auxiliaryStates.value[action.key])
-  } else if (action.type === 'kasa') {
-    const dev = kasaDevices.value.find((d) => d.host === action.host)
-    if (dev) setKasaState(dev.host, !dev.active)
-  }
-}
-
-onMounted(() => window.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
-
-const lastAppliedStatusSeqByControl = ref({})
-
-function applyValveStatusMap(statusMap) {
-  const nextApplied = { ...lastAppliedStatusSeqByControl.value }
-
-  for (const [controlKey, statusInfo] of Object.entries(statusMap ?? {})) {
-    const seq = Number(statusInfo?.seq ?? 0)
-    const lastSeq = Number(nextApplied[controlKey] ?? 0)
-    if (!seq || seq <= lastSeq) continue
-
-    const state = String(statusInfo?.state ?? '').toUpperCase()
-    if (state !== 'OPEN' && state !== 'CLOSED') continue
-
-    const matchedIds = getBestMatchingValveIds(controlKey)
-    if (matchedIds.length === 0) continue
-
-    for (const id of matchedIds) {
-      valveStates.value[id] = state === 'OPEN'
-    }
-
-    nextApplied[controlKey] = seq
-  }
-
-  lastAppliedStatusSeqByControl.value = nextApplied
-}
-
-watch(valveStatusByControl, (statusMap) => {
-  applyValveStatusMap(statusMap)
-}, { deep: true })
-
-watch(
-  () => Object.keys(valveStates.value).sort().join('|'),
-  () => {
-    applyValveStatusMap(valveStatusByControl.value)
-  }
-)
-
-watch(pidConfig, () => {
-  lastAppliedStatusSeqByControl.value = {}
+  return result
 })
 
-async function onAuxToggle(key, newState) {
-  auxiliaryStates.value[key] = newState  // optimistic update
-  try {
-    // Relay semantics: true = CLOSED (energised) → send 'CLOSE'
-    await sendCommand('CONTROL', [toControlKey(key), newState ? 'CLOSE' : 'OPEN'])
-  } catch (err) {
-    console.error(`[ControlPanel] CONTROL ${toControlKey(key)} failed:`, err)
-    auxiliaryStates.value[key] = !newState  // revert on failure
+function getVariableValue(controlName) {
+  const ctrl = controlLookup.value.get(controlName)
+  if (!ctrl) return '—'
+  const state = ctrl.reported_state ?? ctrl.accepted_state
+  return state ?? '—'
+}
+
+// ── Variable control editor popover ──────────────────────────────────────────
+
+const openVariableEditor = ref(null)   // control name currently being edited, or null
+const variableInput      = ref('')
+
+function toggleVariableEditor(controlName) {
+  if (openVariableEditor.value === controlName) {
+    openVariableEditor.value = null
+    return
   }
+  variableInput.value      = String(getVariableValue(controlName) ?? '')
+  openVariableEditor.value = controlName
+}
+
+function cancelVariableEditor() {
+  openVariableEditor.value = null
+}
+
+async function submitVariableControl(controlName) {
+  const num = Number(variableInput.value)
+  if (variableInput.value === '' || Number.isNaN(num)) return
+
+  openVariableEditor.value = null
+  pending[controlName] = { requested: num }
+  delete warning[controlName]
+  try {
+    await setControl(controlName, num)
+    requestStatusSnapshot('control')
+  } catch (err) {
+    console.error(`[ControlPanel] CONTROL ${controlName} failed:`, err)
+    delete pending[controlName]
+    warning[controlName] = { message: String(err), errorCode: null }
+  }
+}
+
+// ── Pending / NACK tracking ───────────────────────────────────────────────────
+// 'pending[name]' = { requested: 'OPEN'|'CLOSED' }
+// 'warning[name]' = { message: string, errorCode: string|null }
+
+const pending = reactive({})
+const warning = reactive({})
+
+function _clearControl(name) {
+  delete pending[name]
+  delete warning[name]
+}
+
+// When device control state settles to the requested value, clear pending.
+// When a command is nacked or timed out, clear pending and set warning.
+watch([devices, commandsById], () => {
+  for (const dev of devices.value) {
+    for (const ctrl of (dev.controls ?? [])) {
+      const p = pending[ctrl.name]
+      if (!p) continue
+
+      const serverState = ctrl.reported_state ?? ctrl.accepted_state
+      if (statesMatch(serverState, p.requested)) {
+        _clearControl(ctrl.name)
+        continue
+      }
+
+      // Check command lifecycle for NACK/timeout
+      const cmdId = ctrl.pending_command_id
+      if (!cmdId) continue
+      const cmd = commandsById.value.get(cmdId)
+      if (!cmd) continue
+      if (cmd.state === 'nacked' || cmd.state === 'timed_out') {
+        delete pending[ctrl.name]
+        warning[ctrl.name] = {
+          message:   cmd.state === 'nacked' ? 'NACK' : 'Timeout',
+          errorCode: cmd.nack_error_code ?? null,
+        }
+      }
+    }
+  }
+}, { deep: false })   // shallow watch is enough — devices ref is replaced on each publish
+
+// Clear pending/warning when server IP or P&ID changes (stale keys)
+watch([serverIp, pidConfig], () => {
+  for (const key of Object.keys(pending)) delete pending[key]
+  for (const key of Object.keys(warning)) delete warning[key]
+})
+
+function isControlPending(drawioId) {
+  const ctrls = getMatchingControls(drawioId)
+  for (const ctrl of ctrls) {
+    if (pending[ctrl.name]) return true
+    if (ctrl.pending_command_id) {
+      const cmd = commandsById.value.get(ctrl.pending_command_id)
+      if (cmd?.state === 'sent') return true
+    }
+  }
+  return false
+}
+
+function isControlWarning(drawioId) {
+  return getMatchingControls(drawioId).some(ctrl => !!warning[ctrl.name])
+}
+
+function isAuxPending(controlName) {
+  if (pending[controlName]) return true
+  const ctrl = controlLookup.value.get(controlName)
+  if (ctrl?.pending_command_id) {
+    const cmd = commandsById.value.get(ctrl.pending_command_id)
+    if (cmd?.state === 'sent') return true
+  }
+  return false
+}
+
+function isAuxWarning(controlName) {
+  return !!warning[controlName]
 }
 
 // ── Valve toggle ─────────────────────────────────────────────────────────────
+// Server-authoritative: do NOT mutate displayed state. Show pending while in-flight.
 
-async function onValveToggle(id, newState) {
-  if (!isValveEnabled(id)) return
-  const controlKey = toControlKey(id)
+async function onValveToggle(drawioId, newOpenState) {
+  if (!isValveEnabled(drawioId)) return
+  const controls  = getMatchingControls(drawioId)
+  const requested = newOpenState ? 'OPEN' : 'CLOSED'
 
+  for (const ctrl of controls) {
+    pending[ctrl.name] = { requested }
+    delete warning[ctrl.name]
+    try {
+      await setControl(ctrl.name, requested)
+      requestStatusSnapshot('control')
+    } catch (err) {
+      console.error(`[ControlPanel] CONTROL ${ctrl.name} failed:`, err)
+      delete pending[ctrl.name]
+      warning[ctrl.name] = { message: String(err), errorCode: null }
+    }
+  }
+}
+
+// ── Aux toggle ───────────────────────────────────────────────────────────────
+
+async function onAuxToggle(controlName, newEnergised) {
+  // Relay: energised=true → CLOSED state; energised=false → OPEN
+  const expected = newEnergised ? 'CLOSED' : 'OPEN'
+
+  pending[controlName] = { requested: expected }
+  delete warning[controlName]
   try {
-    valveStates.value[id] = newState  // optimistic update
-
-    await sendCommand('CONTROL', [controlKey, newState ? 'OPEN' : 'CLOSE'])
-
-    // Trigger fresh device STATUS reporting, but do not block UI on validation.
-    fetchStatus().catch((err) => {
-      console.error(`[ControlPanel] STATUS trigger after ${controlKey} failed:`, err)
-    })
+    await setControl(controlName, expected)
+    requestStatusSnapshot('control')
   } catch (err) {
-    console.error(`[ControlPanel] CONTROL ${controlKey} failed:`, err)
-    valveStates.value[id] = !newState  // revert on failure
+    console.error(`[ControlPanel] CONTROL ${controlName} failed:`, err)
+    delete pending[controlName]
+    warning[controlName] = { message: String(err), errorCode: null }
   }
 }
 </script>
@@ -369,7 +434,7 @@ async function onValveToggle(id, newState) {
 
         <!-- ── Auxiliary controls panel (fixed top-left) ── -->
         <div
-          v-if="auxiliaryControls.length > 0 || kasaDevices.length > 0"
+          v-if="auxiliaryControls.length > 0 || variableControls.length > 0 || kasaDevices.length > 0"
           class="pid-overlay aux-panel"
         >
           <div class="aux-header">Aux Controls</div>
@@ -378,36 +443,109 @@ async function onValveToggle(id, newState) {
             :key="ctrl.key"
             class="aux-row"
           >
-            <span class="aux-label">
-              {{ ctrl.label }}
-              <span v-if="idToKey[ctrl.key]" class="keybind">[{{ idToKey[ctrl.key] }}]</span>
+            <span class="aux-label">{{ ctrl.label }}</span>
+            <span class="card-badge">{{ ctrl.defaultState }}</span>
+            <span
+              class="state-indicator"
+              :class="
+                isAuxWarning(ctrl.key) ? 'relay-warning' :
+                isAuxPending(ctrl.key) ? 'relay-pending' :
+                getAuxDisplayed(ctrl.key) ? 'relay-closed' : 'relay-open'
+              "
+            >
+              <span class="state-led" />
+              <span v-if="isAuxPending(ctrl.key)">PENDING…</span>
+              <span v-else-if="isAuxWarning(ctrl.key)">WARN</span>
+              <span v-else>{{ getAuxDisplayed(ctrl.key) ? 'CLOSED' : 'OPEN' }}</span>
             </span>
             <ToggleSwitch
-              :modelValue="auxiliaryStates[ctrl.key]"
+              :modelValue="getAuxDisplayed(ctrl.key)"
+              :disabled="isAuxPending(ctrl.key) || readOnly"
               @update:modelValue="onAuxToggle(ctrl.key, $event)"
               class="aux-toggle"
             />
           </div>
 
+          <!-- Variable (numeric) controls -->
+          <template v-if="variableControls.length > 0">
+            <div class="aux-section-sep" v-if="auxiliaryControls.length > 0" />
+            <div class="aux-section-label">Variable Controls</div>
+            <div
+              v-for="ctrl in variableControls"
+              :key="ctrl.key"
+              class="aux-row variable-row"
+            >
+              <span class="aux-label">{{ ctrl.label }}</span>
+              <span class="card-badge">{{ ctrl.defaultState }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
+              <span
+                class="state-indicator"
+                :class="{
+                  'relay-warning': isAuxWarning(ctrl.key),
+                  'relay-pending': isAuxPending(ctrl.key),
+                }"
+              >
+                <span class="state-led" />
+                <span v-if="isAuxWarning(ctrl.key)">WARN</span>
+                <span v-else-if="isAuxPending(ctrl.key)">PENDING…</span>
+                <span v-else>{{ getVariableValue(ctrl.key) }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
+              </span>
+              <button
+                class="variable-edit-btn"
+                :disabled="isAuxPending(ctrl.key) || readOnly"
+                @click="toggleVariableEditor(ctrl.key)"
+                :title="readOnly ? 'Controls are issued from launch control' : 'Set value'"
+              >
+                <i class="pi pi-pencil" />
+              </button>
+
+              <!-- Numeric input popover -->
+              <div v-if="openVariableEditor === ctrl.key" class="variable-popover">
+                <div class="variable-popover-caret" />
+                <div class="variable-popover-row">
+                  <div class="variable-input-wrap">
+                    <input
+                      v-model="variableInput"
+                      type="number"
+                      step="any"
+                      class="variable-input"
+                      :class="{ 'has-unit': ctrl.unit }"
+                      autofocus
+                      @keydown.enter="submitVariableControl(ctrl.key)"
+                      @keydown.esc="cancelVariableEditor"
+                    />
+                    <span v-if="ctrl.unit" class="variable-input-unit">{{ ctrl.unit }}</span>
+                  </div>
+                  <button
+                    class="variable-confirm-btn"
+                    :disabled="variableInput === '' || Number.isNaN(Number(variableInput))"
+                    title="Confirm"
+                    @click="submitVariableControl(ctrl.key)"
+                  ><i class="pi pi-check" /></button>
+                  <button class="variable-cancel-btn" title="Cancel" @click="cancelVariableEditor">
+                    <i class="pi pi-times" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </template>
+
           <!-- Kasa Smart Plugs -->
           <template v-if="kasaDevices.length > 0">
-            <div class="aux-section-sep" v-if="auxiliaryControls.length > 0" />
+            <div class="aux-section-sep" v-if="auxiliaryControls.length > 0 || variableControls.length > 0" />
             <div class="aux-section-label">Smart Plugs</div>
             <div
               v-for="dev in kasaDevices"
               :key="dev.host"
               class="aux-row"
             >
-              <span class="aux-label">
-                {{ dev.alias || dev.host }}
-                <span v-if="idToKey[dev.host]" class="keybind">[{{ idToKey[dev.host] }}]</span>
-              </span>
+              <span class="aux-label">{{ dev.alias || dev.host }}</span>
               <span class="state-indicator" :class="dev.active ? 'relay-closed' : 'relay-open'">
                 <span class="state-led" />
                 {{ dev.active ? 'ON' : 'OFF' }}
               </span>
               <ToggleSwitch
                 :modelValue="dev.active"
+                :disabled="readOnly"
                 @update:modelValue="setKasaState(dev.host, $event)"
                 class="aux-toggle"
               />
@@ -422,17 +560,25 @@ async function onValveToggle(id, newState) {
           :style="{ ...positionBeside(id, 'bottom', -10), marginLeft: '-50px' }"
           class="pid-overlay"
         >
-          <div class="valve-card" :class="{ open: valveStates[id], locked: !isValveEnabled(id) }">
+          <div
+            class="valve-card"
+            :class="{
+              open:    getDisplayedOpen(id),
+              locked:  !isValveEnabled(id),
+              pending: isControlPending(id),
+              warning: isControlWarning(id),
+            }"
+          >
             <div class="card-id">
               {{ id }}
-              <span v-if="idToKey[id]" class="keybind">[{{ idToKey[id] }}]</span>
               <span v-if="!isValveEnabled(id)" class="lock-badge">NO CTRL</span>
+              <span v-else-if="isControlWarning(id)" class="warn-badge">WARN</span>
             </div>
             <div class="valve-card-body">
               <div class="valve-toggle-col">
                 <ToggleSwitch
-                  :modelValue="valveStates[id]"
-                  :disabled="!isValveEnabled(id)"
+                  :modelValue="getDisplayedOpen(id)"
+                  :disabled="!isValveEnabled(id) || isControlPending(id) || readOnly"
                   @update:modelValue="onValveToggle(id, $event)"
                 />
               </div>
@@ -443,9 +589,18 @@ async function onValveToggle(id, newState) {
                 </div>
                 <div class="card-row">
                   <span class="card-detail">State</span>
-                  <span class="state-indicator" :class="{ open: valveStates[id] }">
+                  <span
+                    class="state-indicator"
+                    :class="{
+                      open:          getDisplayedOpen(id) && !isControlPending(id) && !isControlWarning(id),
+                      'ctrl-pending': isControlPending(id),
+                      'ctrl-warning': isControlWarning(id),
+                    }"
+                  >
                     <span class="state-led" />
-                    {{ valveStates[id] ? 'OPEN' : 'CLOSED' }}
+                    <span v-if="isControlPending(id)">PENDING…</span>
+                    <span v-else-if="isControlWarning(id)">WARN</span>
+                    <span v-else>{{ getDisplayedOpen(id) ? 'OPEN' : 'CLOSED' }}</span>
                   </span>
                 </div>
               </div>
@@ -504,17 +659,77 @@ async function onValveToggle(id, newState) {
 
       </template>
     </PidDiagram>
+
+    <!-- ── E-STOP button (fixed top-right) ── -->
+    <button v-if="!readOnly" class="estop-btn" @click="showEstopConfirm = true">E-STOP</button>
+
+    <!-- ── E-STOP confirmation dialog ── -->
+    <Teleport to="body">
+      <div v-if="showEstopConfirm" class="estop-overlay" @click.self="showEstopConfirm = false">
+        <div class="estop-dialog">
+          <div class="estop-dialog-title">EMERGENCY STOP</div>
+          <div class="estop-dialog-body">
+            This will immediately send an emergency stop command to the server. <br>
+            All actuated valves will reset to their default state and data streaming will stop. <br>
+            Are you sure?
+          </div>
+          <div class="estop-dialog-actions">
+            <button
+              class="estop-confirm-btn"
+              :disabled="estopPending"
+              @click="confirmEstop"
+            >{{ estopPending ? 'SENDING…' : 'CONFIRM E-STOP' }}</button>
+            <button
+              class="estop-cancel-btn"
+              :disabled="estopPending"
+              @click="showEstopConfirm = false"
+            >Cancel</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <style scoped>
 #control-panel {
+  position: relative;
   width: 100%;
   height: 100vh;
   overflow: hidden;
 }
 
 /* ── Popup card shared base ── */
+
+/* Overlay cards are sized in fixed px while the P&ID itself scales to fit its
+   container, so on a tablet they eat a far larger share of the diagram than they
+   do on a desktop monitor. One variable drives every card type; 1 leaves desktop
+   untouched.
+   `zoom` — not `transform: scale()` — is what shrinks them: zoom changes a card's
+   *used layout size*, so the collision pass in usePidOverlay measures and reserves
+   the smaller box. A transform is visual only, and the solver would keep spacing
+   cards as if they were still full size. It has to stay on the card rather than on
+   .pid-overlay: the wrapper carries JS-computed left/top in px, which zoom would
+   scale along with everything else and throw the anchoring off. */
+#control-panel {
+  --pid-card-scale: 1;
+}
+
+/* iPad Pro 12.9" landscape (1366) and most laptops below it. */
+@media (max-width: 1400px) {
+  #control-panel { --pid-card-scale: 0.85; }
+}
+
+/* iPad 10.2"/11" landscape (1024–1194) and anything narrower. */
+@media (max-width: 1200px) {
+  #control-panel { --pid-card-scale: 0.72; }
+}
+
+.valve-card,
+.sensor-card,
+.info-card {
+  zoom: var(--pid-card-scale);
+}
 
 .valve-card,
 .sensor-card {
@@ -541,14 +756,6 @@ async function onValveToggle(id, newState) {
   gap: 4px;
 }
 
-/* small label for keybinds */
-.keybind {
-  font-size: 6px;
-  color: var(--text-muted);
-  margin-left: 2px;
-  white-space: nowrap;
-}
-
 /* ── Locked state ── */
 
 .valve-card.locked,
@@ -562,17 +769,41 @@ async function onValveToggle(id, newState) {
   pointer-events: none;
 }
 
-.lock-badge {
+/* ── Pending state — yellow border ── */
+
+.valve-card.pending {
+  border-color: #f39c12;
+  box-shadow: 0 0 5px rgba(243, 156, 18, 0.4);
+}
+
+/* ── Warning state — orange/red border ── */
+
+.valve-card.warning {
+  border-color: #e74c3c;
+  box-shadow: 0 0 5px rgba(231, 76, 60, 0.4);
+}
+
+.lock-badge,
+.warn-badge {
   font-size: 6px;
   font-weight: 600;
   letter-spacing: 0.2px;
-  color: var(--text-muted);
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
   border-radius: 2px;
   padding: 0px 2px;
   white-space: nowrap;
   line-height: 1.1;
+}
+
+.lock-badge {
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+}
+
+.warn-badge {
+  color: #e74c3c;
+  background: rgba(231, 76, 60, 0.12);
+  border: 1px solid #e74c3c;
 }
 
 /* ── Valve card ── */
@@ -642,6 +873,12 @@ async function onValveToggle(id, newState) {
 /* Valve state — open = green */
 .state-indicator.open { color: #2ecc71; }
 
+/* Pending = yellow */
+.state-indicator.ctrl-pending { color: #f39c12; }
+
+/* Warning = red */
+.state-indicator.ctrl-warning { color: #e74c3c; }
+
 .state-led {
   width: 5px;
   height: 5px;
@@ -656,6 +893,16 @@ async function onValveToggle(id, newState) {
   box-shadow: 0 0 4px rgba(46, 204, 113, 0.6);
 }
 
+.state-indicator.ctrl-pending .state-led {
+  background: #f39c12;
+  box-shadow: 0 0 4px rgba(243, 156, 18, 0.6);
+}
+
+.state-indicator.ctrl-warning .state-led {
+  background: #e74c3c;
+  box-shadow: 0 0 4px rgba(231, 76, 60, 0.5);
+}
+
 /* Relay state — closed = energised = green, open = de-energised = red */
 .state-indicator.relay-closed { color: #2ecc71; }
 .state-indicator.relay-closed .state-led {
@@ -665,6 +912,18 @@ async function onValveToggle(id, newState) {
 
 .state-indicator.relay-open { color: #e74c3c; }
 .state-indicator.relay-open .state-led {
+  background: #e74c3c;
+  box-shadow: 0 0 4px rgba(231, 76, 60, 0.5);
+}
+
+.state-indicator.relay-pending { color: #f39c12; }
+.state-indicator.relay-pending .state-led {
+  background: #f39c12;
+  box-shadow: 0 0 4px rgba(243, 156, 18, 0.6);
+}
+
+.state-indicator.relay-warning { color: #e74c3c; }
+.state-indicator.relay-warning .state-led {
   background: #e74c3c;
   box-shadow: 0 0 4px rgba(231, 76, 60, 0.5);
 }
@@ -763,6 +1022,305 @@ async function onValveToggle(id, newState) {
   padding: 3px 8px 1px;
 }
 
+/* ── Variable (numeric) controls ── */
+
+.variable-row {
+  position: relative;
+}
+
+.aux-row .card-badge {
+  width: 38px;
+  flex: 0 0 auto;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aux-row .state-indicator {
+  width: 54px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.variable-unit {
+  margin-left: 2px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.variable-edit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 8px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.variable-edit-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+
+.variable-edit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.variable-popover {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 8px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  padding: 7px 8px;
+}
+
+.variable-popover-caret {
+  position: absolute;
+  top: -5px;
+  right: 14px;
+  width: 8px;
+  height: 8px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  border-left: 1px solid var(--border-color);
+  transform: rotate(45deg);
+}
+
+.variable-popover-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.variable-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.variable-input {
+  width: 70px;
+  font-size: 10px;
+  font-family: monospace;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 3px;
+  color: var(--text-primary);
+  padding: 3px 5px;
+}
+
+.variable-input.has-unit {
+  padding-right: 20px;
+}
+
+.variable-input:focus {
+  outline: none;
+  border-color: var(--input-focus-border);
+}
+
+.variable-input-unit {
+  position: absolute;
+  right: 6px;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.variable-confirm-btn,
+.variable-cancel-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  font-size: 9px;
+  border-radius: 3px;
+  padding: 0;
+  cursor: pointer;
+  border: 1px solid var(--border-color);
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.variable-confirm-btn {
+  background: #2ecc71;
+  border-color: #2ecc71;
+  color: #fff;
+}
+
+.variable-confirm-btn:hover:not(:disabled) {
+  background: #27ae60;
+}
+
+.variable-confirm-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.variable-cancel-btn {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.variable-cancel-btn:hover {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+/* ── View-only banner (web build; sits where E-STOP does on desktop) ── */
+
+.view-only-banner {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  user-select: none;
+}
+
+/* ── E-STOP button ── */
+
+.estop-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 100;
+  background: #c0392b;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  border: 2px solid #e74c3c;
+  border-radius: 4px;
+  padding: 6px 16px;
+  cursor: pointer;
+  box-shadow: 0 0 10px rgba(231, 76, 60, 0.5);
+  transition: background 0.15s, box-shadow 0.15s;
+  user-select: none;
+}
+
+.estop-btn:hover {
+  background: #e74c3c;
+  box-shadow: 0 0 16px rgba(231, 76, 60, 0.75);
+}
+
+/* ── E-STOP confirmation dialog ── */
+
+.estop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.estop-dialog {
+  background: var(--bg-secondary);
+  border: 2px solid #e74c3c;
+  border-radius: 6px;
+  padding: 24px 28px;
+  min-width: 320px;
+  box-shadow: 0 0 32px rgba(231, 76, 60, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.estop-dialog-title {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: #e74c3c;
+  text-align: center;
+}
+
+.estop-dialog-body {
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.estop-dialog-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.estop-confirm-btn {
+  background: #c0392b;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  border: none;
+  border-radius: 4px;
+  padding: 8px 0;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.estop-confirm-btn:hover:not(:disabled) {
+  background: #e74c3c;
+}
+
+.estop-confirm-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.estop-cancel-btn {
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 6px 0;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.estop-cancel-btn:hover:not(:disabled) {
+  background: var(--bg-surface);
+}
+
+.estop-cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ── Info cards (MV, Tank, Regulator) ── */
 
 .info-card {
@@ -778,6 +1336,5 @@ async function onValveToggle(id, newState) {
   user-select: none;
   opacity: 0.85;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
-
 }
 </style>

@@ -1,23 +1,36 @@
 <script setup>
-import { ref, watch, nextTick, computed, onMounted, onUnmounted } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { CAPS } from "../lib/platform.js";
 import ToggleSwitch from 'primevue/toggleswitch';
 import RadioButton from 'primevue/radiobutton';
-import { useKeyBindings } from "../composables/useKeyBindings.js";
 
 const props = defineProps({
-  isOpen: Boolean,
-  currentIp: String,
-  pidConfig: { type: String, default: 'rocket-launch' },
+  isOpen:        Boolean,
+  currentIp:     String,
+  pidConfig:     { type: String,  default: 'rocket-launch' },
+  testFrequency: { type: Number,  default: 190 },
+  testActive:    { type: Boolean, default: false },
+  serverSessionActiveConnected: { type: Boolean, default: false },
+  localRecordingActive: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["close", "update-ip", "update-pid-config"]);
+const emit = defineEmits(["close", "update-ip", "update-pid-config", "update-test-frequency"]);
 
 const ipMode = ref("none");
 const customIp = ref("");
-const cameraRecordingDir = ref("");
 const localPidConfig = ref("rocket-launch");
+const localTestFreq = ref(190);
 const overlayRef = ref(null);
+const serverIpLocked = computed(
+  () => props.serverSessionActiveConnected || props.localRecordingActive,
+);
+
+// The web build is served by the host it talks to, so it has no server to pick.
+const canSelectServer = CAPS.serverSelection;
+// Gates only the settings that issue commands — currently the stream frequency,
+// which re-rates the whole stand. Deliberately not the P&ID picker: that just
+// selects which diagram this client draws. See the template.
+const readOnly = !CAPS.commands;
 
 // ── Dark mode — persisted in localStorage, synced across windows ──────────────
 // localStorage is shared across all Tauri windows (same WebView2 data dir),
@@ -55,7 +68,7 @@ onUnmounted(() => _settingsChannel.close());
 
 watch(
   () => props.isOpen,
-  async (open) => {
+  (open) => {
     if (open) {
       nextTick(() => overlayRef.value?.focus());
       const ip = props.currentIp || "";
@@ -68,13 +81,7 @@ watch(
         customIp.value = ip;
       }
       localPidConfig.value = props.pidConfig || "rocket-launch";
-
-      try {
-        const dir = await invoke("fetch_camera_recording_dir");
-        cameraRecordingDir.value = dir || "";
-      } catch (err) {
-        console.error("Failed to fetch camera recording directory:", err);
-      }
+      localTestFreq.value  = props.testFrequency || 190;
     }
   }
 );
@@ -83,20 +90,29 @@ watch(localPidConfig, (cfg) => {
   emit("update-pid-config", cfg);
 });
 
+watch(localTestFreq, (hz) => {
+  const n = Math.max(1, Math.round(Number(hz)))
+  if (isFinite(n) && n !== props.testFrequency) emit("update-test-frequency", n)
+});
+
 function isValidIp(ip) {
   const ipv4Pattern = /^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/;
   return ipv4Pattern.test(ip);
 }
 
+// Emits only — persisting the choice is App.vue's job (get_ip), which is also
+// where it can refuse the change outright if a recording is running. This just
+// declines to emit while locked so the modal cannot start an argument it has
+// no standing to win.
 function applyIp() {
+  if (serverIpLocked.value) return;
+
   if (ipMode.value === "none") {
-    invoke("submit_ip", { newIp: "" });
     emit("update-ip", "");
     return;
   }
   const ip = ipMode.value === "localhost" ? "localhost" : customIp.value.trim();
   if (ipMode.value === "custom" && (!ip || !isValidIp(ip))) return;
-  invoke("submit_ip", { newIp: ip });
   emit("update-ip", ip);
 }
 
@@ -109,108 +125,6 @@ watch(customIp, () => {
     applyIp();
   }
 });
-
-function applyCameraRecordingDir() {
-  const dir = cameraRecordingDir.value.trim();
-  invoke("set_camera_recording_dir", { newDir: dir });
-}
-
-// ------- keybindings editing support ---------------------------------------
-const {
-  controlKeyMap,
-  userBindings,
-  knownValves,
-  knownAux,
-  knownKasa,
-} = useKeyBindings();
-
-const controlList = computed(() => {
-  const list = [];
-  for (const id of knownValves.value) list.push({ type: 'valve', id });
-  for (const key of knownAux.value) list.push({ type: 'aux', key });
-  for (const host of knownKasa.value) list.push({ type: 'kasa', host });
-  return list;
-});
-
-function ctrlId(ctrl) {
-  if (ctrl.type === 'valve') return `valve:${ctrl.id}`;
-  if (ctrl.type === 'aux') return `aux:${ctrl.key}`;
-  if (ctrl.type === 'kasa') return `kasa:${ctrl.host}`;
-  return '';
-}
-
-function ctrlLabel(ctrl) {
-  if (ctrl.type === 'valve') return ctrl.id;
-  if (ctrl.type === 'aux') return ctrl.key;
-  if (ctrl.type === 'kasa') return ctrl.host;
-  return '';
-}
-
-function matches(ctrl, entry) {
-  if (!entry) return false;
-  if (ctrl.type === 'valve' && entry.type === 'valve') return entry.id === ctrl.id;
-  if (ctrl.type === 'aux' && entry.type === 'aux') return entry.key === ctrl.key;
-  if (ctrl.type === 'kasa' && entry.type === 'kasa') return entry.host === ctrl.host;
-  return false;
-}
-
-function keyFor(ctrl) {
-  for (const [k, entry] of Object.entries(userBindings.value)) {
-    if (matches(ctrl, entry)) return k;
-  }
-  for (const [k, entry] of Object.entries(controlKeyMap.value)) {
-    if (matches(ctrl, entry)) return k;
-  }
-  return '';
-}
-
-// Helper to build a normalized key combination string from a KeyboardEvent
-function buildKeyCombo(event) {
-  const parts = [];
-  if (event.ctrlKey) parts.push('ctrl');
-  if (event.altKey) parts.push('alt');
-  if (event.shiftKey) parts.push('shift');
-  if (event.metaKey) parts.push('meta');
-  const key = event.key.toLowerCase();
-  if (key && !['control', 'alt', 'shift', 'meta'].includes(key)) {
-    parts.push(key);
-  }
-  return parts.join('+');
-}
-
-// Helper to validate a key combo (basic: at least one key, no empty)
-function isValidKeyCombo(combo) {
-  return combo && combo.split('+').length >= 1;
-}
-
-function setKeyFor(ctrl, newCombo) {
-  newCombo = String(newCombo).toLowerCase().trim();
-  if (!isValidKeyCombo(newCombo)) return;
-  for (const k of Object.keys(userBindings.value)) {
-    if (matches(ctrl, userBindings.value[k])) {
-      delete userBindings.value[k];
-    }
-  }
-  if (newCombo in userBindings.value) {
-    delete userBindings.value[newCombo];
-  }
-  userBindings.value[newCombo] = {
-    type: ctrl.type,
-    ...(ctrl.type === 'valve'
-      ? { id: ctrl.id }
-      : ctrl.type === 'aux'
-      ? { key: ctrl.key }
-      : { host: ctrl.host }),
-  };
-}
-
-function clearKey(ctrl) {
-  for (const k of Object.keys(userBindings.value)) {
-    if (matches(ctrl, userBindings.value[k])) {
-      delete userBindings.value[k];
-    }
-  }
-}
 </script>
 
 <template>
@@ -222,80 +136,76 @@ function clearKey(ctrl) {
        tabindex="-1">
     <div class="modal-container">
       <div class="modal-header">
-        <h3>Settings</h3>
-        <button class="modal-close-btn" @click="$emit('close')">✕</button>
+        <div class="modal-header-title">
+          <i class="pi pi-cog" />
+          <h3>Settings</h3>
+        </div>
+        <button class="modal-close-btn" @click="$emit('close')" title="Close">
+          <i class="pi pi-times" />
+        </button>
       </div>
       <div class="modal-body">
         <div class="setting-group">
-          <span class="setting-group-label">View</span>
+          <span class="setting-group-label"><i class="pi pi-palette" />View</span>
           <div class="view-toggle">
             <i class="pi pi-sun" :style="{color: darkMode ? 'var(--text-secondary)' : '#f39c12'}"></i>
             <ToggleSwitch v-model="darkMode" class="theme-switch" />
             <i class="pi pi-moon" :style="{color: darkMode ? '#f39c12' : 'var(--text-secondary)'}"></i>
           </div>
         </div>
+        <!-- Not gated: this picks which P&ID the client draws, which is a
+             per-client view preference (localStorage + a same-browser
+             BroadcastChannel), not a command. An engineer at the pad needs it
+             to look at the stand they are standing next to. -->
         <div class="setting-group">
-          <span class="setting-group-label">Test Configuration</span>
-          <div class="option-row">
+          <span class="setting-group-label"><i class="pi pi-sliders-h" />Test Configuration</span>
+          <label class="option-row" for="cfg-hot-fire">
             <RadioButton v-model="localPidConfig" value="hot-fire" inputId="cfg-hot-fire" />
-            <label for="cfg-hot-fire">Hot Fire</label>
-          </div>
-          <div class="option-row">
+            <span>Hot Fire</span>
+          </label>
+          <label class="option-row" for="cfg-rocket-launch">
             <RadioButton v-model="localPidConfig" value="rocket-launch" inputId="cfg-rocket-launch" />
-            <label for="cfg-rocket-launch">Rocket Launch</label>
+            <span>Rocket Launch</span>
+          </label>
+        </div>
+        <div class="setting-group" v-if="!readOnly">
+          <span class="setting-group-label"><i class="pi pi-wave-pulse" />Test Stream Frequency</span>
+          <div class="option-row freq-row">
+            <input
+              type="number"
+              v-model.number="localTestFreq"
+              min="1"
+              max="1000"
+              :disabled="props.testActive"
+              class="ip-text-input freq-input"
+            />
+            <span class="freq-unit-label">Hz</span>
+            <span v-if="props.testActive" class="freq-locked-label">locked during test</span>
           </div>
         </div>
-        <div class="setting-group">
-          <span class="setting-group-label">Server IP Address</span>
-          <div class="option-row">
-            <RadioButton v-model="ipMode" value="localhost" />
-            <label>Localhost (127.0.0.1)</label>
-          </div>
-          <div class="option-row">
-            <RadioButton v-model="ipMode" value="custom" />
-            <label>Custom: </label>
+        <!-- The pad reaches the server by loading this page from it, so there is
+             nothing here for it to decide — see CAPS.serverSelection. -->
+        <div class="setting-group" v-if="canSelectServer">
+          <span class="setting-group-label"><i class="pi pi-server" />Server IP Address</span>
+          <label class="option-row">
+            <RadioButton v-model="ipMode" value="localhost" :disabled="serverIpLocked" />
+            <span>Localhost (127.0.0.1)</span>
+          </label>
+          <label class="option-row">
+            <RadioButton v-model="ipMode" value="custom" :disabled="serverIpLocked" />
+            <span class="custom-ip-label">Custom:</span>
             <input
               type="text"
               v-model="customIp"
               placeholder="e.g. 192.168.1.100"
-              :disabled="ipMode !== 'custom'"
+              :disabled="serverIpLocked || ipMode !== 'custom'"
               class="ip-text-input"
-              @click="ipMode = 'custom'"
+              @click="!serverIpLocked && (ipMode = 'custom')"
             />
-          </div>
-        </div>
-
-        <div class="setting-group">
-          <span class="setting-group-label">Camera Recording Directory</span>
-          <input
-            type="text"
-            v-model="cameraRecordingDir"
-            class="ip-text-input"
-            placeholder="Defaults to your Videos folder"
-            @blur="applyCameraRecordingDir"
-            @keyup.enter="applyCameraRecordingDir"
-          />
-        </div>
-
-        <div class="setting-group">
-          <span class="setting-group-label">Keybindings</span>
-          <div
-            v-for="ctrl in controlList"
-            :key="ctrlId(ctrl)"
-            class="option-row binding-row"
-          >
-            <label>{{ ctrlLabel(ctrl) }}</label>
-            <input
-              type="text"
-              :value="keyFor(ctrl)"
-              readonly
-              class="key-input"
-              placeholder="Click to set"
-              @keydown.prevent="e => setKeyFor(ctrl, buildKeyCombo(e))"
-              @focus="$event.target.select()"
-            />
-            <button class="clear-btn" @click="clearKey(ctrl)">×</button>
-          </div>
+          </label>
+          <span v-if="serverIpLocked" class="freq-locked-label">
+            locked while a server session or laptop recording is active
+          </span>
         </div>
       </div>
     </div>
@@ -312,6 +222,10 @@ function clearKey(ctrl) {
   align-items: center;
   justify-content: center;
   z-index: 1000;
+  /* The overlay is focused programmatically so it can receive the esc keydown.
+     It is tabindex="-1" (not keyboard-reachable), so suppressing the focus ring
+     costs nothing — otherwise Chromium traces one around the whole viewport. */
+  outline: none;
 }
 
 .modal-container {
@@ -322,58 +236,92 @@ function clearKey(ctrl) {
   max-width: 420px;
   width: 90%;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
 }
 
 .modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 18px;
+  padding: 12px 16px;
+  background: var(--bg-surface);
   border-bottom: 1px solid var(--border-color);
+}
+
+.modal-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.modal-header-title .pi {
+  font-size: 0.95rem;
+  color: var(--text-muted);
 }
 
 .modal-header h3 {
   margin: 0;
   font-size: 1rem;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: 0.2px;
   color: var(--text-primary);
 }
 
 .modal-body {
-  padding: 20px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
 }
 
 /* Close button styles */
 .modal-close-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
   background: none;
-  border: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
   color: var(--text-secondary);
-  font-size: 1rem;
+  font-size: 0.85rem;
   cursor: pointer;
-  padding: 2px 6px;
-  line-height: 1;
+  padding: 0;
   box-shadow: none;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
 .modal-close-btn:hover {
   color: var(--text-primary);
-  border-color: transparent;
-  background: none;
+  border-color: var(--border-color);
+  background: var(--bg-secondary);
 }
 
-/* Setting group styles */
+/* Setting group styles — bordered section card, matching the app's card sections */
 .setting-group {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
 }
 
 .setting-group-label {
-  font-size: 0.78rem;
-  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+.setting-group-label .pi {
+  font-size: 0.78rem;
 }
 
 /* IP Input styles */
@@ -415,10 +363,57 @@ function clearKey(ctrl) {
 .option-row {
   display: flex;
   align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  margin: 0 -6px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+label.option-row:hover {
+  background: var(--bg-primary);
+}
+
+.option-row span {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+
+.custom-ip-label {
+  white-space: nowrap;
+}
+
+.freq-row {
+  gap: 6px;
+  cursor: default;
+}
+
+.freq-row:hover {
+  background: none;
+}
+
+.freq-input {
+  width: 72px;
+  flex: none;
+  text-align: right;
+}
+
+.freq-unit-label {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.freq-locked-label {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-left: 4px;
 }
 
 .option-row :deep(.p-radiobutton) {
-  margin-right: 6px;
+  margin-right: 0;
+  flex-shrink: 0;
 }
 
 /* Theme transition for dark/light switch */
@@ -432,40 +427,6 @@ function clearKey(ctrl) {
 .setting-group-label,
 .server-ip-text {
   transition: var(--theme-transition);
-}
-
-/* Keybinding editor styles */
-.binding-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-.key-input {
-  min-width: 80px;
-  padding: 2px 4px;
-  font-size: 0.9rem;
-  text-transform: lowercase;
-  background: var(--input-bg);
-  border: 1px solid var(--input-border);
-  border-radius: 4px;
-  color: var(--text-primary);
-}
-.key-input:focus {
-  outline: none;
-  border-color: var(--input-focus-border);
-}
-.clear-btn {
-  background: none;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 4px;
-}
-.clear-btn:hover {
-  color: var(--text-primary);
 }
 
 </style>

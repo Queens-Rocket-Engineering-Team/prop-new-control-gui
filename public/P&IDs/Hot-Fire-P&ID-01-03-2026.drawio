@@ -1,6 +1,6 @@
-<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36" version="29.6.0">
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36">
   <diagram name="Page-1" id="RsqAo8Mj0lqLszaBMl0x">
-    <mxGraphModel grid="1" page="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+    <mxGraphModel dx="2350" dy="1061" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -147,9 +147,13 @@
         <mxCell id="V9icAB_9miGhkraXgL6L-90" parent="1" style="triangle;whiteSpace=wrap;html=1;rotation=-180;labelBackgroundColor=none;rounded=0;strokeWidth=3;fontSize=12;fillColor=none;strokeColor=light-dark(#000000,#EDEDED);fontColor=#143642;" value="" vertex="1">
           <mxGeometry height="22.5" width="15" x="1570" y="501.25" as="geometry" />
         </mxCell>
-        <mxCell id="V9icAB_9miGhkraXgL6L-94" edge="1" parent="1" source="V9icAB_9miGhkraXgL6L-151" style="edgeStyle=orthogonalEdgeStyle;shape=connector;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.208;entryY=0.983;entryDx=0;entryDy=0;entryPerimeter=0;strokeColor=light-dark(#000000,#EDEDED);align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=12;fontColor=default;labelBackgroundColor=default;endArrow=none;endFill=0;strokeWidth=3;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;" target="ROCKET-TANK">
+        <mxCell id="V9icAB_9miGhkraXgL6L-94" edge="1" parent="1" source="4zWjgcBzuFKQsmzkRCe0-2" style="edgeStyle=orthogonalEdgeStyle;shape=connector;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.208;entryY=0.983;entryDx=0;entryDy=0;entryPerimeter=0;strokeColor=light-dark(#000000,#EDEDED);align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=12;fontColor=default;labelBackgroundColor=default;endArrow=none;endFill=0;strokeWidth=3;exitX=1.059;exitY=0.722;exitDx=0;exitDy=0;exitPerimeter=0;" target="ROCKET-TANK">
           <mxGeometry relative="1" as="geometry">
-            <mxPoint x="1200" y="520" as="sourcePoint" />
+            <Array as="points">
+              <mxPoint x="1139" y="520" />
+              <mxPoint x="1190" y="520" />
+            </Array>
+            <mxPoint x="1165.2499999999995" y="510.69499999999994" as="sourcePoint" />
           </mxGeometry>
         </mxCell>
         <mxCell id="V9icAB_9miGhkraXgL6L-95" edge="1" parent="1" source="-71ZQhwSSZebmiusgUNr-13" style="edgeStyle=orthogonalEdgeStyle;shape=connector;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=light-dark(#000000,#EDEDED);align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=12;fontColor=default;labelBackgroundColor=default;endArrow=none;endFill=0;exitDx=0;exitDy=0;exitPerimeter=0;strokeWidth=3;" target="V9icAB_9miGhkraXgL6L-89">
@@ -204,9 +208,6 @@
             <mxPoint x="590.9099999999999" y="133.7899999999999" as="sourcePoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="V9icAB_9miGhkraXgL6L-151" parent="1" style="verticalLabelPosition=bottom;aspect=fixed;html=1;verticalAlign=top;fillColor=strokeColor;align=center;outlineConnect=0;shape=mxgraph.fluid_power.x11690;points=[[0.5,0,0],[0.5,1,0]];fontFamily=Helvetica;fontSize=12;fontColor=default;labelBackgroundColor=default;rotation=-90;strokeColor=light-dark(#000000,#EDEDED);strokeWidth=3;" value="" vertex="1">
-          <mxGeometry height="76.39" width="14.11" x="1119.9999999999998" y="472.5" as="geometry" />
-        </mxCell>
         <mxCell id="V9icAB_9miGhkraXgL6L-159" edge="1" parent="1" source="V9icAB_9miGhkraXgL6L-26" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.014;entryY=0.738;entryDx=0;entryDy=0;entryPerimeter=0;strokeColor=light-dark(#000000,#EDEDED);curved=0;startSize=9;strokeWidth=3;endArrow=none;endFill=0;" target="MV-N2O-SUPPLY">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
@@ -260,8 +261,15 @@
             <mxGeometry height="160" width="40" x="75" y="540" as="geometry" />
           </mxCell>
         </object>
-        <mxCell id="V9icAB_9miGhkraXgL6L-207" edge="1" parent="1" source="V9icAB_9miGhkraXgL6L-151" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;exitPerimeter=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;strokeColor=light-dark(#000000,#EDEDED);strokeWidth=3;endArrow=none;endFill=0;" target="V9icAB_9miGhkraXgL6L-32">
-          <mxGeometry relative="1" as="geometry" />
+        <mxCell id="V9icAB_9miGhkraXgL6L-207" edge="1" parent="1" source="4zWjgcBzuFKQsmzkRCe0-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.542;exitDx=0;exitDy=0;exitPerimeter=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;strokeColor=light-dark(#000000,#EDEDED);strokeWidth=3;endArrow=none;endFill=0;" target="V9icAB_9miGhkraXgL6L-32">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1110" y="520" />
+              <mxPoint x="1090" y="520" />
+              <mxPoint x="1090" y="335" />
+            </Array>
+            <mxPoint x="1088.8600000000001" y="510.69499999999994" as="sourcePoint" />
+          </mxGeometry>
         </mxCell>
         <object label="" SET-PRESSURE-PSI="200" id="PRV-N2-SUPPLY">
           <mxCell parent="1" style="verticalLabelPosition=bottom;aspect=fixed;html=1;verticalAlign=top;fillColor=strokeColor;align=center;outlineConnect=0;shape=mxgraph.fluid_power.x10500;points=[[0.47,0,0],[0.47,1,0]];fontFamily=Helvetica;fontSize=12;fontColor=default;labelBackgroundColor=default;strokeColor=light-dark(#000000,#EDEDED);strokeWidth=3;" vertex="1">
@@ -500,31 +508,11 @@
             <mxPoint x="660" y="665" as="targetPoint" />
           </mxGeometry>
         </mxCell>
-        <object label="" id="TC-RUN">
-          <mxCell parent="1" style="verticalLabelPosition=bottom;aspect=fixed;html=1;verticalAlign=top;fillColor=strokeColor;align=center;outlineConnect=0;shape=mxgraph.fluid_power.x11850;points=[[0.5,1,0]];strokeWidth=3;" vertex="1">
-            <mxGeometry height="56.18" width="37.34" x="1352.0800000000002" y="100" as="geometry" />
+        <object label="" id="4zWjgcBzuFKQsmzkRCe0-2">
+          <mxCell parent="1" style="verticalLabelPosition=bottom;align=center;html=1;verticalAlign=top;pointerEvents=1;dashed=0;shape=mxgraph.pid2valves.valve;valveType=gate;actuator=singActing;fontFamily=Helvetica;fontSize=12;fontColor=default;labelBackgroundColor=default;strokeColor=light-dark(#000000,#EDEDED);rotation=0;strokeWidth=3;fillColor=none;" vertex="1">
+            <mxGeometry height="30" width="27.5" x="1110" y="497.5" as="geometry" />
           </mxCell>
         </object>
-        <mxCell id="-71ZQhwSSZebmiusgUNr-31" edge="1" parent="1" source="ROCKET-TANK" style="endArrow=none;html=1;rounded=0;fontSize=12;startSize=8;endSize=8;curved=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;entryPerimeter=0;strokeWidth=3;exitX=0.999;exitY=0.167;exitDx=0;exitDy=0;exitPerimeter=0;" target="TC-RUN" value="">
-          <mxGeometry height="50" relative="1" width="50" as="geometry">
-            <Array as="points">
-              <mxPoint x="1370" y="294" />
-            </Array>
-            <mxPoint x="1370" y="290" as="sourcePoint" />
-            <mxPoint x="1280" y="260" as="targetPoint" />
-          </mxGeometry>
-        </mxCell>
-        <object label="" id="TC-COMBUSTION-CHAMBER">
-          <mxCell parent="1" style="verticalLabelPosition=bottom;aspect=fixed;html=1;verticalAlign=top;fillColor=strokeColor;align=center;outlineConnect=0;shape=mxgraph.fluid_power.x11850;points=[[0.5,1,0]];strokeWidth=3;" vertex="1">
-            <mxGeometry height="56.18" width="37.34" x="1500" y="100" as="geometry" />
-          </mxCell>
-        </object>
-        <mxCell id="-71ZQhwSSZebmiusgUNr-33" edge="1" parent="1" source="V9icAB_9miGhkraXgL6L-89" style="endArrow=none;html=1;rounded=0;fontSize=12;startSize=8;endSize=8;curved=1;entryX=0.5;entryY=1;entryDx=0;entryDy=0;entryPerimeter=0;exitX=0.369;exitY=-0.02;exitDx=0;exitDy=0;exitPerimeter=0;strokeWidth=4;" target="TC-COMBUSTION-CHAMBER" value="">
-          <mxGeometry height="50" relative="1" width="50" as="geometry">
-            <mxPoint x="1310" y="370" as="sourcePoint" />
-            <mxPoint x="1360" y="320" as="targetPoint" />
-          </mxGeometry>
-        </mxCell>
       </root>
     </mxGraphModel>
   </diagram>

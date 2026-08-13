@@ -9,6 +9,7 @@ lerna-debug.log*
 
 node_modules/
 dist/
+dist-web/
 dist-ssr/
 *.local
 
@@ -25,3 +26,11 @@ dist-ssr/
 
 # Residual datafiles from old gui
 data/
+
+# Flatpak
+.flatpak-builder/
+build-dir/
+.flatpak-builder-tools/
+.venv-flatpak-tools/
+cargo-sources.json
+node-sources.json

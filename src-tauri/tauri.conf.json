@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "prop-control-gui",
+  "productName": "HELM",
   "version": "0.1.0",
-  "identifier": "com.prop-control-gui.app",
+  "identifier": "org.qret.helm",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "prop-control-gui",
+        "title": "HELM",
         "width": 800,
         "height": 600
       }
