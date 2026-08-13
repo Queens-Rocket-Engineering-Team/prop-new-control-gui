@@ -11,7 +11,8 @@
 // this editor capture a key without also firing it.
 
 import { computed, nextTick, ref, watch } from "vue";
-import { useKeyBindings, buildKeyCombo } from "../composables/useKeyBindings.js";
+import { useKeyBindings } from "../composables/useKeyBindings.js";
+import KeyField from "./key_field.vue";
 
 const props = defineProps({
   isOpen: Boolean,
@@ -27,7 +28,7 @@ watch(
   (open) => { if (open) nextTick(() => overlayRef.value?.focus()); }
 );
 
-const { editableControls, setBinding, clearBinding } = useKeyBindings();
+const { editableControls } = useKeyBindings();
 
 // Sectioned in registration order so the editor reads like the control panel.
 // Each section carries its own column captions — OPEN/CLOSE for valves, ON/OFF
@@ -56,20 +57,8 @@ const maxColumns = computed(() =>
   bindingGroups.value.reduce((n, g) => Math.max(n, g.columns.length), 1)
 );
 
-// The input is readonly and its keydowns are captured, not typed: whatever
-// combo is pressed becomes the binding. Backspace/delete clears it instead.
-// Tab and escape are left alone so the modal can still be navigated and
-// dismissed while a field has focus; setBinding rejects the rest of the
-// reserved keys itself.
-function captureKey(cell, event) {
-  if (event.key === 'Tab' || event.key === 'Escape') return;
-  event.preventDefault();
-  if (event.key === 'Backspace' || event.key === 'Delete') {
-    clearBinding(cell.target);
-    return;
-  }
-  setBinding(cell.target, buildKeyCombo(event));
-}
+// Capture and validation live in key_field.vue, shared with the switch-sync
+// prompt so a binding is changed the same way wherever it is offered.
 </script>
 
 <template>
@@ -111,16 +100,11 @@ function captureKey(cell, event) {
               <div v-for="row in group.rows" :key="row.id" class="binding-row">
                 <span class="binding-label" :title="row.label">{{ row.label }}</span>
                 <span class="binding-cells">
-                  <input
+                  <key-field
                     v-for="cell in row.cells"
                     :key="cell.id"
-                    type="text"
-                    readonly
-                    class="binding-input"
-                    :class="{ bound: cell.combo }"
-                    :value="cell.combo"
-                    :title="`${row.label} — ${cell.action}`"
-                    @keydown="captureKey(cell, $event)"
+                    :target="cell.target"
+                    :label="`${row.label} — ${cell.action}`"
                   />
                 </span>
               </div>
@@ -299,33 +283,6 @@ function captureKey(cell, event) {
   text-align: center;
 }
 
-.binding-input {
-  flex: none;
-  width: 110px;
-  background: var(--input-bg);
-  border: 1px solid var(--input-border);
-  border-radius: 6px;
-  color: var(--text-primary);
-  padding: 4px 8px;
-  font-size: 0.85rem;
-  font-family: inherit;
-  text-align: center;
-  text-transform: lowercase;
-  cursor: pointer;
-}
-
-.binding-input:focus {
-  outline: none;
-  border-color: var(--input-focus-border);
-}
-
-/* An unbound field is legible but recessive, so a half-bound pair reads as a
-   gap in the column rather than as two equal-looking fields. */
-.binding-input:not(.bound) {
-  color: var(--text-muted);
-  border-style: dashed;
-}
-
 .binding-empty {
   font-size: 0.75rem;
   font-style: italic;
@@ -338,8 +295,7 @@ function captureKey(cell, event) {
 .modal-header,
 .modal-body,
 .modal-footer,
-.modal-close-btn,
-.binding-input {
+.modal-close-btn {
   transition: var(--theme-transition);
 }
 </style>

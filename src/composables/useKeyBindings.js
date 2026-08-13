@@ -47,6 +47,11 @@ const ACTIONS = {
   kasa:  ['on', 'off'],
 }
 
+/** True for targets that command a state, i.e. that a physical switch drives. */
+export function isActuator(target) {
+  return !!ACTIONS[target?.type] && ACTIONS[target.type].includes(target.action)
+}
+
 /** The control a target belongs to, ignoring which state it commands. */
 export function controlKey(target) {
   switch (target?.type) {
