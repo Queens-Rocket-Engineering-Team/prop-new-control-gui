@@ -92,31 +92,179 @@ function derivedAction(target) {
   return ACTIONS[target?.type] ? String(target.action).toUpperCase() : ''
 }
 
-// ── Key combos ───────────────────────────────────────────────────────────────
+// ── Key identity ─────────────────────────────────────────────────────────────
+//
+// A key is identified by `event.code` — the physical key — rather than by
+// `event.key`, which is the symbol the active keymap translates it to. Two
+// reasons, both of which bit us:
+//
+//   The switch panel is a keyboard-emulating HID, and those devices emit
+//   F13–F24 precisely because nothing else uses them. On Linux those keycodes
+//   frequently have no keysym mapped, so `event.key` arrives as "Unidentified"
+//   and every unmapped key on the panel collapses onto the same combo string.
+//   `event.code` comes from the scancode and reads "F22" either way.
+//
+//   `event.key` is also layout- and shift-dependent: the key left of Enter is
+//   ";" or ":" or "ñ" depending on the keyboard and whether shift is down, so a
+//   binding made on one machine would not resolve on another. `event.code` says
+//   "Semicolon" for all of them.
 
-/** Normalised combo string for a KeyboardEvent, e.g. "ctrl+shift+p" or "f". */
-export function buildKeyCombo(event) {
-  const parts = []
-  if (event.ctrlKey)  parts.push('ctrl')
-  if (event.altKey)   parts.push('alt')
-  if (event.shiftKey) parts.push('shift')
-  if (event.metaKey)  parts.push('meta')
-  const key = String(event.key ?? '').toLowerCase()
-  if (key && !['control', 'alt', 'shift', 'meta'].includes(key)) parts.push(key)
-  return parts.join('+')
+const MODIFIER_CODES = new Set([
+  'ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight',
+  'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight',
+])
+
+/**
+ * Token for a physical key, or '' for a modifier (carried by the event's
+ * ctrlKey/altKey/shiftKey/metaKey flags instead — left and right must not be
+ * distinguishable, or a binding would depend on which hand pressed it).
+ */
+function tokenFromCode(code) {
+  if (!code || code === 'Unidentified') return ''
+  if (MODIFIER_CODES.has(code)) return ''
+  const letter = /^Key([A-Z])$/.exec(code)
+  if (letter) return letter[1].toLowerCase()
+  const digit = /^Digit([0-9])$/.exec(code)
+  if (digit) return digit[1]
+  // Everything else reads well lowercased: f22, space, slash, arrowup, numpad5.
+  return code.toLowerCase()
 }
 
-const MODIFIERS = new Set(['ctrl', 'alt', 'shift', 'meta'])
-// Reserved because the app already owns them: esc closes both modals, tab moves
-// focus, and enter submits the variable-control input.
-const RESERVED = new Set(['escape', 'tab', 'enter'])
+// `event.key` names, for the two cases where a code is not available: a device
+// that reports none, and combos stored before this module used codes. The
+// character rows assume a US layout, which is the only guess available from a
+// keysym alone — a binding made on another layout migrates to the key that sits
+// in the same place on a US keyboard, and can be re-bound if that is wrong.
+const KEY_TOKENS = {
+  ' ': 'space',
+  '`': 'backquote',  '~': 'backquote',
+  '-': 'minus',      '_': 'minus',
+  '=': 'equal',      '+': 'equal',
+  '[': 'bracketleft',  '{': 'bracketleft',
+  ']': 'bracketright', '}': 'bracketright',
+  '\\': 'backslash', '|': 'backslash',
+  ';': 'semicolon',  ':': 'semicolon',
+  "'": 'quote',      '"': 'quote',
+  ',': 'comma',      '<': 'comma',
+  '.': 'period',     '>': 'period',
+  '/': 'slash',      '?': 'slash',
+  '!': '1', '@': '2', '#': '3', '$': '4', '%': '5',
+  '^': '6', '&': '7', '*': '8', '(': '9', ')': '0',
+  'spacebar': 'space',
+  'del': 'delete',
+  'esc': 'escape',
+}
 
-export function isValidKeyCombo(combo) {
-  if (!combo) return false
-  const parts = combo.split('+')
-  const key = parts[parts.length - 1]
-  if (MODIFIERS.has(key)) return false   // modifiers alone are not a shortcut
-  return !RESERVED.has(key)
+function tokenFromKey(key) {
+  const name = String(key ?? '').toLowerCase()
+  if (!name || name === 'unidentified') return ''
+  if (KEY_TOKENS[name]) return KEY_TOKENS[name]
+  if (['control', 'alt', 'shift', 'meta'].includes(name)) return ''
+  return name
+}
+
+/** Token for the key a KeyboardEvent refers to, or '' for a modifier. */
+export function keyToken(event) {
+  const code = String(event?.code ?? '')
+  if (code && code !== 'Unidentified') return tokenFromCode(code)
+  return tokenFromKey(event?.key)
+}
+
+// ── Key combos ───────────────────────────────────────────────────────────────
+//
+// A combo is a *set* of keys held at once, not a single key: "ctrl+a+b" means
+// ctrl, a and b are all down. The non-modifier tokens are sorted so the order
+// they were pressed in cannot produce two different strings for the same grip —
+// an operator holding a chord is not thinking about which finger landed first.
+
+const MODIFIER_ORDER = ['ctrl', 'alt', 'shift', 'meta']
+const MODIFIERS = new Set(MODIFIER_ORDER)
+// Reserved because the app already owns them: esc closes every modal, tab moves
+// focus, and enter submits the variable-control input.
+const RESERVED = new Set(['escape', 'tab', 'enter', 'numpadenter'])
+
+/** Canonical combo string, e.g. "ctrl+shift+f11" or "a+b". */
+export function comboFrom(modifiers, tokens) {
+  const parts = MODIFIER_ORDER.filter((m) => modifiers?.[m])
+  const keys = [...new Set(tokens)].filter(Boolean).sort()
+  return [...parts, ...keys].join('+')
+}
+
+function modifiersOf(event) {
+  return {
+    ctrl:  !!event?.ctrlKey,
+    alt:   !!event?.altKey,
+    shift: !!event?.shiftKey,
+    meta:  !!event?.metaKey,
+  }
+}
+
+/**
+ * The canonical form of a combo string, or '' if it is not a usable shortcut.
+ *
+ * The single gate for anything entering the map, so a hand-edited, broadcast or
+ * pre-token combo is held to the same shape a freshly captured one is: a
+ * legacy "shift+/" becomes "shift+slash", and "b+a" becomes "a+b" rather than
+ * sitting in storage as a binding no keypress can ever match.
+ */
+export function canonicaliseCombo(combo) {
+  const modifiers = { ctrl: false, alt: false, shift: false, meta: false }
+  const keys = []
+  for (const part of String(combo ?? '').toLowerCase().trim().split('+')) {
+    if (MODIFIERS.has(part)) { modifiers[part] = true; continue }
+    const token = tokenFromKey(part)
+    if (!token || RESERVED.has(token)) return ''
+    keys.push(token)
+  }
+  if (keys.length === 0) return ''   // modifiers alone are not a shortcut
+  return comboFrom(modifiers, keys)
+}
+
+// ── Held keys ────────────────────────────────────────────────────────────────
+//
+// A chord spans several events, so what is currently down has to be remembered
+// between them. Module-level, like the bindings themselves: the capture field
+// and the control panel must agree on the grip, and the panel's listener sees
+// the field's keystrokes on their way past.
+
+const held = new Set()
+
+/** Record a keydown; returns the combo for everything now held. */
+export function pressKey(event) {
+  const token = keyToken(event)
+  if (token) held.add(token)
+  return comboFrom(modifiersOf(event), held)
+}
+
+/** Record a keyup. */
+export function releaseKey(event) {
+  const token = keyToken(event)
+  if (token) held.delete(token)
+}
+
+/**
+ * Forget everything held.
+ *
+ * Load-bearing: a key released while the window is not focused never delivers
+ * its keyup, so without this the token stays in the set and every later press
+ * resolves to a chord the operator is not holding. Alt-tabbing away mid-press
+ * would quietly break the keyboard until reload.
+ */
+export function resetHeld() {
+  held.clear()
+}
+
+// Releases are tracked here rather than in the panel, because the set has to
+// stay honest whether or not the Control panel is mounted — the keybinding
+// editor is reachable from any window, and a key it saw go down there would
+// otherwise still be counted as held when the operator navigates back.
+// Capture phase so nothing nested can hide a release by stopping propagation.
+if (typeof window !== 'undefined') {
+  window.addEventListener('keyup', releaseKey, true)
+  window.addEventListener('blur', resetHeld)
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) resetHeld()
+  })
 }
 
 // ── Stored bindings: { [combo]: target } ─────────────────────────────────────
@@ -132,7 +280,8 @@ function parseBindings(json) {
     // to a target the panel cannot act on.
     const clean = {}
     for (const [combo, target] of Object.entries(raw)) {
-      if (isValidKeyCombo(combo) && targetId(target)) clean[combo] = target
+      const canonical = canonicaliseCombo(combo)
+      if (canonical && targetId(target)) clean[canonical] = target
     }
     return clean
   } catch {
@@ -192,9 +341,25 @@ const keyForTarget = computed(() => {
   return map
 })
 
-/** The target a key press should act on, or null. */
+/** The target bound to a combo, or null. */
 function resolve(combo) {
   return bindings.value[combo] ?? null
+}
+
+/**
+ * Record a keydown and return the target it should act on, or null.
+ *
+ * Two candidates, in this order: the whole grip — every key held at once, which
+ * is what a chord is — and then the key on its own. The fallback is there
+ * because presses overlap in ordinary use: an operator rolling from one switch
+ * key to the next still has the first down when the second lands, and without
+ * it that second press would silently do nothing. It cannot be ambiguous,
+ * because conflictingCombo refuses to store a binding whose keys are a subset
+ * of another's — so the grip and the solo key can never name two targets.
+ */
+function pressBinding(event) {
+  const grip = pressKey(event)
+  return resolve(grip) ?? resolve(comboFrom(modifiersOf(event), [keyToken(event)]))
 }
 
 /**
@@ -252,13 +417,63 @@ function clearBinding(target) {
   }
 }
 
-/** Assign `combo` to `target`, stealing it from whatever held it before. */
+// The modifiers and the key set of a combo, as the two things conflicts compare.
+function comboParts(combo) {
+  const modifiers = []
+  const keys = new Set()
+  for (const part of combo.split('+')) {
+    if (MODIFIERS.has(part)) modifiers.push(part)
+    else keys.add(part)
+  }
+  return { modifiers: modifiers.join('+'), keys }
+}
+
+function isSubsetOf(a, b) {
+  for (const token of a) if (!b.has(token)) return false
+  return true
+}
+
+/**
+ * A bound combo that cannot coexist with `combo`, or ''.
+ *
+ * The panel fires on keydown, because a valve command must not wait on a
+ * release timer to find out whether a longer chord was coming. The cost is that
+ * a shorter binding fires on the way into a chord that contains it: with "ctrl+a"
+ * bound, gripping "ctrl+a+b" commands the ctrl+a target first. Deferring every
+ * ordinary keypress to rule that out is the worse trade next to a live stand, so
+ * the pair is refused at bind time instead — where somebody is looking at it —
+ * and the stored map stays free of combos that shadow each other.
+ *
+ * `target`'s own bindings are ignored: setBinding clears them before assigning,
+ * so they are not there to collide with.
+ */
+export function conflictingCombo(combo, target) {
+  const mine = comboParts(combo)
+  const selfId = targetId(target)
+  for (const [bound, boundTarget] of Object.entries(bindings.value)) {
+    if (bound === combo) continue                    // a straight steal, not a conflict
+    if (targetId(boundTarget) === selfId) continue
+    const theirs = comboParts(bound)
+    if (theirs.modifiers !== mine.modifiers) continue
+    if (theirs.keys.size === mine.keys.size) continue
+    if (isSubsetOf(theirs.keys, mine.keys) || isSubsetOf(mine.keys, theirs.keys)) return bound
+  }
+  return ''
+}
+
+/**
+ * Assign `combo` to `target`, stealing it from whatever held it before.
+ * Returns why it was refused, so the field can say so rather than going blank.
+ */
 function setBinding(target, combo) {
-  const normalised = String(combo).toLowerCase().trim()
-  if (!isValidKeyCombo(normalised) || !targetId(target)) return
+  const normalised = canonicaliseCombo(combo)
+  if (!normalised || !targetId(target)) return { ok: false, reason: 'invalid' }
+  const clash = conflictingCombo(normalised, target)
+  if (clash) return { ok: false, reason: 'conflict', conflict: clash }
   clearBinding(target)
   delete bindings.value[normalised]
   bindings.value[normalised] = target
+  return { ok: true, combo: normalised }
 }
 
 export function useKeyBindings() {
@@ -270,5 +485,6 @@ export function useKeyBindings() {
     setBinding,
     clearBinding,
     resolve,
+    pressBinding,
   }
 }

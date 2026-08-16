@@ -113,8 +113,9 @@ const maxColumns = computed(() =>
         </div>
 
         <div class="modal-footer">
-          Click a field and press a key to bind it; backspace clears.
-          Each key commands one state, so open and close are bound separately.
+          Click a field and hold the keys you want, then let go; backspace clears.
+          Several keys held at once bind as one chord — order does not matter.
+          Each binding commands one state, so open and close are bound separately.
           Shortcuts act on the Control panel only.
         </div>
       </div>
@@ -270,12 +271,12 @@ const maxColumns = computed(() =>
   display: flex;
   gap: 8px;
   flex: none;
-  width: calc(var(--cell-cols) * 110px + (var(--cell-cols) - 1) * 8px);
+  width: calc(var(--cell-cols) * 150px + (var(--cell-cols) - 1) * 8px);
 }
 
 .binding-col {
   flex: none;
-  width: 110px;
+  width: 150px;
   font-size: 0.64rem;
   font-weight: 700;
   letter-spacing: 0.06em;

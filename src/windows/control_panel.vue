@@ -3,7 +3,7 @@ import { ref, inject, computed, reactive, watch, onMounted, onBeforeUnmount } fr
 import ToggleSwitch from 'primevue/toggleswitch'
 import PidDiagram from '../components/PidDiagram.vue'
 import { useServerApi } from '../composables/useServerApi.js'
-import { useKeyBindings, buildKeyCombo, targetId, controlKey } from '../composables/useKeyBindings.js'
+import { useKeyBindings, resetHeld, targetId, controlKey } from '../composables/useKeyBindings.js'
 import { useSwitchSync } from '../composables/useSwitchSync.js'
 import SwitchSyncModal from '../components/switch_sync_modal.vue'
 import { CAPS } from '../lib/platform.js'
@@ -562,7 +562,7 @@ async function onAuxToggle(controlName, newEnergised) {
 // key means the same thing every time, and pressing it twice is a no-op instead
 // of an undo.
 
-const { keyForTarget, registerTargets, resolve } = useKeyBindings()
+const { keyForTarget, registerTargets, pressBinding } = useKeyBindings()
 
 // Publish what can be bound so the settings editor has something to list.
 // Valves come from the parsed P&ID rather than from the device list, because a
@@ -758,6 +758,11 @@ function onSyncDismiss(mismatchedKeys) {
 }
 
 function onKeydown(evt) {
+  // Resolved before any guard below can return: pressBinding is what records
+  // the key as held, and a press that went uncounted would still deliver its
+  // keyup, leaving the held set disagreeing with the keyboard.
+  const binding = pressBinding(evt)
+
   // The pad build cannot command the stand — same reason every control in this
   // template is :disabled there.
   if (readOnly) return
@@ -773,10 +778,9 @@ function onKeydown(evt) {
   // and commands nothing. Checked before the generic modal guard below, which
   // would otherwise swallow it like any other open modal.
   if (syncOpen.value) {
-    const flip = resolve(buildKeyCombo(evt))
-    if (!flip) return
+    if (!binding) return
     evt.preventDefault()
-    recordSwitch(flip)
+    recordSwitch(binding)
     return
   }
 
@@ -788,7 +792,6 @@ function onKeydown(evt) {
   if (showEstopConfirm.value || openVariableEditor.value) return
   if (document.querySelector('.modal-overlay')) return
 
-  const binding = resolve(buildKeyCombo(evt))
   if (!binding) return
   evt.preventDefault()
 
@@ -824,8 +827,15 @@ function onKeydown(evt) {
   }
 }
 
-onMounted(() => window.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+// Capture phase, so a press is counted as held before anything nested can act
+// on the event — a component that stopped propagation would otherwise leave the
+// key counted as down for the rest of the session. Releases are tracked by
+// useKeyBindings itself, which listens for as long as the module is loaded.
+onMounted(() => window.addEventListener('keydown', onKeydown, true))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown, true)
+  resetHeld()
+})
 </script>
 
 <template>
