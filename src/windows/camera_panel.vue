@@ -12,6 +12,8 @@ import {
 
 import Button from "primevue/button";
 
+import { CAPS } from "../lib/platform.js";
+
 // Required so <KeepAlive include="CameraPanel"> in App.vue matches this component.
 defineOptions({ name: "CameraPanel" });
 
@@ -20,6 +22,9 @@ const DEFAULT_TILE_WIDTH = 360;
 const ICE_DISCOVERY_TIMEOUT_MS = 3_000;
 const ICE_GATHERING_TIMEOUT_MS = 8_000;
 const WHEP_REQUEST_TIMEOUT_MS = 15_000;
+const PTZ_REQUEST_TIMEOUT_MS = 5_000;
+//TODO: update x_movement/y_movement amounts
+const PTZ_STEP = 0.2;
 const CONNECTION_TIMEOUT_MS = 20_000;
 const DISCONNECTED_GRACE_MS = 6_000;
 const VIDEO_STALL_TIMEOUT_MS = 20_000;
@@ -29,6 +34,12 @@ const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
 const server_ip = inject("serverIp");
 const liveSession = inject("session", ref(null));
+
+// PTZ and camera reconnect are the panel's only writes. This panel talks to the
+// server directly rather than through useServerApi.js, so the permission is read
+// once here and every sender checks it — see CAPS.cameraControl in platform.js.
+const canControlCameras = CAPS.cameraControl;
+
 const cameras = ref([]);
 const arr = ref([]);
 const text = ref();
@@ -811,10 +822,16 @@ function onVisibilityChange() {
     if (!document.hidden) resumeAllStreams();
 }
 
+// Pointer events rather than mouse events, so the handle works under a finger
+// on the tablets the web build is served to — same pattern as the nav_bar
+// resize handle. `touch-action: none` on the handle is what stops the browser
+// claiming the drag as a page scroll.
 function onTileResizeStart(event, key) {
     _resizing = { key, startX: event.clientX, startWidth: tileSizes.value[key] ?? DEFAULT_TILE_WIDTH };
-    document.addEventListener("mousemove", onTileResizeMove);
-    document.addEventListener("mouseup", onTileResizeEnd);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    document.addEventListener("pointermove", onTileResizeMove);
+    document.addEventListener("pointerup", onTileResizeEnd);
+    document.addEventListener("pointercancel", onTileResizeEnd);
     event.preventDefault();
 }
 
@@ -826,8 +843,9 @@ function onTileResizeMove(event) {
 
 function onTileResizeEnd() {
     _resizing = null;
-    document.removeEventListener("mousemove", onTileResizeMove);
-    document.removeEventListener("mouseup", onTileResizeEnd);
+    document.removeEventListener("pointermove", onTileResizeMove);
+    document.removeEventListener("pointerup", onTileResizeEnd);
+    document.removeEventListener("pointercancel", onTileResizeEnd);
 }
 
 function normalizeCameraList(rawCameras) {
@@ -940,6 +958,11 @@ async function get_list(options = {}) {
 }
 
 async function refresh_list() {
+    if (!canControlCameras) {
+        text.value = "Reconnecting cameras is done from launch control";
+        return;
+    }
+
     const server = currentServerIp();
     if (!server || refreshing.value) return;
 
@@ -971,33 +994,39 @@ async function refresh_list() {
     }
 }
 
-function cam_right(ip) {
-    //TODO: update x_movement/y_movement amounts
-    fetch(`http://${server_ip.value}:8000/v1/camera?ip=${ip}&x_movement=-0.2&y_movement=0`, {
-        method: "POST",
-        headers: AUTH_HEADERS
-    });
-}
+/**
+ * Nudge one camera. Movements are relative: positive x pans left, positive y
+ * tilts up, so the D-pad passes the sign the direction implies.
+ *
+ * The result is reported in the toolbar rather than swallowed: this runs on
+ * tablets over the same wifi the test depends on, where a request failing
+ * outright is likely enough that a silently dead arrow button would be read as
+ * a stuck camera.
+ */
+async function movePtz(ip, xMovement, yMovement) {
+    if (!canControlCameras) return;
 
-function cam_left(ip) { 
-    fetch(`http://${server_ip.value}:8000/v1/camera?ip=${ip}&x_movement=0.2&y_movement=0`, {
-        method: "POST",
-        headers: AUTH_HEADERS
-    });
-}
+    const server = currentServerIp();
+    const cameraIp = String(ip ?? "").trim();
+    if (!server || !cameraIp) return;
 
-function cam_up(ip) {
-    fetch(`http://${server_ip.value}:8000/v1/camera?ip=${ip}&x_movement=0&y_movement=0.2`, {
-        method: "POST",
-        headers: AUTH_HEADERS
+    const params = new URLSearchParams({
+        ip: cameraIp,
+        x_movement: String(xMovement),
+        y_movement: String(yMovement),
     });
-}
 
-function cam_down(ip) {
-    fetch(`http://${server_ip.value}:8000/v1/camera?ip=${ip}&x_movement=0&y_movement=-0.2`, {
-        method: "POST",
-        headers: AUTH_HEADERS
-    });
+    try {
+        const response = await fetchWithTimeout(
+            `${apiBaseUrl(server)}/v1/camera?${params}`,
+            { method: "POST", headers: AUTH_HEADERS },
+            PTZ_REQUEST_TIMEOUT_MS,
+        );
+        await ensureOk(response, "Failed to move camera");
+    } catch (error) {
+        if (isAbortError(error)) return;
+        text.value = errorMessage(error);
+    }
 }
 
 if (server_ip) {
@@ -1060,8 +1089,9 @@ onUnmounted(() => {
     abortPendingCameraRequests();
     closeAllStreams();
     window.clearInterval(watchdogTimer);
-    document.removeEventListener("mousemove", onTileResizeMove);
-    document.removeEventListener("mouseup", onTileResizeEnd);
+    document.removeEventListener("pointermove", onTileResizeMove);
+    document.removeEventListener("pointerup", onTileResizeEnd);
+    document.removeEventListener("pointercancel", onTileResizeEnd);
     document.removeEventListener("visibilitychange", onVisibilityChange);
 });
 
@@ -1080,6 +1110,7 @@ onUnmounted(() => {
                 :disabled="!server_ip || loading || refreshing"
             />
             <Button
+                v-if="canControlCameras"
                 :label="refreshing ? 'Refreshing...' : 'Refresh'"
                 size="small"
                 @click="refresh_list"
@@ -1132,18 +1163,20 @@ onUnmounted(() => {
                 </div>
 
                 <div class="tile-controls">
-                    <div class="ptz-label">PTZ</div>
-                    <div class="ptz-pad">
-                        <div />
-                        <Button icon="pi pi-chevron-up"    size="small" @click="cam_up(item.ip)"    />
-                        <div />
-                        <Button icon="pi pi-chevron-left"  size="small" @click="cam_left(item.ip)"  />
-                        <div />
-                        <Button icon="pi pi-chevron-right" size="small" @click="cam_right(item.ip)" />
-                        <div />
-                        <Button icon="pi pi-chevron-down"  size="small" @click="cam_down(item.ip)"  />
-                        <div />
-                    </div>
+                    <template v-if="canControlCameras">
+                        <div class="ptz-label">PTZ</div>
+                        <div class="ptz-pad">
+                            <div />
+                            <Button icon="pi pi-chevron-up"    size="small" @click="movePtz(item.ip, 0, PTZ_STEP)"  />
+                            <div />
+                            <Button icon="pi pi-chevron-left"  size="small" @click="movePtz(item.ip, PTZ_STEP, 0)"  />
+                            <div />
+                            <Button icon="pi pi-chevron-right" size="small" @click="movePtz(item.ip, -PTZ_STEP, 0)" />
+                            <div />
+                            <Button icon="pi pi-chevron-down"  size="small" @click="movePtz(item.ip, 0, -PTZ_STEP)" />
+                            <div />
+                        </div>
+                    </template>
 
                     <Button
                         :icon="isMuted(item.streamKey) ? 'pi pi-volume-off' : 'pi pi-volume-up'"
@@ -1155,7 +1188,7 @@ onUnmounted(() => {
 
                 </div>
 
-                <div class="tile-resize-handle" @mousedown="onTileResizeStart($event, item.streamKey)" />
+                <div class="tile-resize-handle" @pointerdown="onTileResizeStart($event, item.streamKey)" />
 
             </div>
         </div>
@@ -1227,6 +1260,10 @@ onUnmounted(() => {
     overflow: hidden;
     transition: var(--theme-transition);
     min-width: 240px;
+    /* The width above is an inline pixel value from the resize handle; this
+       keeps a tile dragged wide (or the 360px default) from overflowing a
+       narrow tablet or phone viewport. */
+    max-width: 100%;
 }
 
 /* Drag handle on right edge — same pattern as nav_bar resize handle */
@@ -1239,6 +1276,8 @@ onUnmounted(() => {
     cursor: col-resize;
     z-index: 2;
     border-radius: 0 4px 4px 0;
+    /* Pointer-driven drag: without this the browser scrolls the grid instead. */
+    touch-action: none;
 }
 
 .tile-resize-handle:hover,
@@ -1402,4 +1441,41 @@ onUnmounted(() => {
 
 .btn-muted { border-color: var(--border-accent) !important; }
 .btn-muted :deep(.p-button-icon) { color: var(--text-muted) !important; }
+
+/* ── Touch sizing ──
+ *
+ * The web build is served to tablets at the pad, where a 24px D-pad button and
+ * a 5px drag handle are both under a fingertip's floor (34px, the same target
+ * the nav bar sizes to). Width queries rather than `pointer: coarse` to match
+ * the breakpoints the rest of the app already uses — see nav_bar.vue.
+ */
+
+/* iPad 10.2"/11" landscape (1024–1194) and anything narrower. */
+@media (max-width: 1200px) {
+    .ptz-pad {
+        grid-template-columns: repeat(3, 34px);
+        grid-template-rows: repeat(3, 34px);
+    }
+
+    .ptz-pad :deep(.p-button) {
+        width: 34px  !important;
+        height: 34px !important;
+        font-size: 0.75rem !important;
+    }
+
+    .tile-controls :deep(.p-button) {
+        min-height: 34px;
+    }
+
+    .tile-resize-handle {
+        width: 12px;
+    }
+}
+
+/* Phone: one tile per row, sized by the grid rather than the drag handle. */
+@media (max-width: 700px) {
+    .camera-tile {
+        min-width: 0;
+    }
+}
 </style>

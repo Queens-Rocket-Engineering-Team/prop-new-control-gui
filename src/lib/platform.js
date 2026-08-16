@@ -53,6 +53,21 @@ export const CAPS = {
     return true
   },
 
+  // Camera PTZ (POST /v1/camera) and POST /v1/cameras/reconnect. True in both
+  // builds: unlike a CONTROL or STREAM broadcast, neither touches the stand —
+  // PTZ aims one camera and reconnect only re-dials the server's own camera
+  // connections. The engineer standing at the pad is the person best placed to
+  // aim a camera, and doing that without a radio call is the point of the pad
+  // build.
+  //
+  // Kept separate from CAPS.commands because the camera panel talks to the
+  // server with its own fetch calls rather than through useServerApi.js, so
+  // this flag is what makes revoking the permission one line here instead of a
+  // hunt through camera_panel.vue.
+  get cameraControl() {
+    return true
+  },
+
   // Lets a view-only client start a *preview* stream when the whole stand is
   // silent, so devices that connect before launch control is up still show
   // data instead of sitting there looking broken. Web-only: the desktop app
@@ -106,11 +121,13 @@ export function availablePanels() {
   if (mode() === "desktop") {
     return ["control", "graph", "camera", "sessions", "devices", "debug", "flight"]
   }
-  // Pad build: pressures, device health and charts. Camera is deliberately out
-  // (multiple WebRTC streams would hammer both the iPad and the wifi link the
-  // test depends on), and Flight's basemap has no offline tiles in a browser.
-  // Sessions is out for the same reason as Camera: browsing the archive is
-  // launch control's job, and a session ZIP is large enough that pulling one
-  // would compete with the telemetry the test depends on.
-  return ["control", "graph", "devices"]
+  // Pad build: pressures, device health, charts and cameras. The camera panel
+  // costs the wifi link nothing until it is asked to: it opens no stream until
+  // Load is pressed and tears every one down when the panel is navigated away
+  // from (onDeactivated in camera_panel.vue), so the bandwidth is spent only by
+  // someone who wants it. Flight stays out — its basemap has no offline tiles
+  // in a browser. Sessions stays out because browsing the archive is launch
+  // control's job, and a session ZIP is large enough that pulling one would
+  // compete with the telemetry the test depends on.
+  return ["control", "graph", "camera", "devices"]
 }
