@@ -22,6 +22,19 @@ mod telemetry_raw;
 static IP_ADDRESS: Mutex<String> = Mutex::new(String::new());
 static ACTIVE_SERVER_SESSION: Mutex<Option<String>> = Mutex::new(None);
 
+/// Devices whose physical switch positions this app run has already reconciled,
+/// and the server they were reconciled on. See useSwitchSync.js for what the
+/// reconciliation is and why a device registration owes one.
+///
+/// This lives in Rust for one property the frontend cannot supply: it survives a
+/// webview reload and is shared by every window, but dies with the process. A
+/// reload is not new information about the switch panel, and neither is opening
+/// a second window — re-prompting for either is the noise this exists to remove.
+/// An app restart *is* worth asking about again, which is why nothing here is
+/// written to disk.
+static RECONCILED_DEVICES: LazyLock<Mutex<(String, BTreeSet<String>)>> =
+    LazyLock::new(|| Mutex::new((String::new(), BTreeSet::new())));
+
 /// Latest known unit for each sensor name, as reported on the raw telemetry
 /// stream. Used to annotate CSV column headers, e.g. "PT101 [PSI]".
 static SENSOR_UNITS: LazyLock<Mutex<HashMap<String, String>>> =
@@ -76,6 +89,47 @@ async fn submit_ip(new_ip: String) -> Result<(), String> {
     let mut ip = IP_ADDRESS.lock().map_err(|e| e.to_string())?;
     println!("New IP Submitted: {}", new_ip);
     *ip = new_ip;
+    Ok(())
+}
+
+/// The reconciled set for `server_ip`, or empty if the set belongs to another
+/// server — a familiar device name on a different stand is a different device
+/// with its own switches, so nothing carries over.
+///
+/// Deliberately a pure read. An earlier version reset the store whenever the
+/// queried IP differed, which made it destructive to ask: every window load
+/// queries once with an empty IP before the address has resolved, and that lone
+/// query wiped the very set the next query was about to need.
+#[tauri::command]
+fn reconciled_devices(server_ip: String) -> Result<Vec<String>, String> {
+    let store = RECONCILED_DEVICES.lock().map_err(|e| e.to_string())?;
+    if store.0 != server_ip {
+        return Ok(Vec::new());
+    }
+    Ok(store.1.iter().cloned().collect())
+}
+
+/// Record (or retract) a reconciliation. Retraction is what a re-registration
+/// needs: the device came back up in its controls' default states, so an earlier
+/// reconciliation no longer describes it.
+#[tauri::command]
+fn mark_reconciled(
+    server_ip: String,
+    devices: Vec<String>,
+    reconciled: bool,
+) -> Result<(), String> {
+    let mut store = RECONCILED_DEVICES.lock().map_err(|e| e.to_string())?;
+    if store.0 != server_ip {
+        store.0 = server_ip;
+        store.1.clear();
+    }
+    for device in devices {
+        if reconciled {
+            store.1.insert(device);
+        } else {
+            store.1.remove(&device);
+        }
+    }
     Ok(())
 }
 
@@ -859,6 +913,8 @@ pub fn run() {
             fetch_server_ip,
             submit_ip,
             set_server_session_lock,
+            reconciled_devices,
+            mark_reconciled,
             start_recording,
             stop_recording,
             local_recording_active,

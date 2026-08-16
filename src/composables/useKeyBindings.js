@@ -1,10 +1,16 @@
-// Keyboard shortcuts for the control panel.
+// Keyboard shortcuts for commanding the stand.
 //
-// Two halves: settings_modal.vue writes the map, control_panel.vue reads it and
-// listens for keys. Both import this module directly rather than going through
-// provide/inject — the state is a module-level singleton, so a panel that has
-// been unmounted (navigating away from Control) does not lose it, and App.vue
-// needs no knowledge of the feature at all.
+// Three parts: settings_modal.vue writes the map, control_panel.vue publishes
+// what can be bound (valve targets are drawio IDs, so only the parsed P&ID can
+// enumerate them), and useControlLayer.js reads the map and listens for keys.
+// All import this module directly rather than going through provide/inject —
+// the state is a module-level singleton, so a component that has been unmounted
+// does not lose it.
+//
+// The listener deliberately does *not* live with the Control panel. It used to,
+// and the effect was that navigating to a chart silently disarmed the physical
+// switch panel; useControlLayer.js is instantiated once per window by App.vue,
+// above the view swap, so a binding acts the same on every view.
 //
 // Nothing is bound by default. Auto-assigning keys to whatever the P&ID happens
 // to contain means a stray keystroke actuates a valve nobody chose to bind, on a
@@ -14,7 +20,7 @@
 // and the P&ID choice (see settings_modal.vue / App.vue): it is a per-client
 // preference, it survives a restart, it reaches every spawned window, and it
 // works unchanged in the view-only web build — which has no Rust side to store
-// it in. Note that the pad build never *acts* on bindings; control_panel.vue
+// it in. Note that the pad build never *acts* on bindings; useControlLayer.js
 // drops every key press when CAPS.commands is false.
 
 import { computed, ref, watch } from 'vue'

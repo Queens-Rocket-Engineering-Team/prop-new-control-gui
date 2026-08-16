@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window and any spawned screen windows",
-  "windows": ["main", "screen-*"],
+  "description": "Capability for the main window and any spawned window — per-monitor screen-* windows at startup (lib.rs) and extra-* windows opened from the nav bar",
+  "windows": ["main", "screen-*", "extra-*"],
   "permissions": [
     "core:default",
     "opener:default",
