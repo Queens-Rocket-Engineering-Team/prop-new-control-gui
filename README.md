@@ -11,8 +11,9 @@ codebase into two shapes.
 ## The view-only web build
 
 Engineers at the pad need to see pressures and control states without radioing
-launch control for every reading. The web build gives them that, and nothing
-else: all commanding stays at launch control.
+launch control for every reading. The web build gives them that and very little
+else: all stand commanding stays at launch control. The narrow exceptions —
+device discovery and the camera panel — are spelled out below.
 
 `src/lib/platform.js` owns the distinction. Every capability is derived from
 `mode()` there rather than checked ad hoc, so what the pad can do is answerable
@@ -29,18 +30,38 @@ rather than any button, and QLCP `STREAM`/`STOP` are *broadcast*. Without those
 guards a tablet would re-arm the stream rate for the whole stand just by being
 open, and `STOP`+`STREAM` carries a deliberate telemetry gap.
 
-The one permitted write is `POST /v1/discover`, so someone who just powered a
-device on can pull it in without a radio call. It is safe because the server
-already broadcasts that exact multicast every 30 s on its own — the button only
-skips the wait. Kasa discovery is deliberately *not* included: it is a
-broadcast-and-wait scan that occupies the server's event loop for seconds.
+The permitted writes are `POST /v1/discover`, so someone who just powered a
+device on can pull it in without a radio call, and the camera panel's own calls
+(below). Discovery is safe because the server already broadcasts that exact
+multicast every 30 s on its own — the button only skips the wait. Kasa discovery
+is deliberately *not* included: it is a broadcast-and-wait scan that occupies
+the server's event loop for seconds.
+
+### The camera exception
+
+The camera panel is available at the pad with PTZ and reconnect, gated by
+`CAPS.cameraControl` in `platform.js` rather than `CAPS.commands`. Neither call
+touches the stand: PTZ aims one camera and reconnect only re-dials the server's
+own camera connections, and the engineer standing at the pad is the person best
+placed to aim a camera. The panel talks to the server and to mediamtx with its
+own `fetch` calls rather than through `useServerApi.js`, which is why the
+permission is a flag of its own — revoking it is one line in `platform.js`.
+
+Streams are opt-in: nothing is requested until **Load** is pressed, and every
+stream is torn down when the panel is navigated away from. A tablet that never
+opens the panel costs the wifi link nothing.
 
 ### Verifying it stays read-only
 
 Serve `dist-web/` against a server (or a request-logging stub) and watch the
-network traffic. Across a whole session, including a device disconnect and
-rejoin, the only non-GET request may be `POST /v1/discover`, and only in direct
-response to the discover button. Anything else is a regression.
+network traffic. Across a whole session with the camera panel closed, including
+a device disconnect and rejoin, the only non-GET request may be
+`POST /v1/discover`, and only in direct response to the discover button.
+Anything else is a regression.
+
+With the camera panel open and loaded, four more are expected, and only these:
+WHEP `POST`/`DELETE` to mediamtx on 8889, `POST /v1/camera` (PTZ) and
+`POST /v1/cameras/reconnect`.
 
 ### Known gaps
 
@@ -51,12 +72,14 @@ response to the discover button. Anything else is a regression.
 - **The pad cannot tell a test is running.** `testActive` is synced only via
   `BroadcastChannel` (same browser, same origin), so the discover button cannot
   be disabled during a hot fire.
-- **Camera and Flight panels are hidden** in the web build — multiple WebRTC
-  streams would hammer both the tablet and the wifi link, and the offline
+- **Flight and Sessions panels are hidden** in the web build — the offline
   basemap has no browser equivalent (`tileSource.js` falls back to online OSM
-  tiles, which are unavailable at a launch site).
-- **Touch ergonomics**: the nav resize handle is mouse-only, and nothing is
-  responsive below desktop widths.
+  tiles, which are unavailable at a launch site), and pulling a session ZIP
+  would compete with the telemetry the test depends on.
+- **Touch ergonomics**: the nav, Control and Camera panels are sized and
+  pointer-driven for tablets; the Data (graph) and Debug panels are not, and
+  the graph's popovers still close on `mousedown` only
+  (`graph_panel.vue:214`).
 
 ## Deployment
 
