@@ -7,7 +7,7 @@
 // Teleported to <body> so it is not nested inside the settings modal's DOM:
 // otherwise its esc keydown would bubble to that overlay's handler and close
 // both at once. It also keeps the .modal-overlay class, which is what stops
-// control_panel.vue acting on keys while a modal is up — the guard that lets
+// useControlLayer.js acting on keys while a modal is up — the guard that lets
 // this editor capture a key without also firing it.
 
 import { computed, nextTick, ref, watch } from "vue";
@@ -113,9 +113,12 @@ const maxColumns = computed(() =>
         </div>
 
         <div class="modal-footer">
-          Click a field and press a key to bind it; backspace clears.
-          Each key commands one state, so open and close are bound separately.
-          Shortcuts act on the Control panel only.
+          Click a field and hold the keys you want, then let go; backspace clears.
+          Several keys held at once bind as one chord — order does not matter.
+          Each binding commands one state, so open and close are bound separately.
+          Shortcuts act on every view of the focused window, except while a
+          variable control's editor is needed — those keys work on the Control
+          panel only.
         </div>
       </div>
     </div>
@@ -270,12 +273,12 @@ const maxColumns = computed(() =>
   display: flex;
   gap: 8px;
   flex: none;
-  width: calc(var(--cell-cols) * 110px + (var(--cell-cols) - 1) * 8px);
+  width: calc(var(--cell-cols) * 150px + (var(--cell-cols) - 1) * 8px);
 }
 
 .binding-col {
   flex: none;
-  width: 110px;
+  width: 150px;
   font-size: 0.64rem;
   font-weight: 700;
   letter-spacing: 0.06em;

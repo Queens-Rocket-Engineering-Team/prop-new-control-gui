@@ -2,7 +2,7 @@
 // Reconciliation prompt: physical switch positions against what the device
 // actually reports. See useSwitchSync.js for why a registration owes one.
 //
-// Rows are computed by control_panel.vue, which is where device state lives.
+// Rows are computed by useControlLayer.js, which is where device state lives.
 // This component renders them and decides nothing except when Confirm is
 // allowed — which is only once every row agrees.
 
@@ -15,7 +15,7 @@ const props = defineProps({
    * [{ key, label, deviceLabel, switchLabel, expected, matched, group,
    *    cells: [{ id, target, action }] }]
    * `group` is the owning device's name, or '' outside the just-registered
-   * flow (see control_panel.vue) — rows with no meaningful device to group by.
+   * flow (see useControlLayer.js) — rows with no meaningful device to group by.
    */
   rows: { type: Array, default: () => [] },
   /** Device names that raised this prompt; empty when reopened for review. */

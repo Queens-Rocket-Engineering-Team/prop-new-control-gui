@@ -70,6 +70,72 @@ export async function submitIp(newIp) {
   // avoids. Returning quietly keeps that one call site build-agnostic.
 }
 
+// ── Reconciled switch positions ──────────────────────────────────────────────
+// Which devices' physical switches have already been reconciled this app run —
+// see useSwitchSync.js. Rust owns the set (lib.rs RECONCILED_DEVICES) because
+// the whole point is a lifetime the frontend cannot express: longer than a
+// webview reload, shared by every window, gone on an app restart.
+//
+// The web fallback is sessionStorage, which buys the reload half of that and
+// nothing else. That build is view-only — the prompt is gated on !readOnly and
+// never opens there — so this exists to keep the call sites build-agnostic
+// rather than because a tablet will exercise it.
+//
+// Both wrappers swallow failures and fall through to sessionStorage. An invoke
+// can be rejected outright by Tauri's capability layer if a window label ever
+// escapes capabilities/default.json, and the consequence of throwing here would
+// be an unhandled rejection on every device publish. Degrading to a per-window
+// set just means that window prompts once more than it had to.
+
+const RECONCILED_KEY = "qret-switch-sync-reconciled"
+
+function _sessionReconciled(serverIp) {
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(RECONCILED_KEY) ?? "null")
+    if (!raw || raw.serverIp !== serverIp || !Array.isArray(raw.devices)) return []
+    return raw.devices.filter((name) => typeof name === "string")
+  } catch {
+    return []
+  }
+}
+
+function _writeSessionReconciled(serverIp, devices) {
+  try {
+    sessionStorage.setItem(RECONCILED_KEY, JSON.stringify({ serverIp, devices }))
+  } catch {
+    /* private mode or a full quota — the prompt simply asks again */
+  }
+}
+
+export async function reconciledDevices(serverIp) {
+  if (!isWeb()) {
+    try {
+      return await call("reconciled_devices", { serverIp })
+    } catch (err) {
+      console.warn("[desktop] reconciled_devices failed:", err)
+    }
+  }
+  return _sessionReconciled(serverIp)
+}
+
+export async function markReconciled(serverIp, devices, reconciled) {
+  if (!devices.length) return
+  if (!isWeb()) {
+    try {
+      await call("mark_reconciled", { serverIp, devices, reconciled })
+      return
+    } catch (err) {
+      console.warn("[desktop] mark_reconciled failed:", err)
+    }
+  }
+  const next = new Set(_sessionReconciled(serverIp))
+  for (const name of devices) {
+    if (reconciled) next.add(name)
+    else next.delete(name)
+  }
+  _writeSessionReconciled(serverIp, [...next])
+}
+
 // Tares are not wrapped here: they are server state reached over the HTTP API
 // (useServerApi), not a Rust command, so there is nothing Tauri-specific to
 // bridge. What the pad may do with them is gated by CAPS.tares at the call site.

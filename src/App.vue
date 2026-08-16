@@ -10,7 +10,12 @@ import {
   localRecordingActive as fetchLocalRecordingActive,
   setServerSessionLock,
 } from "./lib/desktop.js";
-import { noteDeviceRegistered, noteDevicesPresent } from "./composables/useSwitchSync.js";
+import {
+  noteDeviceRegistered,
+  noteDevicesPresent,
+  noteStateDisconnected,
+} from "./composables/useSwitchSync.js";
+import { useControlLayer } from "./composables/useControlLayer.js";
 import { useServerApi, PREVIEW_STREAM_HZ } from "./composables/useServerApi.js";
 import { useStateStream } from "./composables/useStateStream.js";
 import { useTelemetryStream, normalizeDownsampleAlgorithm, TELEMETRY_WINDOW_SEC, TELEMETRY_WINDOW_OPTIONS } from "./composables/useTelemetryStream.js";
@@ -28,6 +33,7 @@ import FlightPanel from "./windows/flight_panel.vue";
 
 import SettingsModal from "./components/settings_modal.vue";
 import AboutModal from "./components/about_modal.vue";
+import SwitchSyncModal from "./components/switch_sync_modal.vue";
 
 const window_content = shallowRef(ControlPanel);
 function setActive(component) {
@@ -277,7 +283,7 @@ const {
 // been running longest. Presence counts as much as the announcement; the
 // dedupe that keeps this from firing on every republish lives in useSwitchSync.
 watch(devices, () => {
-  noteDevicesPresent(server_ip.value, devices.value.map((dev) => dev.name));
+  noteDevicesPresent(server_ip.value, devices.value);
 }, { immediate: true });
 
 provide('devices',      devices);
@@ -290,7 +296,14 @@ provide('stateStreamStatus', stateStatus);
 // A device that rejoined while the state socket was down arrives in the resync
 // snapshot rather than as a `device.registered` delta, so re-arm on reconnect
 // too. No-ops before a server IP is set, where the derived rate is still 0.
+//
+// That same blind spot is why the socket dropping is reported to useSwitchSync:
+// a device may rejoin while we cannot hear the `device.registered` delta, and
+// come up in its controls' defaults with nothing to announce it. Marking the
+// outage here is all this has to do — the comparison happens on the resync
+// snapshot's device publish, and a blip that moved nothing raises no prompt.
 watch(stateStatus, (status, previous) => {
+  if (previous === 'connected' && status !== 'connected') noteStateDisconnected();
   if (status === 'connected' && previous !== 'connected') scheduleStreamRearm('state resync');
 });
 
@@ -1040,6 +1053,36 @@ watch(stateVersion, () => {
 // pressed — a live-looking button that silently fails is worse than a dead one.
 provide('readOnly', !canCommand);
 
+// ── Control layer ────────────────────────────────────────────────────────────
+// Commanding the stand lives here rather than in control_panel.vue because the
+// keyboard has to outlive the panel: the switch panel is a keyboard-emulating
+// HID, and window_content below swaps the panel out the moment the operator
+// looks at a chart. One instance per window, injected by the Control panel so a
+// keystroke and a click share the same pending/NACK bookkeeping. The keydown
+// listener is registered on this component's lifecycle — see useControlLayer.js.
+
+const controlLayer = useControlLayer({
+  serverIp: server_ip,
+  devices,
+  kasaDevices,
+  commandsById,
+  pidConfig,
+  requestStatusSnapshot,
+  setKasaState,
+});
+provide('controlLayer', controlLayer);
+
+const {
+  showEstopConfirm,
+  estopPending,
+  confirmEstop,
+  syncOpen,
+  syncRows,
+  pendingDevices: syncPendingDevices,
+  onSyncConfirm,
+  onSyncDismiss,
+} = controlLayer;
+
 // ── Config fetch on connect ──────────────────────────────────────────────────
 // The /ws/state socket auto-resyncss on connect, so no manual config fetching is
 // needed — the snapshot brings devices, kasa, commands and tares. We just manage
@@ -1279,6 +1322,46 @@ onUnmounted(() => {
       :is-open="aboutOpen"
       @close="aboutOpen = false"
     ></about-modal>
+
+    <!-- ── Physical switch reconciliation prompt ── -->
+    <!-- Above the view swap, not inside the Control panel: a device registering
+         while the operator is watching a chart owes the same prompt, and the
+         keys it wants are now handled up here too. -->
+    <switch-sync-modal
+      :is-open="syncOpen"
+      :rows="syncRows"
+      :devices="syncPendingDevices"
+      @confirm="onSyncConfirm"
+      @dismiss="onSyncDismiss"
+    />
+
+    <!-- ── E-STOP confirmation dialog ── -->
+    <!-- The E-STOP *button* stays on the Control panel; the dialog lives here so
+         the bound key can raise it from any view. -->
+    <Teleport to="body">
+      <div v-if="showEstopConfirm" class="estop-overlay" @click.self="showEstopConfirm = false">
+        <div class="estop-dialog">
+          <div class="estop-dialog-title">EMERGENCY STOP</div>
+          <div class="estop-dialog-body">
+            This will immediately send an emergency stop command to the server. <br>
+            All actuated valves will reset to their default state and data streaming will stop. <br>
+            Are you sure?
+          </div>
+          <div class="estop-dialog-actions">
+            <button
+              class="estop-confirm-btn"
+              :disabled="estopPending"
+              @click="confirmEstop"
+            >{{ estopPending ? 'SENDING…' : 'CONFIRM E-STOP' }}</button>
+            <button
+              class="estop-cancel-btn"
+              :disabled="estopPending"
+              @click="showEstopConfirm = false"
+            >Cancel</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </main>
 </template>
 
@@ -1303,5 +1386,95 @@ onUnmounted(() => {
   border-radius: 0 10px 10px 0;
   padding: 10px;
   text-align: left;
+}
+
+/* ── E-STOP confirmation dialog ── */
+/* Moved here with the dialog itself. Scoped styles still reach it through the
+   Teleport: the nodes belong to this component's render, wherever they land. */
+
+.estop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.estop-dialog {
+  background: var(--bg-secondary);
+  border: 2px solid #e74c3c;
+  border-radius: 6px;
+  padding: 24px 28px;
+  min-width: 320px;
+  box-shadow: 0 0 32px rgba(231, 76, 60, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.estop-dialog-title {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: #e74c3c;
+  text-align: center;
+}
+
+.estop-dialog-body {
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.estop-dialog-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.estop-confirm-btn {
+  background: #c0392b;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  border: none;
+  border-radius: 4px;
+  padding: 8px 0;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.estop-confirm-btn:hover:not(:disabled) {
+  background: #e74c3c;
+}
+
+.estop-confirm-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.estop-cancel-btn {
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 6px 0;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.estop-cancel-btn:hover:not(:disabled) {
+  background: var(--bg-surface);
+}
+
+.estop-cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>
