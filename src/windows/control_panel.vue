@@ -79,6 +79,9 @@ const SIDE_HINTS = {
     'AV-102': 'top',   // directly above its valve
     'AV-201': 'top',   // the clear band between the two pipe runs
     'PT-102': 'bottom',
+    // Outside the shell outline, in the empty band beside the vehicle. Left, not
+    // right: the outline's far line sits ~18px from the edge of the drawing.
+    'CLAMSHELL': 'left',
   },
 }
 
@@ -103,7 +106,13 @@ const satLayout = computed(() => PID_SAT_LAYOUT[pidConfig.value] ?? 'full')
 
 // ── Dynamic element lists (populated from parsed SVG cells) ──────────────────
 
-const valves     = ref([])    // drawio IDs starting with AV
+// Actuated elements the drawing doesn't give a valve glyph. The clamshell is the
+// dotted shell outline around the onboard tank, but it is commanded exactly like
+// a valve — same card, same OPEN/CLOSED wording — so it joins the valve list
+// rather than growing a shape of its own.
+const ACTUATED_IDS = ['CLAMSHELL']
+
+const valves     = ref([])    // drawio IDs starting with AV, plus ACTUATED_IDS
 const sensors    = ref([])    // [{ id, unit }, ...]
 const mvs        = ref([])
 const tanks      = ref([])
@@ -115,6 +124,7 @@ function onCellsParsed(cells) {
   for (const id of Object.keys(cells)) {
     const up = id.toUpperCase()
     if      (up.startsWith('AV'))         newValves.push(id)
+    else if (ACTUATED_IDS.some(a => up.startsWith(a))) newValves.push(id)
     else if (up.startsWith('PT'))         newSensors.push({ id, unit: 'psi' })
     else if (up.startsWith('TC'))         newSensors.push({ id, unit: '°C'  })
     else if (up.startsWith('LC'))         newSensors.push({ id, unit: 'kg'  })

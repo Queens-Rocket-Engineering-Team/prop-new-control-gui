@@ -482,17 +482,19 @@
             </mxGeometry>
           </mxCell>
         </object>
-        <mxCell id="Dywup__a3dXbZeiByI8c-146" edge="1" parent="1" style="shape=connector;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=light-dark(#000000,#FFFFFF);align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=12;fontColor=default;labelBackgroundColor=default;endArrow=none;endFill=0;strokeWidth=3;edgeStyle=orthogonalEdgeStyle;innerLoopWaypoints=1;dashed=1;dashPattern=1 1;">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="1349.6399999999999" y="419.6" />
-              <mxPoint x="1287.84" y="419.6" />
-              <mxPoint x="1287.84" y="180.5" />
-            </Array>
-            <mxPoint x="1349.6399999999999" y="420.84" as="sourcePoint" />
-            <mxPoint x="1329.6399999999999" y="180.54" as="targetPoint" />
-          </mxGeometry>
-        </mxCell>
+        <object label="" id="CLAMSHELL">
+          <mxCell edge="1" parent="1" style="shape=connector;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=light-dark(#000000,#FFFFFF);align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=12;fontColor=default;labelBackgroundColor=default;endArrow=none;endFill=0;strokeWidth=3;edgeStyle=orthogonalEdgeStyle;innerLoopWaypoints=1;dashed=1;dashPattern=1 1;">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="1349.6399999999999" y="419.6" />
+                <mxPoint x="1287.84" y="419.6" />
+                <mxPoint x="1287.84" y="180.5" />
+              </Array>
+              <mxPoint x="1349.6399999999999" y="420.84" as="sourcePoint" />
+              <mxPoint x="1329.6399999999999" y="180.54" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </object>
         <mxCell id="M7eVK5M8CFlmB2sw4Arq-8" edge="1" parent="1" source="Dywup__a3dXbZeiByI8c-99" style="rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=none;endFill=0;strokeWidth=3;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.161;entryY=0.497;entryDx=0;entryDy=0;entryPerimeter=0;" target="vxIQrFPQpkyK0YHJ0yjP-54">
           <mxGeometry relative="1" as="geometry">
             <mxPoint x="1239.9982573086209" y="-82.00182761105793" as="sourcePoint" />

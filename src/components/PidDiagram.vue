@@ -29,6 +29,34 @@ const { positionOf, positionBeside, leaderLines } = usePidOverlay(containerRef, 
 // attribute.  The rendered SVG elements carry no semantic IDs, so we read
 // cell positions directly from mxGeometry instead of querying the DOM.
 
+// An edge has no mxGeometry box — its extent lives in the waypoints and the
+// source/target points. Reading them gives a hand-named edge (the clamshell
+// outline, which is drawn as two dotted runs rather than a symbol) somewhere to
+// hang its card. `as="offset"` points are label offsets, not positions, and a
+// perfectly straight run has a zero-width axis, so it's widened to a sliver to
+// survive the zero-size filter in Pass 3.
+const MIN_EDGE_SPAN = 8
+const NAMED_ID = /^[A-Z][A-Z0-9_-]*$/
+
+function edgeBounds(geo) {
+  const xs = []
+  const ys = []
+  for (const p of geo.querySelectorAll('mxPoint')) {
+    if (p.getAttribute('as') === 'offset') continue
+    const x = parseFloat(p.getAttribute('x') ?? '')
+    const y = parseFloat(p.getAttribute('y') ?? '')
+    if (Number.isFinite(x) && Number.isFinite(y)) { xs.push(x); ys.push(y) }
+  }
+  if (xs.length < 2) return null
+
+  const span = (lo, hi) => (hi - lo >= MIN_EDGE_SPAN
+    ? [lo, hi - lo]
+    : [(lo + hi - MIN_EDGE_SPAN) / 2, MIN_EDGE_SPAN])
+  const [x, w] = span(Math.min(...xs), Math.max(...xs))
+  const [y, h] = span(Math.min(...ys), Math.max(...ys))
+  return { x, y, w, h }
+}
+
 function parsePidCells(svgText) {
   // Parse as XML so DOMParser decodes &lt; &gt; &quot; etc. in attributes
   const svgDoc = new DOMParser().parseFromString(svgText, 'image/svg+xml')
@@ -96,13 +124,17 @@ function parsePidCells(svgText) {
     // unlike a valve or instrument, whose glyph carries meaning.
     const isPiping = /shape=(waypoint|zigzag|link)\b|shape=mxgraph\.pid\.piping\./.test(style)
 
+    // An edge's own x/y are a label offset, so its box comes from the waypoints.
+    const box = isEdge ? edgeBounds(geo) : null
+
     raw[id] = {
-      x: parseFloat(geo.getAttribute('x')      ?? '0'),
-      y: parseFloat(geo.getAttribute('y')      ?? '0'),
-      w: parseFloat(geo.getAttribute('width')  ?? '0'),
-      h: parseFloat(geo.getAttribute('height') ?? '0'),
+      x: box?.x ?? parseFloat(geo.getAttribute('x')      ?? '0'),
+      y: box?.y ?? parseFloat(geo.getAttribute('y')      ?? '0'),
+      w: box?.w ?? parseFloat(geo.getAttribute('width')  ?? '0'),
+      h: box?.h ?? parseFloat(geo.getAttribute('height') ?? '0'),
       parent,
       isEdge,
+      hasBounds: !!box,
       rotation,
       isPiping,
     }
@@ -179,7 +211,13 @@ function parsePidCells(svgText) {
   const cells = {}
   for (const [id, cell] of Object.entries(raw)) {
     if (id === '0' || id === '1') continue
-    if (cell.isEdge) continue
+    // Edges are lines, not components, and are skipped — unless one was named by
+    // hand, which makes it an element the operator commands (the clamshell is
+    // drawn as the shell outline around the onboard tank, not as a valve symbol).
+    // drawio's own ids are random mixed-case strings; requiring an upper-case id
+    // keeps every auto-generated pipe run out, where a chance two-letter prefix
+    // (`PT…`, `AV…`) would otherwise conjure a card for a piece of pipe.
+    if (cell.isEdge && !(cell.hasBounds && NAMED_ID.test(id))) continue
     if (cell.w === 0 || cell.h === 0) continue
 
     const abs = resolveAbs(id)
@@ -194,7 +232,11 @@ function parsePidCells(svgText) {
       y: abs.y + (cell.h - h) / 2 + ty,
       w,
       h,
-      isPiping: cell.isPiping,
+      // An edge draws a line, so a card laid over it costs the operator nothing —
+      // the same exemption pipe runs already get. It also matters here: the
+      // clamshell outline encloses the onboard tank, and treating that box as an
+      // obstacle would shove the tank's own name plate off it.
+      isPiping: cell.isPiping || cell.isEdge,
     }
   }
 
