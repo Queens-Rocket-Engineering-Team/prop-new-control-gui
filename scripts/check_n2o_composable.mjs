@@ -39,10 +39,10 @@ function publish(readings, { connected = true } = {}) {
     sensors.push({ name, unit })
   }
   sensorData.value = next
-  devices.value = [{ name: 'HEATER_1', connected, sensors }]
+  devices.value = [{ name: 'HEATER1', connected, sensors }]
 }
 
-const TH = (i) => `HEATER_1_TH${i}`
+const TH = (i) => `HEATER1TH${i}`
 
 // ── Nothing at all ───────────────────────────────────────────────────────────
 publish({})
@@ -81,9 +81,16 @@ ok(sat.thermistorCount.value === 0, 'and the count says so')
 // Exact matching: a longer name that merely starts with a wanted one must not
 // be picked up. This is why the composable does not reuse control_panel.vue's
 // bidirectional startsWith matcher.
-publish({ HEATER_1_TH12: [999, 'CELSIUS'], [TH(2)]: [20, 'CELSIUS'] })
-close(sat.tankTempC.value, 20, 1e-9, 'HEATER_1_TH12 is not HEATER_1_TH1')
+publish({ HEATER1TH12: [999, 'CELSIUS'], [TH(2)]: [20, 'CELSIUS'] })
+close(sat.tankTempC.value, 20, 1e-9, 'HEATER1TH12 is not HEATER1TH1')
 ok(sat.thermistorCount.value === 1, 'and does not inflate the count')
+
+// ...but punctuation is not part of the name. The stand's channels are HEATER1TH1;
+// the drawing and older configs write HEATER_1_TH1. normalizeId strips separators,
+// so both resolve, and neither spelling needs a second entry in the constant.
+publish({ HEATER_1_TH1: [10, 'CELSIUS'], 'heater-1-th2': [20, 'CELSIUS'] })
+close(sat.tankTempC.value, 15, 1e-9, 'separators in the stream name are ignored')
+ok(sat.thermistorCount.value === 2, 'both punctuated spellings counted')
 
 // ── Temperature units ────────────────────────────────────────────────────────
 for (const [unit, value] of [['CELSIUS', 20], ['C', 20], ['°C', 20], ['degC', 20], ['K', 293.15], ['F', 68]]) {

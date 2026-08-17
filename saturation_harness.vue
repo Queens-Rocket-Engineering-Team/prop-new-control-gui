@@ -66,7 +66,7 @@ watchEffect(() => {
 
   // Replaced wholesale, like publishSnapshot does - not mutated in place.
   sensorData.value = next
-  devices.value = [{ name: 'HEATER_1', connected: deviceUp.value, sensors }]
+  devices.value = [{ name: 'HEATER1', connected: deviceUp.value, sensors }]
 })
 
 watchEffect(() => {
@@ -183,7 +183,7 @@ const PRESETS = [
         </label>
         <div v-for="th in thermistors" :key="th.name" class="th-row">
           <input v-model="th.attached" type="checkbox">
-          <span class="th-name">{{ th.name.replace('HEATER_1_', '') }}</span>
+          <span class="th-name">{{ th.name.replace('HEATER1', '') }}</span>
           <input v-model.number="th.c" type="number" step="1" :disabled="!th.attached">
           <span class="th-unit">°C</span>
         </div>

@@ -22,17 +22,17 @@ export const N2O_TANK_PT = 'PT202'
  * taken over whichever ones are actually reporting - see `thermistors`.
  */
 export const N2O_TANK_THERMISTORS = [
-  'HEATER_1_TH1',
-  'HEATER_1_TH2',
-  'HEATER_1_TH3',
-  'HEATER_1_TH4',
+  'HEATER1TH1',
+  'HEATER1TH2',
+  'HEATER1TH3',
+  'HEATER1TH4',
 ]
 
 /**
  * Range a tank thermistor has to be inside to count. A disconnected NTC does
  * not vanish from the stream - it rails to whatever the divider reads open or
  * shorted, or to a sentinel - and one railed channel drags an average of four
- * somewhere useless. Tune once real HEATER_1 hardware has been on the stand.
+ * somewhere useless. Tune once real HEATER1 hardware has been on the stand.
  */
 const PLAUSIBLE_TEMP_C = [-60, 120]
 
@@ -67,8 +67,8 @@ function toPsi(v, unit) {
  */
 export function useN2oSaturation(sensorData, devices) {
   // Exact normalized match, deliberately not the bidirectional startsWith that
-  // control_panel.vue's isSensorEnabled uses: that would make HEATER_1_TH1
-  // match a future HEATER_1_TH12 and quietly average the wrong channel.
+  // control_panel.vue's isSensorEnabled uses: that would make HEATER1TH1
+  // match a future HEATER1TH12 and quietly average the wrong channel.
   const byId = computed(() => {
     const map = new Map()
     for (const [name, info] of Object.entries(sensorData.value ?? {})) {
