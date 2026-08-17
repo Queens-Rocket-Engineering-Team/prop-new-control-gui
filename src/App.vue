@@ -15,7 +15,7 @@ import {
   noteDevicesPresent,
   noteStateDisconnected,
 } from "./composables/useSwitchSync.js";
-import { useControlLayer } from "./composables/useControlLayer.js";
+import { useControlLayer, isPidCardControl } from "./composables/useControlLayer.js";
 import { useServerApi, PREVIEW_STREAM_HZ } from "./composables/useServerApi.js";
 import { useStateStream } from "./composables/useStateStream.js";
 import { useTelemetryStream, normalizeDownsampleAlgorithm, TELEMETRY_WINDOW_SEC, TELEMETRY_WINDOW_OPTIONS } from "./composables/useTelemetryStream.js";
@@ -637,8 +637,6 @@ provide('flightTrack', flightTrack);
 // from /ws/state — are pushed separately whenever they change. Tare offsets
 // need no such push: the server applies them before the stream is sent.
 
-function _normalizeId(id) { return id.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() }
-
 // Only log states the device has actually confirmed. The server's
 // reported_status tells us which those are:
 //   'confirmed' — reported_state is the device's real current state → log it.
@@ -665,7 +663,9 @@ function pushControlStates() {
       if (!isConfirmedState(c)) continue;
       const st = c.reported_state ?? c.accepted_state;
       if (!st) continue;
-      if (_normalizeId(c.name).startsWith('av')) {
+      // Same split the panel makes — a control shown as a valve card is logged
+      // with valve polarity, so the CSV and the screen never disagree.
+      if (isPidCardControl(c.name)) {
         valveStateBits[c.name]     = st === 'OPEN' ? 1 : 0;
       } else {
         auxiliaryStateBits[c.name] = st === 'CLOSED' ? 1 : 0;

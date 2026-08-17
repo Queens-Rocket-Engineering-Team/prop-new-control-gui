@@ -23,6 +23,20 @@ import { useServerApi } from './useServerApi.js'
 import { useKeyBindings, controlKey } from './useKeyBindings.js'
 import { useSwitchSync } from './useSwitchSync.js'
 
+// Controls that own a card on the P&ID. They command with valve semantics (OPEN
+// is open) wherever they appear, which is the whole point of listing them: a
+// relay row — and the relay column of the CSV — reads CLOSED as energised, i.e.
+// ON, which is the state a valve card calls shut. One control described two ways
+// is how an operator ends up commanding the opposite of what they meant.
+//
+// Module-level so the panel and the recorder can't drift apart on it.
+export function isPidCardControl(name) {
+  const norm = name.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()
+  // The clamshell is drawn as the dotted shell outline around the onboard tank
+  // rather than as a valve symbol, so it has no AV tag to be recognised by.
+  return norm.startsWith('av') || norm.startsWith('clamshell')
+}
+
 /**
  * @param {object} deps  reactive state owned by App.vue
  * @param {import('vue').Ref<string>} deps.serverIp
@@ -166,13 +180,13 @@ export function useControlLayer({
     return !Number.isNaN(na) && !Number.isNaN(nb) && na === nb
   }
 
-  // ── Auxiliary controls (non-AV, BOOL server controls) ──────────────────────
+  // ── Auxiliary controls (BOOL server controls with no P&ID card) ────────────
 
   const auxiliaryControls = computed(() => {
     const result = []
     for (const dev of devices.value) {
       for (const ctrl of (dev.controls ?? [])) {
-        if (!normalizeId(ctrl.name).startsWith('av') && !isVariableType(ctrl.type)) {
+        if (!isPidCardControl(ctrl.name) && !isVariableType(ctrl.type)) {
           result.push({
             key:          ctrl.name,
             label:        toControlKey(ctrl.name),
