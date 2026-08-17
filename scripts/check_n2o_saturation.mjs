@@ -17,6 +17,8 @@ import {
   N2O_CRITICAL_C,
   N2O_CRITICAL_PSIA,
   PSI_PER_ATM,
+  psigOf,
+  psiaOf,
 } from '../src/lib/n2oSaturation.js'
 
 let checks = 0
@@ -100,9 +102,25 @@ for (const [t, p] of NIST_SPOT_CHECKS) {
 // instead of 20 C - wrong by little enough to look plausible on the card.
 const restingPsia = pSatFromT(20)
 close(restingPsia, 732.8, 1, 'N2O at 20 C sits near 732.8 psia (NIST)')
-const restingPsig = restingPsia - PSI_PER_ATM
+const restingPsig = psigOf(restingPsia)
 close(restingPsig, 718.1, 1, 'the same point in gauge terms')
 close(tSatFromP(restingPsig), 19.3, 0.2, 'feeding gauge psi in as absolute is wrong by ~0.7 C')
+
+// The card displays gauge and the table is absolute, so these two run on every
+// value the operator sees. They must be exact inverses and must not turn an
+// absent reading into a number.
+close(psigOf(restingPsia), restingPsia - PSI_PER_ATM, 1e-12, 'psigOf subtracts one atmosphere')
+close(psiaOf(restingPsig), restingPsia, 1e-9, 'psiaOf is its inverse')
+close(psiaOf(psigOf(1000)), 1000, 1e-9, 'gauge round trip')
+ok(psigOf(null) === null, 'psigOf(null) stays null, not -14.696')
+ok(psiaOf(null) === null, 'psiaOf(null) stays null')
+ok(psigOf(undefined) === null, 'psigOf(undefined) stays null')
+ok(psiaOf(undefined) === null, 'psiaOf(undefined) stays null')
+
+// A tank at 0 psig is at one atmosphere absolute - the vented case the card has
+// to render without inventing anything.
+close(psiaOf(0), PSI_PER_ATM, 1e-12, '0 psig is one atmosphere absolute')
+ok(tSatFromP(psiaOf(0)) !== null, 'a vented tank still has a saturation temperature')
 close(tSatFromP(restingPsig + PSI_PER_ATM), 20, 0.01, 'gauge -> absolute -> T_sat round trip')
 
 // ── 7. Curve windowing ───────────────────────────────────────────────────────

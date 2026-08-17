@@ -30,6 +30,21 @@ export const N2O_CRITICAL_PSIA = 1050.8
 /** Standard atmosphere, psi. PT202 reads gauge; the table is absolute. */
 export const PSI_PER_ATM = 14.696
 
+// The gauge/absolute seam, named once so no caller open-codes the offset. The
+// card displays gauge throughout because that is what the stand reads; the table
+// is absolute because that is what saturation pressure means. Everything between
+// those two facts is these two functions.
+//
+// Both pass null through: every caller is handling a reading that may be absent,
+// and `null - 14.696` is -14.696, which renders as a perfectly plausible
+// pressure instead of a blank.
+
+/** Absolute -> gauge. Display only. */
+export const psigOf = (psia) => (psia == null ? null : psia - PSI_PER_ATM)
+
+/** Gauge -> absolute, for anything about to be looked up in the table. */
+export const psiaOf = (psig) => (psig == null ? null : psig + PSI_PER_ATM)
+
 /**
  * Saturation temperatures, degrees C, strictly ascending.
  * Parallel to SAT_P_PSIA - two flat arrays rather than an array of pairs so a

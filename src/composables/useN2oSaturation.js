@@ -10,6 +10,7 @@ import { normalizeId } from './useSensorGroups.js'
 import {
   pSatFromT,
   tSatFromP,
+  psigOf,
   PSI_PER_ATM,
 } from '../lib/n2oSaturation.js'
 
@@ -182,6 +183,9 @@ export function useN2oSaturation(sensorData, devices) {
   /** Pressure the tank would sit at if it were saturated at this temperature. */
   const pSatPsia = computed(() => (tankTempC.value == null ? null : pSatFromT(tankTempC.value)))
 
+  /** The same figure in the units the stand reads. Display only. */
+  const pSatPsig = computed(() => psigOf(pSatPsia.value))
+
   // The same fact stated twice, in each axis's units. Both are shown so the two
   // instruments can be checked against each other: they must disagree in
   // magnitude but agree about which side of the curve the tank is on, so
@@ -194,6 +198,10 @@ export function useN2oSaturation(sensorData, devices) {
   const deltaTC = computed(() =>
     tankTempC.value != null && tSatC.value != null ? tankTempC.value - tSatC.value : null)
 
+  // Computed from the absolute pair, but it would be identical computed from the
+  // gauge pair: the atmosphere appears in both terms and cancels. It is a
+  // difference in psi, not a pressure, so it needs no gauge conversion for
+  // display and must not acquire one.
   const deltaPPsi = computed(() =>
     pressurePsia.value != null && pSatPsia.value != null ? pressurePsia.value - pSatPsia.value : null)
 
@@ -210,6 +218,7 @@ export function useN2oSaturation(sensorData, devices) {
     pressurePsia,
     tSatC,
     pSatPsia,
+    pSatPsig,
     deltaTC,
     deltaPPsi,
     hasPressure: computed(() => pressurePsia.value != null),

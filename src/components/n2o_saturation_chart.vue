@@ -17,13 +17,13 @@
 // group's blue), never judgement.
 
 import { computed } from 'vue'
-import { saturationCurve, pSatFromT, tSatFromP } from '../lib/n2oSaturation.js'
+import { saturationCurve, pSatFromT, tSatFromP, psigOf, psiaOf } from '../lib/n2oSaturation.js'
 
 const props = defineProps({
   /** Tank temperature, degrees C. null when no thermistor is available. */
   tempC: { type: Number, default: null },
-  /** Tank pressure, psia - ABSOLUTE. The caller adds the atmosphere. */
-  pressurePsia: { type: Number, default: null },
+  /** Tank pressure, psig - GAUGE, as the stand reads it. */
+  pressurePsig: { type: Number, default: null },
 
   // Frame. Covers the operating band rather than the whole saturation line:
   // triple-to-critical would squeeze everything interesting into the top fifth
@@ -32,7 +32,7 @@ const props = defineProps({
   tMinC: { type: Number, default: -40 },
   tMaxC: { type: Number, default: 40 },
   pMin: { type: Number, default: 0 },
-  pMax: { type: Number, default: 1100 },
+  pMax: { type: Number, default: 1050 }, // psig; the critical point is 1036.1
 
   width: { type: Number, default: 196 },
   height: { type: Number, default: 104 },
@@ -52,9 +52,13 @@ const bottom = computed(() => PAD.t + plotH.value)
 const xOf = (tC) => PAD.l + ((tC - props.tMinC) / (props.tMaxC - props.tMinC)) * plotW.value
 const yOf = (p) => PAD.t + (1 - (p - props.pMin) / (props.pMax - props.pMin)) * plotH.value
 
+// This chart is the one place that crosses the gauge/absolute seam in both
+// directions: it draws an absolute NIST table on a gauge axis, and it asks that
+// table questions about a gauge reading. Everything below the next two computeds
+// is in psig.
 const finite = (v) => (Number.isFinite(v) ? v : null)
 const tempC = computed(() => finite(props.tempC))
-const pressure = computed(() => finite(props.pressurePsia))
+const pressure = computed(() => finite(props.pressurePsig))
 
 const inX = (tC) => tC >= props.tMinC && tC <= props.tMaxC
 const inY = (p) => p >= props.pMin && p <= props.pMax
@@ -65,7 +69,7 @@ const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi)
 const curvePath = computed(() => {
   const pts = saturationCurve(props.tMinC, props.tMaxC)
   return pts
-    .map(([t, p], i) => `${i ? 'L' : 'M'}${xOf(t).toFixed(2)} ${yOf(p).toFixed(2)}`)
+    .map(([t, p], i) => `${i ? 'L' : 'M'}${xOf(t).toFixed(2)} ${yOf(psigOf(p)).toFixed(2)}`)
     .join(' ')
 })
 
@@ -76,8 +80,8 @@ const visibleTicksY = computed(() => Y_TICKS.filter(inY))
 // pressure, so it meets the curve at T_sat(P); the vertical sits at constant
 // temperature and meets it at P_sat(T). Drawing both means the gap between the
 // marker and each node IS the deviation the card prints as text.
-const satTempAtP = computed(() => (pressure.value == null ? null : tSatFromP(pressure.value)))
-const satPressAtT = computed(() => (tempC.value == null ? null : pSatFromT(tempC.value)))
+const satTempAtP = computed(() => (pressure.value == null ? null : tSatFromP(psiaOf(pressure.value))))
+const satPressAtT = computed(() => (tempC.value == null ? null : psigOf(pSatFromT(tempC.value))))
 
 const nodeAtP = computed(() => {
   const t = satTempAtP.value

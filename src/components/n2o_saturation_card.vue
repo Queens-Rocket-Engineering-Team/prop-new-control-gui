@@ -31,9 +31,8 @@ const {
   tankTempC,
   tempSpreadC,
   pressurePsig,
-  pressurePsia,
   tSatC,
-  pSatPsia,
+  pSatPsig,
   deltaTC,
   deltaPPsi,
   hasAnySource,
@@ -73,34 +72,32 @@ const countLabel = computed(() => `${thermistorCount.value}/${thermistorTotal}`)
     <N2oSaturationChart
       class="n2o-chart"
       :temp-c="tankTempC"
-      :pressure-psia="pressurePsia"
+      :pressure-psig="pressurePsig"
       :height="compact ? 72 : 104"
     />
 
+    <!-- Four columns: what was measured, then what the saturation curve makes of
+         it. Each derived value sits in the row of the reading it was computed
+         from - T_sat from pressure, P_sat from temperature - so a row reads
+         "this reading implies that". Every pressure here is gauge, matching the
+         PT202 card on the drawing; the maths behind them is absolute. -->
     <div class="n2o-rows">
       <div class="n2o-row">
         <span class="row-label">{{ N2O_TANK_PT }}</span>
-        <span class="row-value">{{ fmt(pressurePsia) }}<span class="row-unit">psia</span></span>
-        <span class="row-aside">{{ fmt(pressurePsig) }} psig</span>
+        <span class="row-value">{{ fmt(pressurePsig) }}<span class="row-unit">psig</span></span>
+        <span class="derived-label">T_sat</span>
+        <span class="derived-value">{{ fmt(tSatC) }}<span class="row-unit">°C</span></span>
       </div>
 
       <div class="n2o-row">
         <span class="row-label">T wall avg</span>
         <span class="row-value">{{ fmt(tankTempC) }}<span class="row-unit">°C</span></span>
-        <span class="row-aside">
-          {{ countLabel }}<template v-if="tempSpreadC != null"> · sp {{ fmt(tempSpreadC) }}</template>
-        </span>
+        <span class="derived-label">P_sat</span>
+        <span class="derived-value">{{ fmt(pSatPsig) }}<span class="row-unit">psig</span></span>
       </div>
 
-      <div class="n2o-row">
-        <span class="row-label">T_sat(P)</span>
-        <span class="row-value">{{ fmt(tSatC) }}<span class="row-unit">°C</span></span>
-        <span v-if="compact" class="row-aside">{{ fmt(pSatPsia) }} psia</span>
-      </div>
-
-      <div v-if="!compact" class="n2o-row">
-        <span class="row-label">P_sat(T)</span>
-        <span class="row-value">{{ fmt(pSatPsia) }}<span class="row-unit">psia</span></span>
+      <div class="n2o-meta">
+        {{ countLabel }}<template v-if="tempSpreadC != null"> · spread {{ fmt(tempSpreadC) }} °C</template>
       </div>
 
       <!-- Labelled literally rather than as a bare delta. The two carry opposite
@@ -109,7 +106,8 @@ const countLabel = computed(() => `${thermistorCount.value}/${thermistorTotal}`)
       <div class="n2o-row">
         <span class="row-label">T − T_sat</span>
         <span class="row-value">{{ fmtSigned(deltaTC) }}<span class="row-unit">°C</span></span>
-        <span class="row-aside">P − P_sat {{ fmtSigned(deltaPPsi) }}</span>
+        <span class="derived-label">P − P_sat</span>
+        <span class="derived-value">{{ fmtSigned(deltaPPsi) }}<span class="row-unit">psi</span></span>
       </div>
     </div>
   </div>
@@ -164,15 +162,20 @@ const countLabel = computed(() => `${thermistorCount.value}/${thermistorTotal}`)
   margin: 3px 6px 1px;
 }
 
+/* One grid for the whole block rather than a flex row each, so the derived
+   column lines up down the card. The row wrappers stay in the template for
+   readability and hand their children to the grid via display: contents. */
 .n2o-rows {
+  display: grid;
+  grid-template-columns: auto auto auto auto;
+  align-items: baseline;
+  column-gap: 4px;
   padding: 0 6px;
+  line-height: 1.5;
 }
 
 .n2o-row {
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
-  line-height: 1.5;
+  display: contents;
 }
 
 .row-label {
@@ -188,8 +191,8 @@ const countLabel = computed(() => `${thermistorCount.value}/${thermistorTotal}`)
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: var(--text-primary);
-  margin-left: auto;
   white-space: nowrap;
+  text-align: right;
 }
 
 .row-unit {
@@ -199,12 +202,28 @@ const countLabel = computed(() => `${thermistorCount.value}/${thermistorTotal}`)
   margin-left: 2px;
 }
 
-.row-aside {
+/* Lighter than the measured column: derived, not read. */
+.derived-label {
+  font-size: 7px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  text-align: right;
+  padding-left: 6px;
+}
+
+.derived-value {
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  text-align: right;
+}
+
+.n2o-meta {
+  grid-column: 1 / -1;
   font-size: 7px;
   font-variant-numeric: tabular-nums;
   color: var(--text-muted);
   white-space: nowrap;
-  min-width: 52px;
-  text-align: right;
 }
 </style>

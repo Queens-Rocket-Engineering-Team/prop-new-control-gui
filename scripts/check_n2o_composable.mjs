@@ -130,8 +130,28 @@ publish({ PT202: [500, 'PSI'], [TH(1)]: [20, 'CELSIUS'] })
 ok(sat.deltaTC.value > 0, 'boiling -> T - T_sat positive')
 ok(sat.deltaPPsi.value < 0, 'and P - P_sat negative')
 
+// ── Gauge display values ─────────────────────────────────────────────────────
+// The card shows gauge throughout while the maths stays absolute, so every
+// displayed pressure is one atmosphere below its internal counterpart.
+publish({ PT202: [718.1, 'PSI'], [TH(1)]: [20, 'CELSIUS'] })
+close(sat.pSatPsig.value, sat.pSatPsia.value - PSI_PER_ATM, 1e-12, 'pSatPsig is pSatPsia less one atmosphere')
+close(sat.pSatPsig.value, 718.1, 0.5, 'at equilibrium P_sat in gauge equals the PT202 reading')
+close(sat.pressurePsig.value, 718.1, 1e-9, 'and PT202 displays what it reported')
+
+publish({ PT202: [718.1, 'PSI'] })
+ok(sat.pSatPsig.value === null, 'no thermistors -> no P_sat, in gauge either')
+
+// The deviation is a difference, so the atmosphere cancels: the same physical
+// tank reported as PSI or PSIA must produce the identical number. This is the
+// assertion that stops someone "fixing" deltaPPsi with a conversion later.
+publish({ PT202: [718.1, 'PSI'], [TH(1)]: [16.9, 'CELSIUS'] })
+const deltaGauge = sat.deltaPPsi.value
+publish({ PT202: [718.1 + PSI_PER_ATM, 'PSIA'], [TH(1)]: [16.9, 'CELSIUS'] })
+close(sat.deltaPPsi.value, deltaGauge, 1e-9, 'P - P_sat is the same in gauge and absolute')
+
 // ── Out of range ─────────────────────────────────────────────────────────────
 publish({ PT202: [1100, 'PSI'], [TH(1)]: [40, 'CELSIUS'] })
+ok(sat.pSatPsig.value === null, 'above T-crit -> P_sat is null in gauge too')
 ok(sat.tSatC.value === null, 'supercritical pressure -> T_sat is null (renders as a dash)')
 ok(sat.pSatPsia.value === null, 'above T-crit -> P_sat is null')
 ok(sat.deltaTC.value === null, 'and neither delta is invented')
