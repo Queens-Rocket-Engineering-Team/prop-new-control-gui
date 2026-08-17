@@ -212,6 +212,17 @@ export function usePidOverlay(containerRef, cells, viewBox) {
     const placed = []
     const lines = []
 
+    // Fixed overlays — the top-left stack — aren't anchored to a cell, so they
+    // never appear in `items` and the solver has no idea they're there. Seeding
+    // `placed` with them means a displaced card routes around instead of sliding
+    // underneath. They're measured, not assumed: the stack's height changes with
+    // how much aux hardware the stand has.
+    for (const el of root.querySelectorAll('[data-pid-obstacle]')) {
+      const r = el.getBoundingClientRect()
+      if (!r.width || !r.height) continue
+      placed.push({ x: r.left - host.left, y: r.top - host.top, w: r.width, h: r.height })
+    }
+
     for (const it of items) {
       let dx = 0
       let dy = 0

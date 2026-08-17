@@ -12,6 +12,7 @@
 import { ref, inject, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import ToggleSwitch from 'primevue/toggleswitch'
 import PidDiagram from '../components/PidDiagram.vue'
+import N2oSaturationCard from '../components/n2o_saturation_card.vue'
 import { useKeyBindings, targetId } from '../composables/useKeyBindings.js'
 
 const devices      = inject('devices',      ref([]))
@@ -89,6 +90,16 @@ function sideFor(id, fallback) {
 function isPinned(id) {
   return SIDE_HINTS[pidConfig.value]?.[id] ? true : null
 }
+
+// The saturation card sits in the drawing's empty top-left corner, and that
+// corner is far shallower on hot-fire (empty to y≈164 of 844) than on the rocket
+// drawing (y≈310 of 994), so it runs a shorter layout there. Keyed by P&ID for
+// the same reason SIDE_HINTS is: the same overlay sits differently on each.
+const PID_SAT_LAYOUT = {
+  'hot-fire': 'compact',
+}
+
+const satLayout = computed(() => PID_SAT_LAYOUT[pidConfig.value] ?? 'full')
 
 // ── Dynamic element lists (populated from parsed SVG cells) ──────────────────
 
@@ -226,139 +237,156 @@ const estopKey = computed(() => keyForTarget.value[targetId({ type: 'estop' })])
     <PidDiagram :svg-url="svgUrl" @cells-parsed="onCellsParsed">
       <template #default="{ positionOf, positionBeside }">
 
-        <!-- ── Auxiliary controls panel (fixed top-left) ── -->
-        <div
-          v-if="auxiliaryControls.length > 0 || variableControls.length > 0 || kasaDevices.length > 0"
-          class="pid-overlay aux-panel"
-        >
-          <div class="aux-header">Aux Controls</div>
-          <div
-            v-for="ctrl in auxiliaryControls"
-            :key="ctrl.key"
-            class="aux-row"
-            :class="{ offline: isAuxOffline(ctrl.key) }"
-          >
-            <span class="aux-label">{{ ctrl.label }}</span>
-            <span class="card-badge">{{ ctrl.defaultState }}</span>
-            <span
-              class="state-indicator"
-              :class="
-                isAuxOffline(ctrl.key) ? 'relay-offline' :
-                isAuxPending(ctrl.key) ? 'relay-pending' :
-                isAuxError(ctrl.key)   ? 'relay-error' :
-                isAuxWarning(ctrl.key) ? 'relay-warning' :
-                getAuxDisplayed(ctrl.key) ? 'relay-closed' : 'relay-open'
-              "
-            >
-              <span class="state-led" />
-              <span v-if="isAuxOffline(ctrl.key)">{{ getAuxDisplayed(ctrl.key) ? 'CLOSED' : 'OPEN' }}</span>
-              <span v-else-if="isAuxPending(ctrl.key)">PENDING…</span>
-              <span v-else-if="isAuxError(ctrl.key)">ERROR</span>
-              <span v-else-if="isAuxWarning(ctrl.key)">WARN</span>
-              <span v-else>{{ getAuxDisplayed(ctrl.key) ? 'CLOSED' : 'OPEN' }}</span>
-            </span>
-            <ToggleSwitch
-              :modelValue="getAuxDisplayed(ctrl.key)"
-              :disabled="isAuxOffline(ctrl.key) || isAuxLocked(ctrl.key) || readOnly"
-              @update:modelValue="onAuxToggle(ctrl.key, $event)"
-              class="aux-toggle"
-            />
-          </div>
+        <!-- ── Fixed top-left stack: aux controls, then the saturation card ──
+             A column rather than two absolutely-positioned overlays so the card
+             follows the aux panel's height, and rises to the corner on its own
+             when the stand has no aux hardware.
 
-          <!-- Variable (numeric) controls -->
-          <template v-if="variableControls.length > 0">
-            <div class="aux-section-sep" v-if="auxiliaryControls.length > 0" />
-            <div class="aux-section-label">Variable Controls</div>
+             Neither child carries data-pid-cell, so the overlay solver ignores
+             both (it selects [data-pid-cell] only). The wrapper omits
+             .pid-overlay so it stays pointer-events:none over its whole
+             footprint; the aux panel opts back in because its toggles need
+             clicks. The saturation card deliberately does not - it is a passive
+             readout, and leaving the class off is the whole implementation of
+             that. -->
+        <div class="tl-stack" data-pid-obstacle>
+
+          <!-- ── Auxiliary controls panel ── -->
+          <div
+            v-if="auxiliaryControls.length > 0 || variableControls.length > 0 || kasaDevices.length > 0"
+            class="pid-overlay aux-panel"
+          >
+            <div class="aux-header">Aux Controls</div>
             <div
-              v-for="ctrl in variableControls"
+              v-for="ctrl in auxiliaryControls"
               :key="ctrl.key"
-              class="aux-row variable-row"
+              class="aux-row"
               :class="{ offline: isAuxOffline(ctrl.key) }"
             >
               <span class="aux-label">{{ ctrl.label }}</span>
-              <span class="card-badge">{{ ctrl.defaultState }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
+              <span class="card-badge">{{ ctrl.defaultState }}</span>
               <span
                 class="state-indicator"
-                :class="{
-                  'relay-offline': isAuxOffline(ctrl.key),
-                  'relay-pending': isAuxPending(ctrl.key) && !isAuxOffline(ctrl.key),
-                  'relay-error':   isAuxError(ctrl.key)   && !isAuxPending(ctrl.key) && !isAuxOffline(ctrl.key),
-                  'relay-warning': isAuxWarning(ctrl.key) && !isAuxError(ctrl.key) && !isAuxPending(ctrl.key) && !isAuxOffline(ctrl.key),
-                }"
+                :class="
+                  isAuxOffline(ctrl.key) ? 'relay-offline' :
+                  isAuxPending(ctrl.key) ? 'relay-pending' :
+                  isAuxError(ctrl.key)   ? 'relay-error' :
+                  isAuxWarning(ctrl.key) ? 'relay-warning' :
+                  getAuxDisplayed(ctrl.key) ? 'relay-closed' : 'relay-open'
+                "
               >
                 <span class="state-led" />
-                <span v-if="isAuxOffline(ctrl.key)">{{ getVariableValue(ctrl.key) }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
+                <span v-if="isAuxOffline(ctrl.key)">{{ getAuxDisplayed(ctrl.key) ? 'CLOSED' : 'OPEN' }}</span>
                 <span v-else-if="isAuxPending(ctrl.key)">PENDING…</span>
                 <span v-else-if="isAuxError(ctrl.key)">ERROR</span>
                 <span v-else-if="isAuxWarning(ctrl.key)">WARN</span>
-                <span v-else>{{ getVariableValue(ctrl.key) }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
-              </span>
-              <button
-                class="variable-edit-btn"
-                :disabled="isAuxOffline(ctrl.key) || isAuxLocked(ctrl.key) || readOnly"
-                @click="toggleVariableEditor(ctrl.key)"
-                :title="readOnly ? 'Controls are issued from launch control' : isAuxOffline(ctrl.key) ? 'Device offline' : 'Set value'"
-              >
-                <i class="pi pi-pencil" />
-              </button>
-
-              <!-- Numeric input popover -->
-              <div v-if="openVariableEditor === ctrl.key" class="variable-popover">
-                <div class="variable-popover-caret" />
-                <div class="variable-popover-row">
-                  <div class="variable-input-wrap">
-                    <input
-                      v-model="variableInput"
-                      type="number"
-                      step="any"
-                      class="variable-input"
-                      :class="{ 'has-unit': ctrl.unit }"
-                      autofocus
-                      @keydown.enter="submitVariableControl(ctrl.key)"
-                      @keydown.esc="cancelVariableEditor"
-                    />
-                    <span v-if="ctrl.unit" class="variable-input-unit">{{ ctrl.unit }}</span>
-                  </div>
-                  <button
-                    class="variable-confirm-btn"
-                    :disabled="variableInput === '' || Number.isNaN(Number(variableInput))"
-                    title="Confirm"
-                    @click="submitVariableControl(ctrl.key)"
-                  ><i class="pi pi-check" /></button>
-                  <button class="variable-cancel-btn" title="Cancel" @click="cancelVariableEditor">
-                    <i class="pi pi-times" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          </template>
-
-          <!-- Kasa Smart Plugs -->
-          <template v-if="kasaDevices.length > 0">
-            <div class="aux-section-sep" v-if="auxiliaryControls.length > 0 || variableControls.length > 0" />
-            <div class="aux-section-label">Smart Plugs</div>
-            <div
-              v-for="dev in kasaDevices"
-              :key="dev.host"
-              class="aux-row"
-              :class="{ offline: dev.connected === false }"
-            >
-              <span class="aux-label">{{ dev.alias || dev.host }}</span>
-              <span
-                class="state-indicator"
-                :class="dev.connected === false ? 'relay-offline' : dev.active ? 'relay-closed' : 'relay-open'"
-              >
-                <span class="state-led" />
-                {{ dev.active ? 'ON' : 'OFF' }}
+                <span v-else>{{ getAuxDisplayed(ctrl.key) ? 'CLOSED' : 'OPEN' }}</span>
               </span>
               <ToggleSwitch
-                :modelValue="dev.active"
-                :disabled="dev.connected === false || readOnly"
-                @update:modelValue="setKasaState(dev.host, $event)"
+                :modelValue="getAuxDisplayed(ctrl.key)"
+                :disabled="isAuxOffline(ctrl.key) || isAuxLocked(ctrl.key) || readOnly"
+                @update:modelValue="onAuxToggle(ctrl.key, $event)"
                 class="aux-toggle"
               />
             </div>
-          </template>
+
+            <!-- Variable (numeric) controls -->
+            <template v-if="variableControls.length > 0">
+              <div class="aux-section-sep" v-if="auxiliaryControls.length > 0" />
+              <div class="aux-section-label">Variable Controls</div>
+              <div
+                v-for="ctrl in variableControls"
+                :key="ctrl.key"
+                class="aux-row variable-row"
+                :class="{ offline: isAuxOffline(ctrl.key) }"
+              >
+                <span class="aux-label">{{ ctrl.label }}</span>
+                <span class="card-badge">{{ ctrl.defaultState }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
+                <span
+                  class="state-indicator"
+                  :class="{
+                    'relay-offline': isAuxOffline(ctrl.key),
+                    'relay-pending': isAuxPending(ctrl.key) && !isAuxOffline(ctrl.key),
+                    'relay-error':   isAuxError(ctrl.key)   && !isAuxPending(ctrl.key) && !isAuxOffline(ctrl.key),
+                    'relay-warning': isAuxWarning(ctrl.key) && !isAuxError(ctrl.key) && !isAuxPending(ctrl.key) && !isAuxOffline(ctrl.key),
+                  }"
+                >
+                  <span class="state-led" />
+                  <span v-if="isAuxOffline(ctrl.key)">{{ getVariableValue(ctrl.key) }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
+                  <span v-else-if="isAuxPending(ctrl.key)">PENDING…</span>
+                  <span v-else-if="isAuxError(ctrl.key)">ERROR</span>
+                  <span v-else-if="isAuxWarning(ctrl.key)">WARN</span>
+                  <span v-else>{{ getVariableValue(ctrl.key) }}<span v-if="ctrl.unit" class="variable-unit">{{ ctrl.unit }}</span></span>
+                </span>
+                <button
+                  class="variable-edit-btn"
+                  :disabled="isAuxOffline(ctrl.key) || isAuxLocked(ctrl.key) || readOnly"
+                  @click="toggleVariableEditor(ctrl.key)"
+                  :title="readOnly ? 'Controls are issued from launch control' : isAuxOffline(ctrl.key) ? 'Device offline' : 'Set value'"
+                >
+                  <i class="pi pi-pencil" />
+                </button>
+
+                <!-- Numeric input popover -->
+                <div v-if="openVariableEditor === ctrl.key" class="variable-popover">
+                  <div class="variable-popover-caret" />
+                  <div class="variable-popover-row">
+                    <div class="variable-input-wrap">
+                      <input
+                        v-model="variableInput"
+                        type="number"
+                        step="any"
+                        class="variable-input"
+                        :class="{ 'has-unit': ctrl.unit }"
+                        autofocus
+                        @keydown.enter="submitVariableControl(ctrl.key)"
+                        @keydown.esc="cancelVariableEditor"
+                      />
+                      <span v-if="ctrl.unit" class="variable-input-unit">{{ ctrl.unit }}</span>
+                    </div>
+                    <button
+                      class="variable-confirm-btn"
+                      :disabled="variableInput === '' || Number.isNaN(Number(variableInput))"
+                      title="Confirm"
+                      @click="submitVariableControl(ctrl.key)"
+                    ><i class="pi pi-check" /></button>
+                    <button class="variable-cancel-btn" title="Cancel" @click="cancelVariableEditor">
+                      <i class="pi pi-times" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- Kasa Smart Plugs -->
+            <template v-if="kasaDevices.length > 0">
+              <div class="aux-section-sep" v-if="auxiliaryControls.length > 0 || variableControls.length > 0" />
+              <div class="aux-section-label">Smart Plugs</div>
+              <div
+                v-for="dev in kasaDevices"
+                :key="dev.host"
+                class="aux-row"
+                :class="{ offline: dev.connected === false }"
+              >
+                <span class="aux-label">{{ dev.alias || dev.host }}</span>
+                <span
+                  class="state-indicator"
+                  :class="dev.connected === false ? 'relay-offline' : dev.active ? 'relay-closed' : 'relay-open'"
+                >
+                  <span class="state-led" />
+                  {{ dev.active ? 'ON' : 'OFF' }}
+                </span>
+                <ToggleSwitch
+                  :modelValue="dev.active"
+                  :disabled="dev.connected === false || readOnly"
+                  @update:modelValue="setKasaState(dev.host, $event)"
+                  class="aux-toggle"
+                />
+              </div>
+            </template>
+          </div>
+
+          <N2oSaturationCard :layout="satLayout" />
         </div>
 
         <!-- ── Actuated valve cards ── -->
@@ -901,12 +929,31 @@ const estopKey = computed(() => keyForTarget.value[targetId({ type: 'estop' })])
   color: var(--text-muted);
 }
 
-/* ── Auxiliary controls panel ── */
+/* ── Fixed top-left stack ── */
+/* Holds the aux panel and the saturation card in one column in the drawing's
+   empty corner. z-index is a deliberate change: the aux panel used to have none,
+   so a displaced sensor card could paint over it. With a chart in the stack,
+   covering a stray card reads better than being half-covered by one. */
 
-.aux-panel {
+.tl-stack {
   position: absolute;
   top: 12px;
   left: 12px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;  /* otherwise flex stretches both to one width */
+  gap: 8px;
+  width: max-content;
+  max-width: 42%;
+  pointer-events: none;
+}
+
+/* ── Auxiliary controls panel ── */
+
+/* Placement moved to .tl-stack — an absolutely-positioned child would leave the
+   column's flow and let the saturation card slide up underneath it. */
+.aux-panel {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: 4px;
